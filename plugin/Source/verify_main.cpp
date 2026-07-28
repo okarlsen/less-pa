@@ -3531,6 +3531,16 @@ static int runSubbandProbeMode(const char* micPath, const char* refPath, double 
         { "sb_4k8k_thr32",   true, 1, 15, 32, 64, 32.0f,  1.0f, 4 },
         { "sb_4k8k_thr64",   true, 1, 15, 32, 64, 64.0f,  1.0f, 4 },
         { "sb_4k8k_thr128",  true, 1, 15, 32, 64, 128.0f, 1.0f, 4 },
+        // Refinement around the first full run's sweet spot (2-4kHz showed
+        // by far the sharpest quiet-PA selectivity; 4-8kHz was dead, 2-6kHz
+        // just behaved like a diluted 2-4kHz): finer threshold steps, plus
+        // an nearend_average_blocks 1/16 A/B at the anchor threshold to see
+        // how much of the raw per-block flappiness (no hold mechanism
+        // exists in this detector) in-config smoothing alone can absorb.
+        { "sb_2k4k_thr48",   true, 1, 15, 16, 32, 48.0f,  1.0f, 4 },
+        { "sb_2k4k_thr96",   true, 1, 15, 16, 32, 96.0f,  1.0f, 4 },
+        { "sb_2k4k_t64avg1", true, 1, 15, 16, 32, 64.0f,  1.0f, 1 },
+        { "sb_2k4k_t64avg16",true, 1, 15, 16, 32, 64.0f,  1.0f, 16 },
     };
 
     // Baseline first: the shipping dominant detector at this venue's
