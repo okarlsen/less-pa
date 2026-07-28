@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//usr/local/bin/**)",
+      "Read(//Applications/**)",
+      "Bash(./build/PAEchoCancellerVerify_artefacts/Debug/PAEchoCancellerVerify)",
+      "Bash(cmake --build build --target PAEchoCancellerVerify -j 8)",
+      "Bash(auval -v aufx Paec Peco)",
+      "Bash(cmake --build build --target PAEchoCanceller_VST3 -j 8)",
+      "Bash(cmake --build build --target PAEchoCanceller_AU PAEchoCanceller_VST3 -j 8)",
+      "Bash(cmake -S . -B build)",
+      "Bash(cmake --build build --target PAEchoCancellerVerify -j)",
+      "Bash(cmake --build build --target PAEchoCanceller_AU PAEchoCanceller_VST3 -j)",
+      "Bash(auval -v aufx LesP Sgtm)",
+      "Bash(ninja -t targets)",
+      "Bash(cmake --build . --target PAEchoCancellerVerify -j 8)",
+      "Bash(./PAEchoCancellerVerify_artefacts/Debug/PAEchoCancellerVerify)",
+      "Bash(cmake --build . --target PAEchoCanceller_AU PAEchoCanceller_VST3 -j 8)",
+      "Bash(echo \"exit=$?\")",
+      "Read(//tmp/**)",
+      "Bash(./PAEchoCancellerVerify_artefacts/Debug/PAEchoCancellerVerify > /tmp/verify_out2.txt 2>&1; echo \"exit=$?\"; grep -n \"Dry/Wet\\\\|getLatencySamples\\(\\) accuracy\\\\|ALL TESTS\\\\|SOME TESTS\\\\|CHECK\" /tmp/verify_out2.txt)",
+      "Bash(cp verify_main.cpp /tmp/vm_backup.cpp)",
+      "Bash(python3 -)",
+      "Bash(sed -i '' '1s|.*|#include \"/Users/oystein/Developer/pa-echo-canceller/plugin/Source/FrameFifo.h\"|' fifo_bench.cpp)",
+      "Bash(clang++ -O2 -std=c++17 fifo_bench.cpp -o fifo_bench)",
+      "Bash(./fifo_bench)",
+      "Bash(python3 -c ' *)",
+      "Bash(cmake -B build-release -DCMAKE_BUILD_TYPE=Release -G Ninja)",
+      "Bash(echo \"configure exit=$?\")",
+      "Bash(./build-release/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify)",
+      "Bash(echo \"exit=$? \\(139 = SIGSEGV\\)\")",
+      "Bash(cmake --build . --target PAEchoCanceller_AU PAEchoCanceller_VST3 PAEchoCancellerVerify -j 8)",
+      "Bash(./PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify)",
+      "Bash(ls -la /Users/oystein/Developer/aax-sdk-2-9-0 | head -30)",
+      "Bash(cmake .)",
+      "Bash(cmake --build . --target PAEchoCanceller_AAX -j 8)",
+      "Read(//Library/Application Support/Avid/Audio/Plug-Ins/Less PA.aaxplugin/Contents/MacOS/**)",
+      "Bash(ls /Users/oystein/Desktop/Less_PA_Investigation_Report.md 2>&1; ls -d \"/Users/oystein/Developer/pa-echo-canceller/~\" 2>/dev/null && find \"/Users/oystein/Developer/pa-echo-canceller/~\" -type f)"
+    ]
+  }
+}

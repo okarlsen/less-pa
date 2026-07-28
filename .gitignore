@@ -1,0 +1,26 @@
+# Build artifacts (regenerable via CMake/meson)
+plugin/build/
+plugin/build-release/
+aec3-offline-test/*.o
+aec3-offline-test/aec3_offline_test
+aec3-offline-test/peaks/
+
+# This is itself a git repository (a clone of upstream webrtc-audio-processing
+# with our own AEC3 patch committed locally on top -- see its own git log).
+# Excluded here rather than added as a submodule: it protects itself via its
+# own commit history, and a submodule reference would just be one more thing
+# to keep in sync for no benefit at this project's scale.
+webrtc-audio-processing/
+
+# Vendored third-party framework, unmodified -- not something this project
+# patches, and large enough (~400MB) that tracking it here adds no value.
+JUCE/
+
+# Real test recordings and generated harness/test outputs (WAVs, CSV
+# reports) -- large binary material, not source, and not something that
+# needs a diffable history.
+temp/
+*.wav
+*.csv
+
+.DS_Store
