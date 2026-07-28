@@ -6,7 +6,7 @@
 PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoCancellerAudioProcessor& p)
     : AudioProcessorEditor(&p), processor(p)
 {
-    setSize(320, 768);
+    setSize(320, 838); // grown 70px for the Near-end Detector row -- see resized()
 
     helpButton.onClick = [this] { showHelpDialog(); };
     addAndMakeVisible(helpButton);
@@ -32,6 +32,14 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     limitHfGainToggle.onClick = [this] { limitHfGainToggleChanged(); };
     addAndMakeVisible(limitHfGainToggle);
+
+    nearendDetectorLabel.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(nearendDetectorLabel);
+
+    nearendDetectorCombo.addItem("Classic", 1);
+    nearendDetectorCombo.addItem("Subband (2-4kHz)", 2);
+    nearendDetectorCombo.onChange = [this] { nearendDetectorComboChanged(); };
+    addAndMakeVisible(nearendDetectorCombo);
 
     nearendSensitivityLabel.setJustificationType(juce::Justification::centred);
     addAndMakeVisible(nearendSensitivityLabel);
@@ -115,6 +123,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     updateTailLengthCombo();
     updateSuppressionStrengthCombo();
     updateLimitHfGainToggle();
+    updateNearendDetectorCombo();
     updateNearendSensitivitySlider();
     updateProtectionHoldTimeSlider();
     updateHpfSlider();
@@ -162,6 +171,13 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     bounds.removeFromTop(10);
     auto hfToggleArea = bounds.removeFromTop(24);
     limitHfGainToggle.setBounds(hfToggleArea.withSizeKeepingCentre(160, hfToggleArea.getHeight()));
+
+    bounds.removeFromTop(16);
+
+    nearendDetectorLabel.setBounds(bounds.removeFromTop(20));
+    bounds.removeFromTop(6);
+    auto detectorComboArea = bounds.removeFromTop(28);
+    nearendDetectorCombo.setBounds(detectorComboArea.withSizeKeepingCentre(170, detectorComboArea.getHeight()));
 
     bounds.removeFromTop(16);
 
@@ -284,6 +300,23 @@ void PAEchoCancellerAudioProcessorEditor::updateLimitHfGainToggle()
         limitHfGainToggle.setToggleState(current, juce::dontSendNotification);
 }
 
+void PAEchoCancellerAudioProcessorEditor::nearendDetectorComboChanged()
+{
+    const int index = nearendDetectorCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
+    auto* param = processor.getNearendDetectorParameter();
+    const float normalized = param->convertTo0to1(static_cast<float>(index));
+    param->beginChangeGesture();
+    param->setValueNotifyingHost(normalized);
+    param->endChangeGesture();
+}
+
+void PAEchoCancellerAudioProcessorEditor::updateNearendDetectorCombo()
+{
+    const int currentId = processor.getNearendDetectorParameter()->getIndex() + 1;
+    if (nearendDetectorCombo.getSelectedId() != currentId)
+        nearendDetectorCombo.setSelectedId(currentId, juce::dontSendNotification);
+}
+
 void PAEchoCancellerAudioProcessorEditor::nearendSensitivitySliderChanged()
 {
     auto* param = processor.getNearendSensitivityParameter();
@@ -394,6 +427,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     updateTailLengthCombo();
     updateSuppressionStrengthCombo();
     updateLimitHfGainToggle();
+    updateNearendDetectorCombo();
     updateNearendSensitivitySlider();
     updateProtectionHoldTimeSlider();
     updateHpfSlider();
@@ -523,11 +557,22 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "hasn't fully converged yet. Usually leave off; try it if you hear "
         "excess high-end leakage. Applies live.\n"
         "\n"
+        "NEAR-END DETECTOR\n"
+        "Which method decides that a moment is genuine audience content. "
+        "Classic watches the overall low-frequency balance and protects "
+        "most of the time -- the safe default. Subband (2-4kHz) compares "
+        "bass against the 2-4kHz range where crowd sound actually lives, "
+        "so it protects less often but much more specifically in the gaps "
+        "between PA content. They are different characters, not a "
+        "better/worse pair -- A/B them by ear on your material. Applies "
+        "live.\n"
+        "\n"
         "NEAR-END SENSITIVITY\n"
-        "How readily the plugin decides a moment is genuine audience "
-        "content worth protecting, rather than echo to remove. Higher lets "
-        "more real audience sound through during simultaneous PA + crowd "
-        "moments. Applies live.\n"
+        "How readily the active detector decides a moment is genuine "
+        "audience content worth protecting, rather than echo to remove. "
+        "Higher lets more real audience sound through during simultaneous "
+        "PA + crowd moments. Works for both detector choices. Applies "
+        "live.\n"
         "\n"
         "PROTECTION HOLD TIME\n"
         "How long that protection lasts after it triggers before reverting "

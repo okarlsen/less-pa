@@ -22,6 +22,8 @@ private:
     void updateSuppressionStrengthCombo();
     void limitHfGainToggleChanged();
     void updateLimitHfGainToggle();
+    void nearendDetectorComboChanged();
+    void updateNearendDetectorCombo();
     void nearendSensitivitySliderChanged();
     void updateNearendSensitivitySlider();
     void protectionHoldTimeSliderChanged();
@@ -47,6 +49,14 @@ private:
     juce::ComboBox suppressionStrengthCombo;
 
     juce::ToggleButton limitHfGainToggle{ "Limit HF Gain" };
+
+    // Which detector decides "this moment is genuine audience content" at
+    // all -- Classic (protects most of the time) vs the venue-measured
+    // Subband (protects specifically in PA gaps). An explicit A/B ComboBox
+    // rather than a toggle so both choices are visible by name; applies
+    // live like the other suppressor controls.
+    juce::Label nearendDetectorLabel{ "nearendDetectorLabel", "Near-end Detector" };
+    juce::ComboBox nearendDetectorCombo;
 
     // Both apply live (see applySuppressorConfigLive in PluginProcessor.h),
     // but still only commit their value -- via nearendSensitivitySliderChanged()/

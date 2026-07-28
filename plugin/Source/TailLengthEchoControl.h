@@ -59,15 +59,77 @@ inline void applyNearendSensitivity(float sensitivityPercent, webrtc::EchoCancel
     config.suppressor.dominant_nearend_detection.enr_exit_threshold = enrThreshold * 10.0f;
 }
 
-// Protection Hold Time: once DominantNearendDetector triggers, how long
-// (hold_duration, in 4ms blocks) it keeps using nearend_tuning before
+// Protection Hold Time: once the active near-end detector triggers, how
+// long (hold_duration, in 4ms blocks) it keeps using nearend_tuning before
 // reverting to normal_tuning. Too long and real PA echo can slip through
 // in the tail after genuine audience content stops -- a likely source of
 // artifacts appearing right after the near-end-protection fix started
-// actually working.
+// actually working. Set on BOTH detectors' config unconditionally (only
+// the active one reads its copy): the subband detector's hold field is our
+// own vendored patch (see subband_nearend_detector.cc), added because the
+// stock subband detector recomputes its state every 4ms block and flips
+// ~14/s on real material vs the dominant detector's 0.82/s.
 inline void applyProtectionHoldTime(float holdTimeMs, webrtc::EchoCanceller3Config& config) {
     const int holdBlocks = juce::jmax(1, static_cast<int>(std::round(holdTimeMs / 4.0f)));
     config.suppressor.dominant_nearend_detection.hold_duration = holdBlocks;
+    config.suppressor.subband_nearend_detection.hold_duration = holdBlocks;
+}
+
+// Near-end Detector "Subband (2-4kHz)": swaps DominantNearendDetector for
+// AEC3's SubbandNearendDetector with a band pair measured on this plugin's
+// reference venue (90s of real 10k-capacity-hall audience-mic/PA-feed
+// recordings, --subband-probe in verify_main.cpp, 2026-07-28): comparing
+// 125-1875Hz (subband1, the same band the dominant detector hardcodes)
+// against 2-4kHz (subband2) discriminates that venue's crowd from its PA
+// roughly an order of magnitude more sharply than the shipping detector
+// (quiet-PA-quartile vs loud-PA-quartile trigger selectivity 11-17:1 at
+// nearend_threshold 32-64, vs 1.2:1 for the dominant baseline). The bands
+// are deliberately NOT exposed as UI: the measurement validated exactly
+// this one pair on one venue, and a bin-index control would be an
+// invitation to misconfigure. Measured dead ends, so they don't get
+// re-proposed: 4-8kHz as subband2 (0.4% trigger rate -- crowd energy on a
+// distant audience mic doesn't reach it), 2-6kHz (just a diluted 2-4kHz),
+// and nearend_threshold 1-8 (~0% triggers everywhere -- the post-HPF low
+// band far outpowers the mid/high averages on this material, so useful
+// ratios start above that).
+//
+// The two detectors have opposite postures on the same material (dominant
+// ~88% of blocks in protected state, subband ~32%): this is a change of
+// character, not a tuning tweak, which is why it ships as an explicit
+// user-facing A/B toggle defaulting to Classic rather than as a silent
+// replacement (the comfort-noise regression is the precedent for why the
+// listening test, not these numbers, is the acceptance gate).
+inline void applyNearendDetectorChoice(int nearendDetectorIndex, float sensitivityPercent,
+                                        webrtc::EchoCanceller3Config& config) {
+    if (nearendDetectorIndex != 1)
+        return; // Classic: keep AEC3's DominantNearendDetector (fields set by applyNearendSensitivity)
+
+    config.suppressor.use_subband_nearend_detection = true;
+    auto& sd = config.suppressor.subband_nearend_detection;
+    sd.subband1 = { 1, 15 };  // 125-1875Hz -- same band the dominant detector uses
+    sd.subband2 = { 16, 32 }; // 2-4kHz -- where this venue's crowd energy actually sits
+    // 64ms input smoothing: the probe's nearend_average_blocks 1/16 A/B
+    // showed 16 cuts raw flip rate 14/s -> 4.0/s before the hold even acts;
+    // smoothing and the hold are complementary (see subband_nearend_detector.cc).
+    sd.nearend_average_blocks = 16;
+    // Matches the noise gate the dominant detector effectively runs at the
+    // 75% Near-end Sensitivity default (snr = 30*(1/60)^0.75 ~= 1.4), so the
+    // band-ratio test stays the discriminating variable.
+    sd.snr_threshold = 1.0f;
+    // Near-end Sensitivity remaps to nearend_threshold here (the dominant
+    // fields it also set are simply unread on this path): log-spaced 8->128,
+    // i.e. 8 * 16^t, chosen so the measured sweet spot 32-64 spans the
+    // 50%-75% positions and the shipped 75% default lands exactly on 64 --
+    // the plan's first guess of 16->128 would put 75% at ~76, just outside
+    // the measured sweet spot, so the range was widened one octave down
+    // instead. The bottom quarter (8-16) measured near-dead (~0% triggers),
+    // which mirrors the Classic path's own 0% = "close to stock, barely
+    // triggers" character rather than wasting travel.
+    const float t = juce::jlimit(0.0f, 1.0f, sensitivityPercent / 100.0f);
+    sd.nearend_threshold = 8.0f * std::pow(16.0f, t);
+    // hold_duration comes from applyProtectionHoldTime (both detectors);
+    // trigger_threshold stays at the vendored default (12 blocks), matching
+    // the dominant detector's, so the two A/B sides debounce identically.
 }
 
 // Suppression Strength dials back AEC3's nonlinear suppressor -- the part
@@ -126,14 +188,20 @@ inline void applySuppressionStrength(int suppressionStrengthIndex, webrtc::EchoC
     }
 }
 
-// The two trailing parameters are defaulted so the verify harness can sweep
-// them (--linear-probe in verify_main.cpp) without every plugin call site
-// having to name them; the defaults ARE the shipped values.
+// The trailing parameters are defaulted so the verify harness can sweep
+// erleMin/comfortNoiseFloorDbfs (--linear-probe in verify_main.cpp) without
+// every plugin call site having to name them; the defaults ARE the shipped
+// values. nearendDetectorIndex sits after them (appended, not inserted)
+// because existing harness call sites pass erleMin positionally, and an int
+// parameter appearing at that position would accept a float literal via
+// silent implicit conversion -- plugin call sites therefore spell out the
+// two shipped defaults to reach it.
 inline webrtc::EchoCanceller3Config makeEchoCanceller3Config(int tailLengthIndex, int suppressionStrengthIndex,
                                                               bool limitHfGain, float nearendSensitivityPercent,
                                                               float protectionHoldTimeMs,
                                                               float erleMin = 4.0f,
-                                                              float comfortNoiseFloorDbfs = -96.0f) {
+                                                              float comfortNoiseFloorDbfs = -96.0f,
+                                                              int nearendDetectorIndex = 0) {
     webrtc::EchoCanceller3Config config;
     const size_t lengthBlocks = tailLengthToFilterLengthBlocks(tailLengthIndex);
     config.filter.refined.length_blocks = lengthBlocks;
@@ -186,6 +254,9 @@ inline webrtc::EchoCanceller3Config makeEchoCanceller3Config(int tailLengthIndex
     // trading gating for artifacts) can be dialed to taste.
     applyNearendSensitivity(nearendSensitivityPercent, config);
     applyProtectionHoldTime(protectionHoldTimeMs, config);
+    // Optionally swap the detector making that normal/nearend decision for
+    // the venue-measured subband alternative -- see applyNearendDetectorChoice.
+    applyNearendDetectorChoice(nearendDetectorIndex, nearendSensitivityPercent, config);
 
     // Tried widening buffering.max_allowed_excess_render_blocks and
     // delay.hysteresis_limit_blocks here (theory: buffer-latency drift

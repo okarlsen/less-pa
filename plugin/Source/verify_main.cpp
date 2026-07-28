@@ -1813,6 +1813,147 @@ bool testLiveSuppressorConfigUpdate(int sampleRate) {
     return noDip && behaviorChanged;
 }
 
+// Near-end Detector (Classic vs Subband) is the fifth control riding the
+// applySuppressorConfigLive() path -- use_subband_nearend_detection is read
+// in SuppressionGain's constructor, which UpdateSuppressorConfig
+// reconstructs wholesale, so the toggle must apply mid-stream with no FIFO
+// reset (no zero gap), no click/spike, and no dip. Unlike
+// testLiveSuppressorConfigUpdate, no level-direction assertion is made
+// around the switch itself: the two detectors differ in *when* they
+// protect, and which way that moves the level is material-dependent (the
+// whole reason this ships as an ear-decided A/B). The end-to-end "the
+// parameter actually reaches AEC3 through the full plugin path" proof is
+// instead the two extra full runs below: identical input, detector set
+// Classic vs Subband from the start -- deterministic processing means
+// byte-identical outputs if (and only if) the setting never made it into
+// the config, so any post-convergence difference proves the wiring.
+bool testLiveNearendDetectorToggle(int sampleRate) {
+    printf("\n=== Live Near-end Detector toggle test (%d Hz) ===\n", sampleRate);
+    const double durationS = 8.0;
+    const int n = static_cast<int>(sampleRate * durationS);
+
+    // Signal design note: a first version reused testDominantNearendDetectionFix's
+    // loud HF audience + LF leak, and the two detectors produced BYTE-IDENTICAL
+    // output -- both sit pinned in nearend state on that material, so the
+    // toggle is genuinely inert there (measured, not assumed). The detectors
+    // only diverge when they *disagree*, so the audience here is deliberately
+    // VERY LF-heavy (three 0.95 one-pole stages: LF-to-2-4kHz power ratio far
+    // above the subband path's nearend_threshold of 64 at the default 75%)
+    // and bursty (0.4s on/off, keeping it nonstationary enough for Classic's
+    // SNR gate): during bursts Classic protects (near-end clearly dominant)
+    // while Subband refuses (the band ratio reads it as bass, i.e. PA-like) --
+    // exactly the character difference the A/B exists to audition.
+    std::mt19937 refRng(41), audienceRng(42);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+    std::vector<float> reference(static_cast<size_t>(n));
+    for (auto& v : reference) v = dist(refRng);
+    for (int stage = 0; stage < 2; ++stage) reference = onePoleLowpass(reference, 0.9f);
+    float refPeak = 1e-9f;
+    for (float v : reference) refPeak = std::max(refPeak, std::abs(v));
+    for (auto& v : reference) v = 0.8f * v / refPeak;
+
+    std::vector<float> audience(static_cast<size_t>(n));
+    for (auto& v : audience) v = dist(audienceRng);
+    for (int stage = 0; stage < 3; ++stage) audience = onePoleLowpass(audience, 0.95f);
+    float audiencePeak = 1e-9f;
+    for (float v : audience) audiencePeak = std::max(audiencePeak, std::abs(v));
+    const int burstPeriod = static_cast<int>(sampleRate * 0.8);
+    for (int s = 0; s < n; ++s) {
+        const bool burstOn = (s % burstPeriod) < burstPeriod / 2;
+        audience[static_cast<size_t>(s)] *= burstOn ? 0.8f / audiencePeak : 0.0f;
+    }
+
+    const int delaySamples = static_cast<int>(sampleRate * 5.0 / 1000.0);
+    std::vector<float> mic(static_cast<size_t>(n), 0.0f);
+    for (int s = 0; s < n; ++s) {
+        float leak = (s - delaySamples >= 0) ? 0.3f * reference[static_cast<size_t>(s - delaySamples)] : 0.0f;
+        mic[static_cast<size_t>(s)] = leak + audience[static_cast<size_t>(s)];
+    }
+
+    // Run 1: toggle Classic -> Subband mid-stream through the public
+    // parameter API. The detector parameter was appended last, after bypass.
+    PAEchoCancellerAudioProcessor toggleProc;
+    if (!setMonoLayout(toggleProc)) {
+        printf("  FAILED to set mono layout\n");
+        return false;
+    }
+    const int detectorParamIndex = toggleProc.getParameters().indexOf(toggleProc.getNearendDetectorParameter());
+    const int changeAtSample = static_cast<int>(sampleRate * durationS / 2.0);
+    int changeSampleIndex = -1;
+    auto toggled = runThroughProcessor(toggleProc, sampleRate, reference, mic,
+                                       changeAtSample, /* Subband */ 1, &changeSampleIndex,
+                                       /*nonRealtime*/ false, detectorParamIndex);
+
+    float inputPeak = 0.0f;
+    for (float v : mic) inputPeak = std::max(inputPeak, std::abs(v));
+    float outputPeak = 0.0f;
+    int spikeIndex = -1;
+    for (size_t i = 0; i < toggled.size(); ++i) {
+        const float a = std::abs(toggled[i]);
+        outputPeak = std::max(outputPeak, a);
+        if (a > inputPeak * 1.5f && spikeIndex < 0) spikeIndex = static_cast<int>(i);
+    }
+
+    // A rebuild would reset the FIFOs and leave a >=half-frame run of exact
+    // zeros (that's testClickFreeRoomChange's positive signature) -- the live
+    // path must never produce one after the switch.
+    const int minZeroRun = sampleRate / 200; // half an AEC3 frame, ~5ms
+    int zeroRun = 0, foundZeroRunAt = -1;
+    for (size_t i = static_cast<size_t>(std::max(0, changeSampleIndex)); i < toggled.size(); ++i) {
+        if (std::abs(toggled[i]) < 1.0e-7f) {
+            if (++zeroRun >= minZeroRun) { foundZeroRunAt = static_cast<int>(i) - zeroRun + 1; break; }
+        } else {
+            zeroRun = 0;
+        }
+    }
+
+    const int checkSamples = sampleRate / 10; // 100ms either side of the switch
+    double sumSqBefore = 0.0, sumSqAfter = 0.0;
+    for (int i = changeSampleIndex - checkSamples; i < changeSampleIndex; ++i)
+        sumSqBefore += static_cast<double>(toggled[static_cast<size_t>(i)]) * toggled[static_cast<size_t>(i)];
+    for (int i = changeSampleIndex; i < changeSampleIndex + checkSamples; ++i)
+        sumSqAfter += static_cast<double>(toggled[static_cast<size_t>(i)]) * toggled[static_cast<size_t>(i)];
+    const double rmsBefore = std::sqrt(sumSqBefore / checkSamples);
+    const double rmsAfter = std::sqrt(sumSqAfter / checkSamples);
+
+    // Runs 2+3: full runs with the detector fixed from the start, identical
+    // input -- the wiring proof (see the block comment above).
+    auto runWithDetector = [&](int detectorIndex) {
+        PAEchoCancellerAudioProcessor proc;
+        setMonoLayout(proc);
+        auto* param = proc.getNearendDetectorParameter();
+        param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(detectorIndex)));
+        return runThroughProcessor(proc, sampleRate, reference, mic);
+    };
+    auto classicOut = runWithDetector(0);
+    auto subbandOut = runWithDetector(1);
+    float maxAbsDiff = 0.0f;
+    const size_t compareStart = static_cast<size_t>(sampleRate) * 4; // past AEC3's 2.5s initial state
+    for (size_t i = compareStart; i < std::min(classicOut.size(), subbandOut.size()); ++i)
+        maxAbsDiff = std::max(maxAbsDiff, std::abs(classicOut[i] - subbandOut[i]));
+
+    const double classicLevel = rmsDbfs(classicOut, sampleRate, 4.0, durationS);
+    const double subbandLevel = rmsDbfs(subbandOut, sampleRate, 4.0, durationS);
+
+    printf("  Toggle at sample %d: 100ms RMS before=%.4f after=%.4f; zero gap after switch: %s; spike: %s\n",
+           changeSampleIndex, rmsBefore, rmsAfter,
+           foundZeroRunAt >= 0 ? "FOUND (rebuild leaked in?)" : "none",
+           spikeIndex >= 0 ? "FOUND" : "none");
+    printf("  Fixed-detector runs (4s..end): Classic=%.1f dBFS  Subband=%.1f dBFS  max|diff|=%.5f\n",
+           classicLevel, subbandLevel, maxAbsDiff);
+
+    const bool noSpike = (spikeIndex < 0);
+    const bool noRebuild = (foundZeroRunAt < 0);
+    const bool noDip = rmsAfter > rmsBefore * 0.3;
+    const bool detectorReached = maxAbsDiff > 1.0e-5f; // byte-identical would mean the setting never reached AEC3
+    const bool pass = noSpike && noRebuild && noDip && detectorReached;
+    printf("  %s%s%s%s%s\n", pass ? "PASS -- detector toggles live, click-free, no rebuild, and provably reaches AEC3" : "CHECK",
+           noSpike ? "" : " -- SPIKE", noRebuild ? "" : " -- UNEXPECTED REBUILD ZERO-GAP",
+           noDip ? "" : " -- DIP AT SWITCH", detectorReached ? "" : " -- OUTPUTS IDENTICAL, TOGGLE INERT");
+    return pass;
+}
+
 // Confirms the dominant_nearend_detection fix actually protects genuine
 // double-talk (audience loud together with real PA bleed) better than the
 // stock AEC3 thresholds -- this is the "whole signal gets gated whenever
@@ -1930,6 +2071,78 @@ bool testNearendSensitivityAndHoldTime() {
 
     const bool pass = sensitivityOk && holdTimeOk;
     printf("  %s\n", pass ? "PASS -- both controls reach the expected config fields in the expected direction"
+                          : "CHECK");
+    return pass;
+}
+
+// Confirms the Near-end Detector choice reaches AEC3's config with the
+// venue-measured band pair hardcoded for the subband path, and that the two
+// existing knobs remap correctly onto it: Near-end Sensitivity onto
+// nearend_threshold (8->128 log-spaced -- the 75% default must land on 64,
+// the top of the measured 32-64 sweet spot; see applyNearendDetectorChoice)
+// and Protection Hold Time onto the vendored subband hold_duration. Same
+// direct config-field pattern as testNearendSensitivityAndHoldTime.
+bool testNearendDetectorConfigMapping() {
+    printf("\n=== Near-end Detector config mapping test ===\n");
+
+    const auto classic = makeEchoCanceller3Config(2, 1, false, 75.0f, 100.0f, 4.0f, -96.0f, 0);
+    const auto subband = makeEchoCanceller3Config(2, 1, false, 75.0f, 100.0f, 4.0f, -96.0f, 1);
+    const auto& sd = subband.suppressor.subband_nearend_detection;
+
+    printf("  Classic: use_subband_nearend_detection=%d\n",
+           static_cast<int>(classic.suppressor.use_subband_nearend_detection));
+    printf("  Subband: use_subband=%d subband1={%zu,%zu} subband2={%zu,%zu} avg_blocks=%zu snr=%.1f\n",
+           static_cast<int>(subband.suppressor.use_subband_nearend_detection),
+           sd.subband1.low, sd.subband1.high, sd.subband2.low, sd.subband2.high,
+           sd.nearend_average_blocks, sd.snr_threshold);
+
+    const bool detectorSelectOk = !classic.suppressor.use_subband_nearend_detection &&
+                                  subband.suppressor.use_subband_nearend_detection;
+    const bool bandsOk = sd.subband1.low == 1 && sd.subband1.high == 15 &&   // 125-1875Hz
+                         sd.subband2.low == 16 && sd.subband2.high == 32 &&  // 2-4kHz
+                         sd.nearend_average_blocks == 16 &&
+                         std::abs(sd.snr_threshold - 1.0f) < 1e-6f;
+
+    // Sensitivity remap: 8 * 16^t. Report where the shipped 75% default
+    // lands -- it must be 64.0 (measured sweet spot 32-64 spans 50%-75%).
+    const auto sub0 = makeEchoCanceller3Config(2, 1, false, 0.0f, 100.0f, 4.0f, -96.0f, 1);
+    const auto sub50 = makeEchoCanceller3Config(2, 1, false, 50.0f, 100.0f, 4.0f, -96.0f, 1);
+    const auto sub100 = makeEchoCanceller3Config(2, 1, false, 100.0f, 100.0f, 4.0f, -96.0f, 1);
+    printf("  nearend_threshold: 0%%=%.2f 50%%=%.2f 75%%=%.2f (default) 100%%=%.2f\n",
+           sub0.suppressor.subband_nearend_detection.nearend_threshold,
+           sub50.suppressor.subband_nearend_detection.nearend_threshold,
+           sd.nearend_threshold,
+           sub100.suppressor.subband_nearend_detection.nearend_threshold);
+    const bool sensitivityOk =
+        std::abs(sub0.suppressor.subband_nearend_detection.nearend_threshold - 8.0f) < 0.01f &&
+        std::abs(sub50.suppressor.subband_nearend_detection.nearend_threshold - 32.0f) < 0.01f &&
+        std::abs(sd.nearend_threshold - 64.0f) < 0.01f &&
+        std::abs(sub100.suppressor.subband_nearend_detection.nearend_threshold - 128.0f) < 0.01f;
+
+    // Protection Hold Time reaches the vendored subband hold (same ms->blocks
+    // conversion as the dominant detector's), and the trigger debounce
+    // matches the dominant default so both A/B sides debounce identically.
+    const auto subHold40 = makeEchoCanceller3Config(2, 1, false, 75.0f, 40.0f, 4.0f, -96.0f, 1);
+    const auto subHold800 = makeEchoCanceller3Config(2, 1, false, 75.0f, 800.0f, 4.0f, -96.0f, 1);
+    printf("  hold_duration: 40ms=%d 100ms=%d 800ms=%d blocks; trigger_threshold=%d\n",
+           subHold40.suppressor.subband_nearend_detection.hold_duration,
+           sd.hold_duration,
+           subHold800.suppressor.subband_nearend_detection.hold_duration,
+           sd.trigger_threshold);
+    const bool holdOk = subHold40.suppressor.subband_nearend_detection.hold_duration == 10 &&
+                        sd.hold_duration == 25 &&
+                        subHold800.suppressor.subband_nearend_detection.hold_duration == 200 &&
+                        sd.trigger_threshold == 12;
+
+    // Classic path must be untouched by the detector parameter existing:
+    // identical dominant-detection fields with the toggle at 0.
+    const auto& dc = classic.suppressor.dominant_nearend_detection;
+    const auto& ds = subband.suppressor.dominant_nearend_detection;
+    const bool classicUntouched = std::abs(dc.enr_threshold - ds.enr_threshold) < 1e-6f &&
+                                  dc.hold_duration == ds.hold_duration;
+
+    const bool pass = detectorSelectOk && bandsOk && sensitivityOk && holdOk && classicUntouched;
+    printf("  %s\n", pass ? "PASS -- detector toggle reaches AEC3 config with the measured bands and knob remaps"
                           : "CHECK");
     return pass;
 }
@@ -2283,6 +2496,7 @@ bool testStateSaveRestore() {
         proc.getNearendSensitivityParameter()->convertTo0to1(42.0f));
     proc.getProtectionHoldTimeParameter()->setValueNotifyingHost(
         proc.getProtectionHoldTimeParameter()->convertTo0to1(333.0f));
+    proc.getNearendDetectorParameter()->setValueNotifyingHost(1.0f);         // "Subband (2-4kHz)" -- non-default, unlike bypass this IS saved
 
     juce::MemoryBlock state;
     proc.getStateInformation(state);
@@ -2298,10 +2512,11 @@ bool testStateSaveRestore() {
         std::abs(restored.getDryWetMixParameter()->get() - 37.0f) < 0.5f &&
         restored.getLimitHfGainParameter()->get() == true &&
         std::abs(restored.getNearendSensitivityParameter()->get() - 42.0f) < 0.5f &&
-        std::abs(restored.getProtectionHoldTimeParameter()->get() - 333.0f) < 0.5f;
+        std::abs(restored.getProtectionHoldTimeParameter()->get() - 333.0f) < 0.5f &&
+        restored.getNearendDetectorParameter()->getIndex() == 1;
 
     printf("  Tail Length=%d Suppression=%d HPF=%.1fHz MetersPost=%d DryWet=%.1f%% LimitHfGain=%d "
-           "NearendSensitivity=%.1f%% ProtectionHoldTime=%.1fms\n",
+           "NearendSensitivity=%.1f%% ProtectionHoldTime=%.1fms NearendDetector=%d\n",
            restored.getTailLengthParameter()->getIndex(),
            restored.getSuppressionStrengthParameter()->getIndex(),
            static_cast<double>(restored.getHpfFrequencyParameter()->get()),
@@ -2309,7 +2524,8 @@ bool testStateSaveRestore() {
            static_cast<double>(restored.getDryWetMixParameter()->get()),
            static_cast<int>(restored.getLimitHfGainParameter()->get()),
            static_cast<double>(restored.getNearendSensitivityParameter()->get()),
-           static_cast<double>(restored.getProtectionHoldTimeParameter()->get()));
+           static_cast<double>(restored.getProtectionHoldTimeParameter()->get()),
+           restored.getNearendDetectorParameter()->getIndex());
     printf("  %s\n", pass ? "PASS -- all parameters round-tripped correctly" : "CHECK");
 
     // Bypass is deliberately absent from saved state (hosts own bypass via
@@ -2849,9 +3065,12 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     const double micFullRms = fullBandRms(mic, skipS);
     const double micHighRms = highBandRms(mic, skipS);
 
-    struct Config { int tailIndex; int suppressionIndex; const char* name; };
+    struct Config { int tailIndex; int suppressionIndex; const char* name; int detectorIndex = 0; };
     // Tail sweep at the Moderate default, suppression sweep at the 400ms
-    // default -- 6 runs covering both axes through the daily-driver setting.
+    // default -- 6 runs covering both axes through the daily-driver setting,
+    // plus the daily-driver again with the Subband near-end detector so the
+    // A/B's overall-reduction cost/benefit is measured on the same material
+    // (compare against tail400ms_moderate, its exact Classic counterpart).
     const Config configs[] = {
         { 0, 1, "tail50ms_moderate" },
         { 1, 1, "tail200ms_moderate" },
@@ -2859,6 +3078,7 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
         { 3, 1, "tail800ms_moderate" },
         { 2, 0, "tail400ms_gentle" },
         { 2, 2, "tail400ms_hard" },
+        { 2, 1, "tail400ms_mod_subband", 1 },
     };
 
     // The irregular run writes its aggregate report to a separate file so a
@@ -2877,6 +3097,7 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
             auto* tailParam = proc.getTailLengthParameter();
             tailParam->setValueNotifyingHost(tailParam->convertTo0to1(static_cast<float>(cfg.tailIndex)));
             proc.getSuppressionStrengthParameter()->setValueNotifyingHost(static_cast<float>(cfg.suppressionIndex) / 2.0f);
+            proc.getNearendDetectorParameter()->setValueNotifyingHost(static_cast<float>(cfg.detectorIndex));
         }
 
         // Irregular cadence: the same deliberately off-frame-boundary cycling
@@ -3278,13 +3499,20 @@ static int runLinearProbeMode(const char* micPath, const char* refPath, double m
 //   PAEchoCancellerVerify --subband-probe <mic.wav> <reference.wav> [--seconds N]
 //
 // PURELY DIAGNOSTIC: nothing here changes makeEchoCanceller3Config()'s
-// output for the plugin path, and no plugin parameter is added. The result
-// informs a future decision about whether a detector swap-over is worth
-// building at all (which would also need a hold mechanism rebuilt in
-// plugin code: SubbandNearendDetector has no equivalent of
-// DominantNearendDetector's trigger_threshold/hold_duration -- its Update()
-// recomputes nearend_state_ from scratch every 4ms block, so Protection
-// Hold Time would stop doing anything).
+// output for the plugin path. This probe's measurement round led to the
+// shipped Near-end Detector A/B toggle (applyNearendDetectorChoice in
+// TailLengthEchoControl.h). The parenthetical that used to live here --
+// that a hold mechanism would have to be "rebuilt in plugin code" -- was
+// wrong: the per-4ms decision is internal to AEC3's suppression path (the
+// plugin only sees 10ms frames), so the hold was instead patched into
+// SubbandNearendDetector itself, mirroring DominantNearendDetector's
+// trigger_counters_/hold_counters_ logic verbatim (see
+// subband_nearend_detector.cc in the vendored tree). The sweep candidates
+// below therefore now explicitly set trigger_threshold=1/hold_duration=2,
+// which reproduces the original unwrapped per-block behavior exactly
+// (set-then-decrement leaves the hold counter >0 for precisely the
+// triggering block) -- keeping this sweep's numbers comparable with the
+// committed measurement round from before the patch existed.
 //
 // How the decision is observed: neither AudioProcessingStats nor
 // EchoControl::Metrics exposes the detector's boolean, and ApmDataDumper
@@ -3344,6 +3572,11 @@ struct SubbandProbeCandidate {
     float nearendThreshold;
     float snrThreshold;
     size_t averageBlocks;
+    // Defaults reproduce the pre-hold-patch unwrapped detector exactly (see
+    // the block comment above), so the sweep entries that omit them keep
+    // their original raw semantics; hold candidates override explicitly.
+    int holdDuration = 2;
+    int triggerThreshold = 1;
 };
 
 struct SubbandProbeRunResult {
@@ -3541,6 +3774,14 @@ static int runSubbandProbeMode(const char* micPath, const char* refPath, double 
         { "sb_2k4k_thr96",   true, 1, 15, 16, 32, 96.0f,  1.0f, 4 },
         { "sb_2k4k_t64avg1", true, 1, 15, 16, 32, 64.0f,  1.0f, 1 },
         { "sb_2k4k_t64avg16",true, 1, 15, 16, 32, 64.0f,  1.0f, 16 },
+        // With the vendored hold patch: the exact shipped subband config at
+        // the plugin defaults (Sensitivity 75% -> thr 64, avg 16; Hold 100ms
+        // -> 25 blocks; trigger 12 matching the dominant detector's). This
+        // is the row whose flips/s must approach dom_baseline's 0.82/s
+        // rather than the unwrapped detector's ~14/s. The h400 variant
+        // shows what a user raising Protection Hold Time to 400ms buys.
+        { "sb_ship75_h100",  true, 1, 15, 16, 32, 64.0f,  1.0f, 16, 25, 12 },
+        { "sb_ship75_h400",  true, 1, 15, 16, 32, 64.0f,  1.0f, 16, 100, 12 },
     };
 
     // Baseline first: the shipping dominant detector at this venue's
@@ -3603,6 +3844,8 @@ static int runSubbandProbeMode(const char* micPath, const char* refPath, double 
         sd.subband2 = { cand.sb2Lo, cand.sb2Hi };
         sd.nearend_threshold = cand.nearendThreshold;
         sd.snr_threshold = cand.snrThreshold;
+        sd.hold_duration = cand.holdDuration;       // 2/1 = unwrapped raw semantics; see the struct comment
+        sd.trigger_threshold = cand.triggerThreshold;
 
         RunRecord rec{ cand.name, runSubbandProbeRun(config, sampleRate, ref, mic, skipS) };
         analyzeAndPrint(rec.name, rec.res, &baselineRun.res);
@@ -3652,6 +3895,105 @@ static int runSubbandProbeMode(const char* micPath, const char* refPath, double 
            "mean trigger rate in the quietest/loudest reference-level quartile of bins. A detector that\n"
            "protects crowd rather than PA wants r(m-r) positive, r(ref) negative, loRefQ >> hiRefQ.\n", skipS);
     return 0;
+}
+
+// Regression test for the vendored SubbandNearendDetector hold patch: the
+// stock detector recomputes its state from scratch every 4ms block, and on
+// real material flipped ~14/s vs the dominant detector's 0.82/s. Drives raw
+// AEC3 (via runSubbandProbeRun's counter polling) with material designed to
+// make the raw per-block condition chatter -- broadband noise where the two
+// subbands' powers are statistically equal, so p1 < 1.0 * p2 is a per-block
+// coin flip -- plus a mid-run HF-dominant stretch where the condition holds
+// solidly. The snr gate is disabled (snr_threshold = 0) to isolate the
+// ratio chatter this test needs. Asserts the hold (trigger 12 / hold 50,
+// the dominant detector's defaults) cuts the flip rate by a large factor
+// versus the unwrapped configuration (trigger 1 / hold 2 -- exactly
+// equivalent to the pre-patch per-block behavior), while the sustained
+// HF-dominant stretch still gets protected -- i.e. the hold debounces
+// chatter without deafening the detector to genuine sustained triggers.
+bool testSubbandHoldReducesFlipRate(int sampleRate) {
+    printf("\n=== Subband detector hold (flip-rate) test (%d Hz) ===\n", sampleRate);
+    const double durationS = 12.0;
+    const int n = static_cast<int>(sampleRate * durationS);
+
+    std::mt19937 refRng(51), micRng(52);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+    // Quiet LF leak keeps AEC3 operating realistically; the mic bed is what
+    // the detector actually chews on (E2 ~= bed once the filter converges).
+    std::vector<float> reference(static_cast<size_t>(n));
+    for (auto& v : reference) v = dist(refRng);
+    reference = onePoleLowpass(reference, 0.9f);
+    float refPeak = 1e-9f;
+    for (float v : reference) refPeak = std::max(refPeak, std::abs(v));
+    for (auto& v : reference) v = 0.4f * v / refPeak;
+
+    // Broadband (flat) bed everywhere; 6s-9s swaps in HF-heavy content so
+    // the subband condition (LF quiet relative to 2-4kHz) holds solidly.
+    std::vector<float> flatBed(static_cast<size_t>(n)), hfBed(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const float v = dist(micRng);
+        flatBed[static_cast<size_t>(i)] = v;
+        hfBed[static_cast<size_t>(i)] = v;
+    }
+    HighPassFilterChain hfShaper;
+    hfShaper.setCutoff(sampleRate, 2500.0f);
+    for (auto& v : hfBed) v = hfShaper.processSample(v);
+
+    const int hfStart = 6 * sampleRate, hfEnd = 9 * sampleRate;
+    const int delaySamples = static_cast<int>(sampleRate * 5.0 / 1000.0);
+    std::vector<float> mic(static_cast<size_t>(n), 0.0f);
+    for (int s = 0; s < n; ++s) {
+        const bool hf = (s >= hfStart && s < hfEnd);
+        float v = 0.4f * (hf ? hfBed[static_cast<size_t>(s)] : flatBed[static_cast<size_t>(s)]);
+        if (s - delaySamples >= 0) v += 0.2f * reference[static_cast<size_t>(s - delaySamples)];
+        mic[static_cast<size_t>(s)] = v;
+    }
+
+    auto makeSubbandConfig = [](int triggerThreshold, int holdDuration) {
+        auto config = makeEchoCanceller3Config(2, 1, false, 75.0f, 100.0f);
+        config.suppressor.use_subband_nearend_detection = true;
+        auto& sd = config.suppressor.subband_nearend_detection;
+        sd.subband1 = { 1, 15 };
+        sd.subband2 = { 16, 32 };
+        sd.nearend_average_blocks = 1; // no input smoothing: maximize raw chatter, isolating the hold
+        sd.nearend_threshold = 1.0f;   // flat bed -> p1 ~= p2 -> per-block coin flip
+        sd.snr_threshold = 0.0f;       // disable the noise gate; only the ratio test runs
+        sd.trigger_threshold = triggerThreshold;
+        sd.hold_duration = holdDuration;
+        return config;
+    };
+
+    const double skipS = 3.0;
+    const auto raw = runSubbandProbeRun(makeSubbandConfig(1, 2), sampleRate, reference, mic, skipS);
+    const auto held = runSubbandProbeRun(makeSubbandConfig(12, 50), sampleRate, reference, mic, skipS);
+
+    // Mean per-100ms nearend fraction inside the HF-dominant stretch (with a
+    // 0.3s margin for the trigger debounce to engage).
+    auto windowFraction = [](const SubbandProbeRunResult& res, double startS, double endS) {
+        const size_t b0 = static_cast<size_t>(startS * 10.0), b1 = static_cast<size_t>(endS * 10.0);
+        double sum = 0.0;
+        size_t count = 0;
+        for (size_t b = b0; b < b1 && b < res.binFraction.size(); ++b) { sum += res.binFraction[b]; ++count; }
+        return count > 0 ? sum / static_cast<double>(count) : 0.0;
+    };
+    const double rawHf = windowFraction(raw, 6.3, 9.0);
+    const double heldHf = windowFraction(held, 6.3, 9.0);
+
+    printf("  Unwrapped (trigger 1 / hold 2):  %.2f flips/s, nearend %.1f%% overall, %.1f%% in HF stretch\n",
+           raw.transitionsPerSecond, 100.0 * raw.overallFraction, 100.0 * rawHf);
+    printf("  With hold (trigger 12 / hold 50): %.2f flips/s, nearend %.1f%% overall, %.1f%% in HF stretch\n",
+           held.transitionsPerSecond, 100.0 * held.overallFraction, 100.0 * heldHf);
+
+    const bool rawChatters = raw.transitionsPerSecond > 5.0;        // the premise: without the hold this material flutters
+    const bool holdCalms = held.transitionsPerSecond < 0.25 * raw.transitionsPerSecond;
+    const bool holdStillHears = heldHf > 0.5;                        // sustained genuine triggering still protected
+    const bool pass = rawChatters && holdCalms && holdStillHears;
+    printf("  %s%s%s%s\n", pass ? "PASS -- hold cuts flip rate by >4x without deafening sustained triggers" : "CHECK",
+           rawChatters ? "" : " -- RAW CONFIG DIDN'T CHATTER (test premise broken)",
+           holdCalms ? "" : " -- HOLD DIDN'T REDUCE FLIPS MATERIALLY",
+           holdStillHears ? "" : " -- HOLD SUPPRESSED GENUINE SUSTAINED TRIGGERING");
+    return pass;
 }
 
 int main(int argc, char* argv[]) {
@@ -3794,6 +4136,9 @@ int main(int argc, char* argv[]) {
     allPass = testLimitHfGainToggle(48000) && allPass;
     allPass = testDominantNearendDetectionFix(48000) && allPass;
     allPass = testNearendSensitivityAndHoldTime() && allPass;
+    allPass = testNearendDetectorConfigMapping() && allPass;
+    allPass = testLiveNearendDetectorToggle(48000) && allPass;
+    allPass = testSubbandHoldReducesFlipRate(48000) && allPass;
     allPass = testStateSaveRestore() && allPass;
     for (int rate : rates) allPass = testBypassRawPassthrough(rate) && allPass;
     allPass = testBypassToggleClickFree(48000) && allPass;

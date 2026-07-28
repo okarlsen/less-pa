@@ -54,6 +54,7 @@ public:
     juce::AudioParameterBool* getLimitHfGainParameter() const noexcept { return limitHfGainParam; }
     juce::AudioParameterFloat* getNearendSensitivityParameter() const noexcept { return nearendSensitivityParam; }
     juce::AudioParameterFloat* getProtectionHoldTimeParameter() const noexcept { return protectionHoldTimeParam; }
+    juce::AudioParameterChoice* getNearendDetectorParameter() const noexcept { return nearendDetectorParam; }
 
     // Latency-matched internal bypass. Without this override, hosts
     // synthesize their own bypass by routing around the plugin entirely,
@@ -152,11 +153,11 @@ private:
     // handled internally by AudioProcessing's own resamplers). Only Tail
     // Length actually requires tearing the whole thing down and rebuilding
     // (it changes the adaptive filter's length) -- Suppression
-    // Strength/Limit HF Gain/Near-end Sensitivity/Protection Hold Time now
-    // apply live via activeEchoControlFactory below, since a full rebuild
-    // discarded the filter's convergence for changes that never touched the
-    // filter at all. Discovered via a user report: every one of these 5
-    // controls used to force a full rebuild, and re-converging a long
+    // Strength/Limit HF Gain/Near-end Sensitivity/Protection Hold Time/
+    // Near-end Detector now apply live via activeEchoControlFactory below,
+    // since a full rebuild discarded the filter's convergence for changes
+    // that never touched the filter at all. Discovered via a user report:
+    // every one of these controls used to force a full rebuild, and re-converging a long
     // (400/800ms) Tail Length filter from scratch on every settings tweak
     // made testing feel inconsistent ("have to stop and start a couple of
     // times before it sounds correct").
@@ -213,8 +214,20 @@ private:
     float appliedNearendSensitivity = -1.0f;
     float appliedProtectionHoldTime = -1.0f;
 
+    // Which detector makes that normal/nearend decision at all: Classic
+    // (AEC3's DominantNearendDetector, the shipping default) or the
+    // venue-measured Subband (2-4kHz) alternative -- see
+    // applyNearendDetectorChoice in TailLengthEchoControl.h for the measured
+    // basis and why this ships as an explicit A/B toggle rather than a new
+    // default. Like the other suppressor-only controls it applies live
+    // (use_subband_nearend_detection is read in SuppressionGain's
+    // constructor, which applySuppressorConfigLive reconstructs wholesale),
+    // so toggling costs no silence and no filter re-convergence.
+    juce::AudioParameterChoice* nearendDetectorParam = nullptr;
+    int appliedNearendDetectorIndex = -1;
+
     // Constructs a fresh apm for the given Tail Length (and whatever the
-    // other 4 controls currently are) and resets the FIFOs so the pipeline
+    // other 5 controls currently are) and resets the FIFOs so the pipeline
     // restarts from clean silence (same zero-padded ramp-up as the very
     // first prepareToPlay) rather than glitching on stale state.
     //
@@ -226,7 +239,8 @@ private:
     // adopt the result a few blocks later -- processing simply continues on
     // the old instance in the meantime.
     void rebuildEchoCanceller(int tailLengthIndex, int suppressionStrengthIndex, bool limitHfGain,
-                              float nearendSensitivity, float protectionHoldTime);
+                              float nearendSensitivity, float protectionHoldTime,
+                              int nearendDetectorIndex);
 
     // Everything a live Tail Length change needs, built off the audio
     // thread and handed over through the two atomic slots below. The box
@@ -244,6 +258,7 @@ private:
         bool limitHfGain = false;
         float nearendSensitivity = 0.0f;
         float protectionHoldTime = 0.0f;
+        int nearendDetectorIndex = 0;
         double sampleRate = 0.0; // guards against adopting a build from before a re-prepare at a new rate
     };
 
@@ -270,7 +285,8 @@ private:
     // re-convergence. Requires activeEchoControlFactory to be valid (i.e.
     // rebuildEchoCanceller must have run at least once).
     void applySuppressorConfigLive(int suppressionStrengthIndex, bool limitHfGain,
-                                    float nearendSensitivity, float protectionHoldTime);
+                                    float nearendSensitivity, float protectionHoldTime,
+                                    int nearendDetectorIndex);
 
     // Dry/Wet: AEC3 can be too good, stripping correlated ambient content
     // (crowd noise, clapping) along with the real PA leakage and leaving

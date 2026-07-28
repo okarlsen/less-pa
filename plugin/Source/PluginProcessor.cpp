@@ -152,11 +152,22 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
     addParameter(dryWetMixParam = new juce::AudioParameterFloat(
         "dryWetMix", "Dry/Wet Mix",
         juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 100.0f)); // 100% wet: no change from AEC3's raw output by default
-    // Appended strictly LAST: verify_main.cpp addresses Tail Length and
+    // The parameters from here down were each appended strictly LAST at the
+    // time they were added: verify_main.cpp addresses Tail Length and
     // Suppression Strength by position (getParameters()[0]/[1]), so new
-    // parameters must never be inserted above existing ones.
+    // parameters must never be inserted above existing ones -- always append.
     addParameter(bypassParam = new juce::AudioParameterBool(
         "bypass", "Bypass", false));
+    // Classic (index 0) stays the default deliberately: the subband detector
+    // changes protection character (Classic protects ~88% of the time on the
+    // reference material, Subband ~32%, specifically in PA gaps), and the
+    // listening test -- not the probe's selectivity numbers -- is the
+    // acceptance gate for ever changing that default. See
+    // applyNearendDetectorChoice in TailLengthEchoControl.h. Unlike bypass
+    // above, this IS a real setting and rides the generic paramID
+    // save/restore loop in get/setStateInformation.
+    addParameter(nearendDetectorParam = new juce::AudioParameterChoice(
+        "nearendDetector", "Near-end Detector", juce::StringArray{ "Classic", "Subband (2-4kHz)" }, 0));
 
     startThread(); // background Tail Length rebuilds -- see run()
 }
@@ -262,7 +273,9 @@ void PAEchoCancellerAudioProcessor::prepareToPlay(double sampleRate, int samples
     aec3InternalDelaySamples = measureAec3InternalDelaySamples(
         makeEchoCanceller3Config(tailLengthParam->getIndex(), suppressionStrengthParam->getIndex(),
                                  limitHfGainParam->get(), nearendSensitivityParam->get(),
-                                 protectionHoldTimeParam->get()),
+                                 protectionHoldTimeParam->get(),
+                                 4.0f, -96.0f, // the shipped erleMin/comfort-noise defaults, spelled out to reach the trailing detector index
+                                 nearendDetectorParam->getIndex()),
         static_cast<int>(sampleRate), frameSize);
     dryPrefillSilence.assign(static_cast<size_t>(std::max(0, aec3InternalDelaySamples)), 0.0f);
 
@@ -271,7 +284,7 @@ void PAEchoCancellerAudioProcessor::prepareToPlay(double sampleRate, int samples
     // line -- see rebuildEchoCanceller's and resyncDryDelay's comments.
     rebuildEchoCanceller(tailLengthParam->getIndex(), suppressionStrengthParam->getIndex(),
                          limitHfGainParam->get(), nearendSensitivityParam->get(),
-                         protectionHoldTimeParam->get());
+                         protectionHoldTimeParam->get(), nearendDetectorParam->getIndex());
 }
 
 void PAEchoCancellerAudioProcessor::releaseResources()
@@ -350,11 +363,14 @@ void PAEchoCancellerAudioProcessor::run()
         fresh->limitHfGain = limitHfGainParam->get();
         fresh->nearendSensitivity = nearendSensitivityParam->get();
         fresh->protectionHoldTime = protectionHoldTimeParam->get();
+        fresh->nearendDetectorIndex = nearendDetectorParam->getIndex();
         fresh->sampleRate = sampleRate;
         fresh->apm = makeConfiguredApm(
             makeEchoCanceller3Config(fresh->tailLengthIndex, fresh->suppressionStrengthIndex,
                                      fresh->limitHfGain, fresh->nearendSensitivity,
-                                     fresh->protectionHoldTime),
+                                     fresh->protectionHoldTime,
+                                     4.0f, -96.0f, // shipped defaults, spelled out to reach the trailing detector index
+                                     fresh->nearendDetectorIndex),
             &fresh->factory);
 
         delete stagedApmSwap.exchange(fresh, std::memory_order_acq_rel); // replace anything staged meanwhile (there shouldn't be)
@@ -400,10 +416,12 @@ float PAEchoCancellerAudioProcessor::getInputPeakLevelPostDelayed(int delaySampl
 
 void PAEchoCancellerAudioProcessor::rebuildEchoCanceller(int tailLengthIndex, int suppressionStrengthIndex,
                                                           bool limitHfGain, float nearendSensitivity,
-                                                          float protectionHoldTime)
+                                                          float protectionHoldTime, int nearendDetectorIndex)
 {
     const auto echoConfig = makeEchoCanceller3Config(tailLengthIndex, suppressionStrengthIndex, limitHfGain,
-                                                     nearendSensitivity, protectionHoldTime);
+                                                     nearendSensitivity, protectionHoldTime,
+                                                     4.0f, -96.0f, // shipped defaults, spelled out to reach the trailing detector index
+                                                     nearendDetectorIndex);
 
     // aec3InternalDelaySamples is deliberately NOT re-measured here: it was
     // measured once in prepareToPlay (a slow, allocation-heavy simulation
@@ -457,10 +475,12 @@ void PAEchoCancellerAudioProcessor::rebuildEchoCanceller(int tailLengthIndex, in
     appliedLimitHfGain = limitHfGain;
     appliedNearendSensitivity = nearendSensitivity;
     appliedProtectionHoldTime = protectionHoldTime;
+    appliedNearendDetectorIndex = nearendDetectorIndex;
 }
 
 void PAEchoCancellerAudioProcessor::applySuppressorConfigLive(int suppressionStrengthIndex, bool limitHfGain,
-                                                                float nearendSensitivity, float protectionHoldTime)
+                                                                float nearendSensitivity, float protectionHoldTime,
+                                                                int nearendDetectorIndex)
 {
     if (activeEchoControlFactory == nullptr)
         return; // prepareToPlay hasn't run yet; the next rebuildEchoCanceller will pick up current values anyway
@@ -471,16 +491,23 @@ void PAEchoCancellerAudioProcessor::applySuppressorConfigLive(int suppressionStr
 
     // Tail Length doesn't matter here -- only .suppressor is used -- so any
     // index reproduces the same suppressor config for a given set of the
-    // other four parameters.
+    // other five parameters. The detector toggle rides this same path
+    // because use_subband_nearend_detection is read in SuppressionGain's
+    // constructor, which UpdateSuppressorConfig reconstructs wholesale --
+    // the subtractor, AecState, render buffer and delay estimator are never
+    // touched, so switching detectors costs no re-convergence.
     const auto config = makeEchoCanceller3Config(appliedTailLengthIndex.load(std::memory_order_relaxed),
                                                  suppressionStrengthIndex, limitHfGain,
-                                                 nearendSensitivity, protectionHoldTime);
+                                                 nearendSensitivity, protectionHoldTime,
+                                                 4.0f, -96.0f, // shipped defaults, spelled out to reach the trailing detector index
+                                                 nearendDetectorIndex);
     echoCanceller->UpdateSuppressorConfig(config.suppressor);
 
     appliedSuppressionStrengthIndex = suppressionStrengthIndex;
     appliedLimitHfGain = limitHfGain;
     appliedNearendSensitivity = nearendSensitivity;
     appliedProtectionHoldTime = protectionHoldTime;
+    appliedNearendDetectorIndex = nearendDetectorIndex;
 }
 
 void PAEchoCancellerAudioProcessor::resyncDryDelay()
@@ -557,7 +584,7 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         return;
 
     // Tail Length actually changes the adaptive filter's length, so it's the
-    // only one of the 5 AEC3-config controls that still needs a whole new
+    // only one of the 6 AEC3-config controls that still needs a whole new
     // AEC3 instance. That construction is far too heavy for an audio
     // callback (it used to run right here -- including a ~3-second
     // calibration simulation -- a guaranteed dropout on a live rig), so
@@ -567,17 +594,18 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     // FIFOs (briefly silences the output -- zero-padded reads -- rather
     // than risking a click/spike from swapping filter state mid-stream),
     // and parks the old instance for the rebuild thread to free. The other
-    // four controls only touch the suppressor, so they apply live via
+    // five controls only touch the suppressor, so they apply live via
     // applySuppressorConfigLive() -- no silence, no discarding the filter's
     // convergence. The suppressor branch below stays skipped while a tail
     // swap is pending; the adopted instance is built with the then-current
-    // values of the other four, and any change racing past that is caught
+    // values of the other five, and any change racing past that is caught
     // by the same branch on the next block.
     const int desiredTailLengthIndex = tailLengthParam->getIndex();
     const int desiredSuppressionStrengthIndex = suppressionStrengthParam->getIndex();
     const bool desiredLimitHfGain = limitHfGainParam->get();
     const float desiredNearendSensitivity = nearendSensitivityParam->get();
     const float desiredProtectionHoldTime = protectionHoldTimeParam->get();
+    const int desiredNearendDetectorIndex = nearendDetectorParam->getIndex();
     if (desiredTailLengthIndex != appliedTailLengthIndex.load(std::memory_order_relaxed)) {
         requestedTailLengthIndex.store(desiredTailLengthIndex, std::memory_order_release);
 
@@ -608,6 +636,7 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
                     appliedLimitHfGain = staged->limitHfGain;
                     appliedNearendSensitivity = staged->nearendSensitivity;
                     appliedProtectionHoldTime = staged->protectionHoldTime;
+                    appliedNearendDetectorIndex = staged->nearendDetectorIndex;
                 }
                 // Park the box whether adopted (it now holds the old
                 // instance) or rejected as stale (wrong tail/rate) -- the
@@ -617,10 +646,12 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         }
     } else if (desiredSuppressionStrengthIndex != appliedSuppressionStrengthIndex ||
               desiredLimitHfGain != appliedLimitHfGain ||
+              desiredNearendDetectorIndex != appliedNearendDetectorIndex ||
               std::abs(desiredNearendSensitivity - appliedNearendSensitivity) > 0.05f ||
               std::abs(desiredProtectionHoldTime - appliedProtectionHoldTime) > 0.5f) {
         applySuppressorConfigLive(desiredSuppressionStrengthIndex, desiredLimitHfGain,
-                                  desiredNearendSensitivity, desiredProtectionHoldTime);
+                                  desiredNearendSensitivity, desiredProtectionHoldTime,
+                                  desiredNearendDetectorIndex);
     }
 
     // HPF frequency changed: unlike Tail Length, just swap the IIR
