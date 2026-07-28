@@ -3268,7 +3268,400 @@ static int runLinearProbeMode(const char* micPath, const char* refPath, double m
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// --subband-probe: measure whether AEC3's SubbandNearendDetector, with
+// custom-chosen frequency bands, discriminates this venue's crowd from its
+// PA better than the shipping DominantNearendDetector (which is hardcoded
+// to bins 1-15 of 65, i.e. ~125-1875Hz -- see low_frequency_energy() in
+// dominant_nearend_detector.cc).
+//
+//   PAEchoCancellerVerify --subband-probe <mic.wav> <reference.wav> [--seconds N]
+//
+// PURELY DIAGNOSTIC: nothing here changes makeEchoCanceller3Config()'s
+// output for the plugin path, and no plugin parameter is added. The result
+// informs a future decision about whether a detector swap-over is worth
+// building at all (which would also need a hold mechanism rebuilt in
+// plugin code: SubbandNearendDetector has no equivalent of
+// DominantNearendDetector's trigger_threshold/hold_duration -- its Update()
+// recomputes nearend_state_ from scratch every 4ms block, so Protection
+// Hold Time would stop doing anything).
+//
+// How the decision is observed: neither AudioProcessingStats nor
+// EchoControl::Metrics exposes the detector's boolean, and ApmDataDumper
+// (which dumps exactly this flag as "aec3_dominant_nearend") cannot be
+// compiled into this distribution -- WEBRTC_APM_DEBUG_DUMP=1 hard-requires
+// common_audio/wav_file.h, which the vendored webrtc-audio-processing tree
+// prunes. So the vendored AEC3 carries a tiny measurement-only accessor
+// chain instead (EchoCanceller3::GetNearendStateCounters ->
+// BlockProcessor -> EchoRemover, tallied right after
+// SuppressionGain::GetGain in echo_remover.cc): cumulative per-4ms-block
+// counts of blocks seen / blocks in near-end state / state transitions.
+// Nothing in the processing path reads the counters, so behavior is
+// untouched; the plugin never calls the accessor. Polled here once per
+// 10ms frame, so per-100ms bins are exact 25-block tallies.
+//
+// SubbandNearendDetector trigger condition (subband_nearend_detector.cc):
+//   avg_power(subband1) < nearend_threshold * avg_power(subband2)
+//     AND avg_power(subband1) > snr_threshold * avg_noise_power(subband1)
+// i.e. "the low band is quiet RELATIVE to the high band, and the low band
+// is genuinely above the noise floor". With subband1 = today's <2kHz band
+// and subband2 in the 2-8kHz range, that is exactly the "crowd loudness
+// skews mid/high, PA skews bass" hypothesis. Note the detector sees the
+// POST-linear-filter error spectrum (E2, once the linear estimate is
+// usable -- echo_remover.cc), not the raw mic, and unlike the dominant
+// detector it never looks at the residual-echo estimate at all.
+//
+// Threshold choices (documented reasoning, since stock values are 1.0/1.0
+// single-bin placeholders that trigger never/degenerately):
+//   - nearend_threshold is swept 1/2/4/8 per band pair: audio spectra roll
+//     off with frequency, so how much quieter than subband2 the low band
+//     must be to count as "crowd" is exactly the unknown this probe exists
+//     to measure. 1.0 means "high band must outpower the low band" (very
+//     strict on music); 8.0 tolerates the low band being up to 9dB louder.
+//   - snr_threshold is fixed at 1.0: the shipping dominant detector at the
+//     75% Near-end Sensitivity default runs snr = 30*(1/60)^0.75 ~= 1.4
+//     (applyNearendSensitivity in TailLengthEchoControl.h), so ~1 keeps
+//     the noise gate comparably permissive and leaves the band-ratio test
+//     as the variable under study.
+//   - nearend_average_blocks = 4 (16ms smoothing): the subband detector
+//     has no trigger/hold counters, so a little smoothing stands in for
+//     the dominant detector's 12-block trigger_threshold; more would blur
+//     the timing pattern this probe wants to see.
+// A control candidate with subband2 == subband1 and nearend_threshold 1.0
+// can never trigger (a value is never < 1.0 * itself) -- it sanity-checks
+// the harness plumbing against known behavior.
+//
+// Config context: 400ms tail / Moderate / defaults 75% & 100ms -- the
+// confirmed real-world setting for the venue this material comes from
+// (and --linear-probe's precedent), not the shipped 800ms default; only
+// the detector selection and its bands differ between runs.
+// ---------------------------------------------------------------------------
+
+struct SubbandProbeCandidate {
+    const char* name;
+    bool useSubband;
+    size_t sb1Lo, sb1Hi, sb2Lo, sb2Hi; // bin indices, ~125Hz per bin (65 bins over 0-8kHz)
+    float nearendThreshold;
+    float snrThreshold;
+    size_t averageBlocks;
+};
+
+struct SubbandProbeRunResult {
+    std::vector<double> binFraction; // per-100ms near-end fraction (exact 25-block tallies)
+    double overallFraction = 0.0;    // skipS..end
+    double transitionsPerSecond = 0.0; // skipS..end, exact (counted per block in echo_remover.cc)
+    uint64_t measuredBlocks = 0;
+};
+
+// Same raw fixed-10ms-frame driver as runRawAec3 (the FrameFifo bridging is
+// irrelevant to detector behavior), plus the per-frame counter poll.
+static SubbandProbeRunResult runSubbandProbeRun(const webrtc::EchoCanceller3Config& config, int sampleRate,
+                                                const std::vector<float>& reference, const std::vector<float>& mic,
+                                                double skipS) {
+    auto factory = std::make_unique<TailLengthEchoControlFactory>(config);
+    auto* factoryPtr = factory.get(); // stays valid: the APM owns the factory for its own lifetime
+    auto apm = webrtc::AudioProcessingBuilder()
+                   .SetEchoControlFactory(std::move(factory))
+                   .Create();
+    webrtc::AudioProcessing::Config apmConfig;
+    apmConfig.echo_canceller.enabled = true;
+    apmConfig.echo_canceller.mobile_mode = false;
+    apmConfig.gain_controller1.enabled = false;
+    apmConfig.gain_controller2.enabled = false;
+    apmConfig.high_pass_filter.enabled = false;
+    apmConfig.noise_suppression.enabled = false;
+    apm->ApplyConfig(apmConfig);
+
+    const int frameSize = sampleRate / 100;
+    const int n = static_cast<int>(mic.size());
+    std::vector<float> refFrame(static_cast<size_t>(frameSize));
+    std::vector<float> micFrame(static_cast<size_t>(frameSize));
+    float* refPtr = refFrame.data();
+    float* micPtr = micFrame.data();
+    const webrtc::StreamConfig streamConfig(sampleRate, 1);
+
+    using Counters = webrtc::EchoRemover::NearendStateCounters;
+    std::vector<Counters> perFrame; // cumulative counters after each 10ms frame
+    perFrame.reserve(static_cast<size_t>(n / frameSize + 1));
+
+    int pos = 0;
+    while (pos + frameSize <= n) {
+        std::copy_n(reference.data() + pos, frameSize, refFrame.data());
+        std::copy_n(mic.data() + pos, frameSize, micFrame.data());
+        apm->ProcessReverseStream(&refPtr, streamConfig, streamConfig, &refPtr);
+        apm->ProcessStream(&micPtr, streamConfig, streamConfig, &micPtr);
+        auto* aec3 = factoryPtr->getActiveInstance();
+        perFrame.push_back(aec3 != nullptr ? aec3->GetNearendStateCounters() : Counters{});
+        pos += frameSize;
+    }
+
+    SubbandProbeRunResult result;
+    if (perFrame.empty()) return result;
+
+    // Exact per-100ms bins from cumulative counter deltas (10 frames = 25
+    // 4ms blocks per bin).
+    const size_t framesPerBin = 10;
+    const size_t numBins = perFrame.size() / framesPerBin;
+    result.binFraction.resize(numBins, 0.0);
+    Counters prev{};
+    for (size_t b = 0; b < numBins; ++b) {
+        const Counters& cur = perFrame[(b + 1) * framesPerBin - 1];
+        const uint64_t db = cur.blocks - prev.blocks;
+        const uint64_t dn = cur.nearend_blocks - prev.nearend_blocks;
+        result.binFraction[b] = db > 0 ? static_cast<double>(dn) / static_cast<double>(db) : 0.0;
+        prev = cur;
+    }
+
+    // Aggregates over skipS..end from the cumulative counters directly.
+    const size_t skipFrame = std::min(perFrame.size() - 1, static_cast<size_t>(skipS * 100.0));
+    const Counters& atSkip = perFrame[skipFrame];
+    const Counters& last = perFrame.back();
+    const uint64_t blocks = last.blocks - atSkip.blocks;
+    result.measuredBlocks = blocks;
+    if (blocks > 0) {
+        result.overallFraction =
+            static_cast<double>(last.nearend_blocks - atSkip.nearend_blocks) / static_cast<double>(blocks);
+        result.transitionsPerSecond =
+            static_cast<double>(last.transitions - atSkip.transitions) / (static_cast<double>(blocks) / 250.0);
+    }
+    return result;
+}
+
+// Pearson correlation between two equal-grid traces, skipping the first
+// skipBins bins of both.
+static double pearsonCorrelation(const std::vector<double>& a, const std::vector<double>& b, size_t skipBins) {
+    const size_t n = std::min(a.size(), b.size());
+    if (n <= skipBins + 2) return 0.0;
+    double meanA = 0.0, meanB = 0.0;
+    const size_t count = n - skipBins;
+    for (size_t i = skipBins; i < n; ++i) { meanA += a[i]; meanB += b[i]; }
+    meanA /= static_cast<double>(count);
+    meanB /= static_cast<double>(count);
+    double num = 0.0, denA = 0.0, denB = 0.0;
+    for (size_t i = skipBins; i < n; ++i) {
+        const double da = a[i] - meanA, db = b[i] - meanB;
+        num += da * db;
+        denA += da * da;
+        denB += db * db;
+    }
+    return (denA > 0.0 && denB > 0.0) ? num / std::sqrt(denA * denB) : 0.0;
+}
+
+static int runSubbandProbeMode(const char* micPath, const char* refPath, double maxSeconds) {
+    printf("=== Subband near-end detector probe (band-pair sweep vs dominant baseline) ===\n");
+    std::vector<float> mic, ref;
+    double micRate = 0.0, refRate = 0.0;
+    if (!loadWavMono(juce::File(juce::String(micPath)), mic, micRate)) return 1;
+    if (!loadWavMono(juce::File(juce::String(refPath)), ref, refRate)) return 1;
+    if (!juce::exactlyEqual(micRate, refRate)) {
+        printf("ERROR: sample rates differ (mic %.0f Hz, reference %.0f Hz) -- resample one first\n", micRate, refRate);
+        return 1;
+    }
+    const int sampleRate = static_cast<int>(micRate);
+    size_t n = std::min(mic.size(), ref.size());
+    if (maxSeconds > 0.0)
+        n = std::min(n, static_cast<size_t>(maxSeconds * sampleRate));
+    mic.resize(n);
+    ref.resize(n);
+    const double lengthS = static_cast<double>(n) / sampleRate;
+    printf("Material: %.1fs at %d Hz\n", lengthS, sampleRate);
+    const double skipS = 5.0; // AEC3 bootstrap + convergence, same span as the other real-material modes
+
+    // Plugin front-end, same as --linear-probe: 150Hz HPF on both streams,
+    // reference trim 0dB.
+    {
+        HighPassFilterChain micHpf, refHpf;
+        micHpf.setCutoff(sampleRate, 150.0f);
+        refHpf.setCutoff(sampleRate, 150.0f);
+        const float refGainLinear = juce::Decibels::decibelsToGain(0.0f);
+        for (size_t i = 0; i < n; ++i) {
+            mic[i] = micHpf.processSample(mic[i]);
+            ref[i] = refHpf.processSample(ref[i]) * refGainLinear;
+        }
+    }
+
+    // Per-100ms mic/ref level traces (post-preprocessing) on the same grid
+    // as the detector bins -- the external validation signal: seconds where
+    // the mic runs hot relative to the reference are the best available
+    // proxy for crowd-dominant moments (the subband detector never sees the
+    // reference at all, so correlation with mic-ref level is not circular).
+    const size_t binSize = static_cast<size_t>(sampleRate / 10);
+    const size_t numBins = n / binSize;
+    std::vector<double> micDb(numBins), refDb(numBins), micMinusRefDb(numBins);
+    for (size_t b = 0; b < numBins; ++b) {
+        double micSumSq = 0.0, refSumSq = 0.0;
+        for (size_t i = b * binSize; i < (b + 1) * binSize; ++i) {
+            micSumSq += static_cast<double>(mic[i]) * mic[i];
+            refSumSq += static_cast<double>(ref[i]) * ref[i];
+        }
+        micDb[b] = 10.0 * std::log10(std::max(1e-12, micSumSq / static_cast<double>(binSize)));
+        refDb[b] = 10.0 * std::log10(std::max(1e-12, refSumSq / static_cast<double>(binSize)));
+        micMinusRefDb[b] = micDb[b] - refDb[b];
+    }
+    const size_t skipBins = static_cast<size_t>(skipS * 10.0);
+
+    // Band pairs under test (bin ~= 125Hz): subband1 is always today's
+    // detector band, subband2 sweeps the mid/high ranges where crowd energy
+    // should sit. Threshold sweep rationale in the block comment above.
+    // Threshold sweep 2..128 (i.e. the low band may be up to ~3..21dB louder
+    // than subband2 and still count as near-end): a 12s pilot with thr 1..8
+    // showed ~0% triggers everywhere -- on this material the post-filter low
+    // band powers far exceed the mid/high band averages, so the usable
+    // operating range sits at higher ratios. The top of the sweep is
+    // expected to degenerate (ratio test ~always true, trigger dominated by
+    // the SNR gate); the informative zone is wherever the discrimination
+    // metrics peak between the two extremes.
+    const SubbandProbeCandidate candidates[] = {
+        { "ctrl_sb2eq_sb1",  true, 1, 15, 1, 15,  1.0f, 1.0f, 4 }, // must stay ~0%: p1 < 1.0*p1 is impossible
+        { "sb_2k4k_thr2",    true, 1, 15, 16, 32, 2.0f,   1.0f, 4 },
+        { "sb_2k4k_thr8",    true, 1, 15, 16, 32, 8.0f,   1.0f, 4 },
+        { "sb_2k4k_thr16",   true, 1, 15, 16, 32, 16.0f,  1.0f, 4 },
+        { "sb_2k4k_thr32",   true, 1, 15, 16, 32, 32.0f,  1.0f, 4 },
+        { "sb_2k4k_thr64",   true, 1, 15, 16, 32, 64.0f,  1.0f, 4 },
+        { "sb_2k4k_thr128",  true, 1, 15, 16, 32, 128.0f, 1.0f, 4 },
+        { "sb_2k6k_thr2",    true, 1, 15, 16, 48, 2.0f,   1.0f, 4 },
+        { "sb_2k6k_thr8",    true, 1, 15, 16, 48, 8.0f,   1.0f, 4 },
+        { "sb_2k6k_thr16",   true, 1, 15, 16, 48, 16.0f,  1.0f, 4 },
+        { "sb_2k6k_thr32",   true, 1, 15, 16, 48, 32.0f,  1.0f, 4 },
+        { "sb_2k6k_thr64",   true, 1, 15, 16, 48, 64.0f,  1.0f, 4 },
+        { "sb_2k6k_thr128",  true, 1, 15, 16, 48, 128.0f, 1.0f, 4 },
+        { "sb_4k8k_thr2",    true, 1, 15, 32, 64, 2.0f,   1.0f, 4 },
+        { "sb_4k8k_thr8",    true, 1, 15, 32, 64, 8.0f,   1.0f, 4 },
+        { "sb_4k8k_thr16",   true, 1, 15, 32, 64, 16.0f,  1.0f, 4 },
+        { "sb_4k8k_thr32",   true, 1, 15, 32, 64, 32.0f,  1.0f, 4 },
+        { "sb_4k8k_thr64",   true, 1, 15, 32, 64, 64.0f,  1.0f, 4 },
+        { "sb_4k8k_thr128",  true, 1, 15, 32, 64, 128.0f, 1.0f, 4 },
+    };
+
+    // Baseline first: the shipping dominant detector at this venue's
+    // confirmed settings (400ms tail, Moderate, sensitivity 75%, hold
+    // 100ms) -- identical config to every candidate except the detector.
+    const auto baseConfig = makeEchoCanceller3Config(2 /*400ms*/, 1 /*Moderate*/, false, 75.0f, 100.0f);
+
+    printf("\n%-16s %10s %12s %8s %8s %8s %10s %10s\n",
+           "run", "nearend%", "flips/s", "r(mic)", "r(ref)", "r(m-r)", "loRefQ%", "hiRefQ%");
+
+    struct RunRecord { std::string name; SubbandProbeRunResult res; };
+    std::vector<RunRecord> runs;
+
+    auto analyzeAndPrint = [&](const std::string& name, const SubbandProbeRunResult& res,
+                               const SubbandProbeRunResult* baseline) {
+        const double rMic = pearsonCorrelation(res.binFraction, micDb, skipBins);
+        const double rRef = pearsonCorrelation(res.binFraction, refDb, skipBins);
+        const double rDiff = pearsonCorrelation(res.binFraction, micMinusRefDb, skipBins);
+
+        // Conditional trigger rate by reference-level quartile: a detector
+        // that protects crowd (not PA) should trigger MORE in the quietest-
+        // reference quarter of bins and LESS in the loudest.
+        double loQ = 0.0, hiQ = 0.0;
+        {
+            std::vector<size_t> idx;
+            for (size_t b = skipBins; b < std::min(res.binFraction.size(), refDb.size()); ++b) idx.push_back(b);
+            std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b2) { return refDb[a] < refDb[b2]; });
+            const size_t q = idx.size() / 4;
+            if (q > 0) {
+                for (size_t i = 0; i < q; ++i) loQ += res.binFraction[idx[i]];
+                for (size_t i = idx.size() - q; i < idx.size(); ++i) hiQ += res.binFraction[idx[i]];
+                loQ = 100.0 * loQ / static_cast<double>(q);
+                hiQ = 100.0 * hiQ / static_cast<double>(q);
+            }
+        }
+
+        printf("%-16s %9.1f%% %12.2f %8.2f %8.2f %8.2f %9.1f%% %9.1f%%\n",
+               name.c_str(), 100.0 * res.overallFraction, res.transitionsPerSecond,
+               rMic, rRef, rDiff, loQ, hiQ);
+        if (baseline != nullptr) {
+            const double rBase = pearsonCorrelation(res.binFraction, baseline->binFraction, skipBins);
+            printf("%-16s   vs baseline: r=%.2f\n", "", rBase);
+        }
+        // Clustering/pattern check via the shared autocorrelation helper.
+        reportPeriodicity((name + " frac").c_str(), res.binFraction, 10);
+    };
+
+    printf("\n-- baseline (DominantNearendDetector, shipping <2kHz-only band) --\n");
+    RunRecord baselineRun{ "dom_baseline", runSubbandProbeRun(baseConfig, sampleRate, ref, mic, skipS) };
+    analyzeAndPrint(baselineRun.name, baselineRun.res, nullptr);
+    runs.push_back(baselineRun);
+
+    printf("\n-- subband candidates --\n");
+    for (const auto& cand : candidates) {
+        auto config = baseConfig;
+        config.suppressor.use_subband_nearend_detection = true;
+        auto& sd = config.suppressor.subband_nearend_detection;
+        sd.nearend_average_blocks = cand.averageBlocks;
+        sd.subband1 = { cand.sb1Lo, cand.sb1Hi };
+        sd.subband2 = { cand.sb2Lo, cand.sb2Hi };
+        sd.nearend_threshold = cand.nearendThreshold;
+        sd.snr_threshold = cand.snrThreshold;
+
+        RunRecord rec{ cand.name, runSubbandProbeRun(config, sampleRate, ref, mic, skipS) };
+        analyzeAndPrint(rec.name, rec.res, &baselineRun.res);
+        runs.push_back(rec);
+    }
+
+    // Combined per-100ms trace CSV: level context + one trigger-fraction
+    // column per run, for plotting the time pattern.
+    {
+        juce::String csv("t_s,mic_db,ref_db");
+        for (const auto& r : runs) csv << "," << r.name.c_str();
+        csv << "\n";
+        size_t rows = numBins;
+        for (const auto& r : runs) rows = std::min(rows, r.res.binFraction.size());
+        for (size_t b = 0; b < rows; ++b) {
+            csv << juce::String(0.1 * static_cast<double>(b + 1), 1) << ","
+                << juce::String(micDb[b], 2) << "," << juce::String(refDb[b], 2);
+            for (const auto& r : runs) csv << "," << juce::String(r.res.binFraction[b], 3);
+            csv << "\n";
+        }
+        juce::File::getCurrentWorkingDirectory().getChildFile("subband_probe_trace.csv").replaceWithText(csv);
+    }
+    // Summary CSV.
+    {
+        juce::String csv("run,sb1,sb2,nearend_threshold,snr_threshold,nearend_pct,flips_per_s,r_mic,r_ref,r_mic_minus_ref\n");
+        size_t candIdx = 0;
+        for (const auto& r : runs) {
+            const bool isBaseline = (&r == &runs.front());
+            const SubbandProbeCandidate* c = isBaseline ? nullptr : &candidates[candIdx++];
+            csv << r.name.c_str() << ","
+                << (c ? (juce::String(static_cast<int>(c->sb1Lo * 125)) + "-" + juce::String(static_cast<int>(c->sb1Hi * 125)) + "Hz") : juce::String("125-1875Hz(fixed)")) << ","
+                << (c ? (juce::String(static_cast<int>(c->sb2Lo * 125)) + "-" + juce::String(static_cast<int>(c->sb2Hi * 125)) + "Hz") : juce::String("n/a")) << ","
+                << (c ? juce::String(c->nearendThreshold, 2) : juce::String("n/a")) << ","
+                << (c ? juce::String(c->snrThreshold, 2) : juce::String("n/a")) << ","
+                << juce::String(100.0 * r.res.overallFraction, 2) << ","
+                << juce::String(r.res.transitionsPerSecond, 2) << ","
+                << juce::String(pearsonCorrelation(r.res.binFraction, micDb, skipBins), 3) << ","
+                << juce::String(pearsonCorrelation(r.res.binFraction, refDb, skipBins), 3) << ","
+                << juce::String(pearsonCorrelation(r.res.binFraction, micMinusRefDb, skipBins), 3) << "\n";
+        }
+        juce::File::getCurrentWorkingDirectory().getChildFile("subband_probe_report.csv").replaceWithText(csv);
+    }
+
+    printf("\nWrote subband_probe_report.csv and subband_probe_trace.csv (per-100ms trigger fractions).\n");
+    printf("Columns: nearend%% = fraction of 4ms blocks in near-end state (%.0fs..end); flips/s = exact\n"
+           "state transitions; r(...) = Pearson vs per-100ms mic/ref/mic-minus-ref level; loRefQ/hiRefQ =\n"
+           "mean trigger rate in the quietest/loudest reference-level quartile of bins. A detector that\n"
+           "protects crowd rather than PA wants r(m-r) positive, r(ref) negative, loRefQ >> hiRefQ.\n", skipS);
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
+    // --subband-probe <mic.wav> <ref.wav>: SubbandNearendDetector band-pair
+    // sweep vs the dominant-detector baseline on real material (see the
+    // block comment above runSubbandProbeMode).
+    if (argc >= 2 && std::string(argv[1]) == "--subband-probe") {
+        if (argc < 4) {
+            printf("Usage: %s --subband-probe <mic.wav> <reference.wav> [--seconds N]\n", argv[0]);
+            return 1;
+        }
+        double maxSeconds = 0.0;
+        for (int i = 4; i < argc; ++i) {
+            const std::string arg(argv[i]);
+            if (arg == "--seconds" && i + 1 < argc)
+                maxSeconds = std::atof(argv[++i]);
+        }
+        return runSubbandProbeMode(argv[2], argv[3], maxSeconds);
+    }
+
     // --linear-probe <mic.wav> <ref.wav>: linear-filter contribution
     // measurement on real material (see the block comment above
     // runLinearProbeMode).
