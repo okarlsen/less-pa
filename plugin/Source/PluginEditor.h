@@ -15,6 +15,44 @@ public:
     void resized() override;
 
 private:
+    // The window is resizable with a locked aspect ratio (see the
+    // ComponentBoundsConstrainer setup in the constructor), so every layout
+    // constant below is expressed in "design pixels" at the default size and
+    // multiplied by one uniform factor. Without that, resizing would just
+    // leave a growing empty strip at the bottom instead of scaling.
+    static constexpr int designWidth = 340;
+    static constexpr int designHeight = 860;
+
+    // Hoisted out of paint()/resized() because both need it and they drifted
+    // apart in the previous hand-chained layout (paint() removed 40px, and a
+    // separate 40 in resized() had to be kept in sync by hand).
+    static constexpr int titleStripHeight = 56;
+
+    static constexpr int outerMargin = 10;
+    static constexpr int titleGap = 10;
+    static constexpr int sectionGap = 12;
+
+    // These three are not free parameters -- each equals its section's row
+    // heights plus 2 * panelPaddingY, and together with the constants above
+    // they sum to exactly designHeight. See resized() for the row lists.
+    static constexpr int echoSectionHeight = 124;
+    static constexpr int processingSectionHeight = 400;
+    static constexpr int meteringSectionHeight = 226;
+
+    static constexpr int panelPaddingX = 12;
+    static constexpr int panelPaddingY = 10;
+
+    struct SectionBounds {
+        juce::Rectangle<int> title, echo, processing, metering;
+    };
+
+    // Single source of truth for the four top-level rectangles: resized()
+    // feeds each one to a Grid, paint() fills the three section ones as
+    // panels. Deriving both from the same function is the point -- the panel
+    // backgrounds can't drift out of alignment with the controls in them.
+    SectionBounds computeSectionBounds() const;
+    float getUiScale() const;
+
     void timerCallback() override;
     void tailLengthComboChanged();
     void updateTailLengthCombo();
@@ -43,6 +81,13 @@ private:
     PAEchoCancellerAudioProcessor& processor;
 
     juce::TextButton helpButton{ "?" };
+
+    // Uppercase group headers. They live inside their panel's top row rather
+    // than floating above it, so the panel rectangle and the Grid area it is
+    // laid out from are one and the same rectangle.
+    juce::Label echoSectionLabel{ "echoSectionLabel", "ECHO CANCELLATION" };
+    juce::Label processingSectionLabel{ "processingSectionLabel", "SIGNAL PROCESSING" };
+    juce::Label meteringSectionLabel{ "meteringSectionLabel", "METERING" };
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };
     juce::ComboBox tailLengthCombo;
