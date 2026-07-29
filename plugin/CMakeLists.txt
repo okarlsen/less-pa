@@ -45,6 +45,7 @@ target_sources(PAEchoCanceller
     PRIVATE
         Source/PluginProcessor.cpp
         Source/PluginEditor.cpp
+        Source/LessPALookAndFeel.cpp
 )
 
 target_compile_definitions(PAEchoCanceller
@@ -83,6 +84,7 @@ target_sources(PAEchoCancellerVerify
     PRIVATE
         Source/PluginProcessor.cpp
         Source/PluginEditor.cpp
+        Source/LessPALookAndFeel.cpp
         Source/verify_main.cpp
 )
 
@@ -110,3 +112,4 @@ target_link_libraries(PAEchoCancellerVerify
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
+

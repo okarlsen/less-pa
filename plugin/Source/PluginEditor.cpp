@@ -95,6 +95,8 @@ constexpr int readoutRow = 18;
 PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoCancellerAudioProcessor& p)
     : AudioProcessorEditor(&p), processor(p)
 {
+    setLookAndFeel(&lookAndFeel);
+
     setSize(designWidth, designHeight);
 
     // Aspect-locked rather than freely resizable: locking it means the whole
@@ -110,6 +112,9 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     for (auto* label : { &echoSectionLabel, &processingSectionLabel, &meteringSectionLabel }) {
         label->setJustificationType(juce::Justification::centredLeft);
+        // Secondary text: a group header names the region, it isn't a control,
+        // so it should sit behind the labels it groups in the reading order.
+        label->setColour(juce::Label::textColourId, LessPAColours::secondaryText);
         addAndMakeVisible(label);
     }
 
@@ -224,6 +229,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // window scale.
     for (auto* label : { &inputMeterLabel, &sidechainMeterLabel, &outputMeterLabel, &suppressionMeterLabel }) {
         label->setJustificationType(juce::Justification::centred);
+        label->setColour(juce::Label::textColourId, LessPAColours::secondaryText);
         addAndMakeVisible(label);
     }
     addAndMakeVisible(inputMeter);
@@ -235,6 +241,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     addAndMakeVisible(metersPostFilterToggle);
 
     delayReadoutLabel.setJustificationType(juce::Justification::centred);
+    delayReadoutLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
     addAndMakeVisible(delayReadoutLabel);
 
     updateTailLengthCombo();
@@ -254,6 +261,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 PAEchoCancellerAudioProcessorEditor::~PAEchoCancellerAudioProcessorEditor()
 {
     stopTimer();
+    setLookAndFeel(nullptr); // JUCE asserts if a component is destroyed still holding one
 }
 
 float PAEchoCancellerAudioProcessorEditor::getUiScale() const
@@ -289,7 +297,15 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
 
     const auto sections = computeSectionBounds();
 
-    g.setColour(juce::Colours::white);
+    // Panels, no border: an outline on top of a fill would read as busier
+    // without adding any information the fill doesn't already carry, which
+    // works against the point of the style. The fill alone is enough contrast
+    // against #14161A to separate the three groups.
+    g.setColour(LessPAColours::panel);
+    for (const auto& panel : { sections.echo, sections.processing, sections.metering })
+        g.fillRoundedRectangle(panel.toFloat(), 6.0f * getUiScale());
+
+    g.setColour(LessPAColours::primaryText);
     g.setFont(juce::FontOptions(16.0f * getUiScale()));
     g.drawFittedText("Less PA (AEC3)", sections.title.reduced(28, 0), juce::Justification::centred, 2);
 }
@@ -794,10 +810,22 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
     content->setText(helpText, false);
     content->setSize(420, 520);
 
+    // Colours are set on the editor directly rather than by handing it our
+    // LookAndFeel: the DialogWindow is a separate top-level window (so it does
+    // not inherit ours) and it is launched async, so it can outlive this editor
+    // -- pointing it at a member of ours would leave a dangling LookAndFeel.
+    content->setColour(juce::TextEditor::backgroundColourId, LessPAColours::panel);
+    content->setColour(juce::TextEditor::textColourId, LessPAColours::primaryText);
+    content->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+    content->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
+    content->setColour(juce::TextEditor::shadowColourId, juce::Colours::transparentBlack);
+    content->setColour(juce::TextEditor::highlightColourId, LessPAColours::accent.withAlpha(0.35f));
+    content->setColour(juce::TextEditor::highlightedTextColourId, LessPAColours::primaryText);
+
     juce::DialogWindow::LaunchOptions options;
     options.content.setOwned(content);
     options.dialogTitle = "Less PA -- Help";
-    options.dialogBackgroundColour = getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId);
+    options.dialogBackgroundColour = LessPAColours::windowBackground;
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = true;

@@ -2,6 +2,8 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "LessPALookAndFeel.h"
+
 // Vertical peak meter with instant attack and a fixed dB/tick visual decay.
 // setLevel() should be called from a UI-thread timer -- this component owns
 // the ballistics, the caller just reports facts.
@@ -36,26 +38,28 @@ public:
         repaint();
     }
 
+    // Palette only -- the dB thresholds and the fill geometry are unchanged.
     void paint(juce::Graphics& g) override {
         auto bounds = getLocalBounds().toFloat();
+        constexpr float corner = 3.0f;
 
-        g.setColour(juce::Colours::black.withAlpha(0.35f));
-        g.fillRoundedRectangle(bounds, 3.0f);
+        // Flat trough in the same colour as an unfilled slider track, and no
+        // outline: the translucent-black-plus-white-border version read as an
+        // inset hardware meter, which fights the flat style everywhere else.
+        g.setColour(LessPAColours::controlSurface);
+        g.fillRoundedRectangle(bounds, corner);
 
         const float proportion = juce::jlimit(0.0f, 1.0f, (displayedDb - rangeMinDb) / (rangeMaxDb - rangeMinDb));
         if (proportion > 0.0f) {
             auto filled = bounds.removeFromBottom(bounds.getHeight() * proportion);
             const juce::Colour colour = style == Style::suppression
-                                             ? juce::Colours::cyan
-                                             : (displayedDb > -3.0f    ? juce::Colours::red
-                                                : displayedDb > -12.0f ? juce::Colours::yellow
-                                                                       : juce::Colours::limegreen);
+                                             ? LessPAColours::meterSuppression
+                                             : (displayedDb > -3.0f    ? LessPAColours::meterDanger
+                                                : displayedDb > -12.0f ? LessPAColours::meterCaution
+                                                                       : LessPAColours::meterSafe);
             g.setColour(colour);
-            g.fillRoundedRectangle(filled, 3.0f);
+            g.fillRoundedRectangle(filled, corner);
         }
-
-        g.setColour(juce::Colours::white.withAlpha(0.6f));
-        g.drawRoundedRectangle(getLocalBounds().toFloat(), 3.0f, 1.0f);
     }
 
 private:

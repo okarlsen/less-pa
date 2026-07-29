@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
+#include "LessPALookAndFeel.h"
 #include "LevelMeterComponent.h"
 
 class PAEchoCancellerAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -79,6 +80,11 @@ private:
     void showHelpDialog();
 
     PAEchoCancellerAudioProcessor& processor;
+
+    // Declared before every component below on purpose: members are destroyed
+    // in reverse declaration order, so this outlives the components that are
+    // still pointing at it via setLookAndFeel().
+    LessPALookAndFeel lookAndFeel;
 
     juce::TextButton helpButton{ "?" };
 
