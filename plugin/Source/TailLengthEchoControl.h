@@ -201,7 +201,16 @@ inline webrtc::EchoCanceller3Config makeEchoCanceller3Config(int tailLengthIndex
                                                               float protectionHoldTimeMs,
                                                               float erleMin = 4.0f,
                                                               float comfortNoiseFloorDbfs = -96.0f,
-                                                              int nearendDetectorIndex = 0) {
+                                                              int nearendDetectorIndex = 0,
+                                                              // Deliberately 0 (= AEC3's instant tuning swap), NOT the
+                                                              // 40ms the plugin ships -- unlike erleMin/
+                                                              // comfortNoiseFloorDbfs above, whose defaults ARE the
+                                                              // shipped values. Every pre-existing call site in
+                                                              // verify_main.cpp inherits this default, so a nonzero one
+                                                              // would silently change what the regression suite
+                                                              // measures and destroy its value as a before/after
+                                                              // baseline. The plugin passes its real value explicitly.
+                                                              float transitionSmoothingMs = 0.0f) {
     webrtc::EchoCanceller3Config config;
     const size_t lengthBlocks = tailLengthToFilterLengthBlocks(tailLengthIndex);
     config.filter.refined.length_blocks = lengthBlocks;
@@ -351,6 +360,20 @@ inline webrtc::EchoCanceller3Config makeEchoCanceller3Config(int tailLengthIndex
     // parameter (rather than removing it) so a future, actually-verified
     // value can still be swept from the harness.
     config.comfort_noise.noise_floor_dbfs = comfortNoiseFloorDbfs;
+
+    // Transition Smoothing: how long AEC3 takes to crossfade between its
+    // normal and near-end suppressor tunings when the detector flips,
+    // instead of swapping them in a single 4ms block. Motivated by a
+    // listening test where BOTH detectors pumped and no combination of the
+    // trigger-rate controls (Near-end Sensitivity, Protection Hold Time,
+    // Suppression Strength) fixed it -- each setting traded one artifact
+    // for another. That is the signature of a discontinuity in the
+    // individual transition rather than a problem with how often
+    // transitions happen, which is all those controls can influence. See
+    // nearend_transition_blocks in the vendored echo_canceller3_config.h
+    // for the mechanism and for why 0 is bit-exact upstream behavior.
+    config.suppressor.nearend_transition_blocks =
+        juce::jmax(0, static_cast<int>(std::round(transitionSmoothingMs / 4.0f)));
 
     applySuppressionStrength(suppressionStrengthIndex, config);
 

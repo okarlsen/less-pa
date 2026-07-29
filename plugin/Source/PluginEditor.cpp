@@ -6,7 +6,7 @@
 PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoCancellerAudioProcessor& p)
     : AudioProcessorEditor(&p), processor(p)
 {
-    setSize(320, 838); // grown 70px for the Near-end Detector row -- see resized()
+    setSize(320, 902); // +64px over the Near-end Detector layout for the Transition Smoothing row -- see resized()
 
     helpButton.onClick = [this] { showHelpDialog(); };
     addAndMakeVisible(helpButton);
@@ -72,6 +72,19 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     };
     addAndMakeVisible(protectionHoldTimeSlider);
 
+    transitionSmoothingLabel.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(transitionSmoothingLabel);
+
+    transitionSmoothingSlider.setRange(0.0, 200.0);
+    transitionSmoothingSlider.setTextValueSuffix(" ms");
+    transitionSmoothingSlider.setNumDecimalPlacesToDisplay(0);
+    transitionSmoothingSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
+    transitionSmoothingSlider.onDragEnd = [this] { transitionSmoothingSliderChanged(); };
+    transitionSmoothingSlider.onValueChange = [this] {
+        if (!transitionSmoothingSlider.isMouseButtonDown()) transitionSmoothingSliderChanged();
+    };
+    addAndMakeVisible(transitionSmoothingSlider);
+
     hpfLabel.setJustificationType(juce::Justification::centred);
     addAndMakeVisible(hpfLabel);
 
@@ -126,6 +139,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     updateNearendDetectorCombo();
     updateNearendSensitivitySlider();
     updateProtectionHoldTimeSlider();
+    updateTransitionSmoothingSlider();
     updateHpfSlider();
     updateReferenceGainSlider();
     updateMetersPostFilterToggle();
@@ -190,6 +204,12 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     protectionHoldTimeLabel.setBounds(bounds.removeFromTop(16));
     bounds.removeFromTop(4);
     protectionHoldTimeSlider.setBounds(bounds.removeFromTop(28));
+
+    bounds.removeFromTop(16);
+
+    transitionSmoothingLabel.setBounds(bounds.removeFromTop(16));
+    bounds.removeFromTop(4);
+    transitionSmoothingSlider.setBounds(bounds.removeFromTop(28));
 
     bounds.removeFromTop(16);
 
@@ -359,6 +379,25 @@ void PAEchoCancellerAudioProcessorEditor::updateProtectionHoldTimeSlider()
         protectionHoldTimeSlider.setValue(currentMs, juce::dontSendNotification);
 }
 
+void PAEchoCancellerAudioProcessorEditor::transitionSmoothingSliderChanged()
+{
+    auto* param = processor.getTransitionSmoothingParameter();
+    const float normalized = param->convertTo0to1(static_cast<float>(transitionSmoothingSlider.getValue()));
+    param->beginChangeGesture();
+    param->setValueNotifyingHost(normalized);
+    param->endChangeGesture();
+}
+
+void PAEchoCancellerAudioProcessorEditor::updateTransitionSmoothingSlider()
+{
+    // See the same guard in updateNearendSensitivitySlider().
+    if (transitionSmoothingSlider.isMouseButtonDown())
+        return;
+    const double currentMs = static_cast<double>(processor.getTransitionSmoothingParameter()->get());
+    if (std::abs(transitionSmoothingSlider.getValue() - currentMs) > 0.5)
+        transitionSmoothingSlider.setValue(currentMs, juce::dontSendNotification);
+}
+
 void PAEchoCancellerAudioProcessorEditor::hpfSliderChanged()
 {
     auto* param = processor.getHpfFrequencyParameter();
@@ -430,6 +469,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     updateNearendDetectorCombo();
     updateNearendSensitivitySlider();
     updateProtectionHoldTimeSlider();
+    updateTransitionSmoothingSlider();
     updateHpfSlider();
     updateReferenceGainSlider();
     updateMetersPostFilterToggle();
@@ -580,6 +620,15 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "PA leakage through right after the crowd quiets down; shorter "
         "reacts faster but can pulse if crowd noise is intermittent. "
         "Applies live.\n"
+        "\n"
+        "TRANSITION SMOOTHING\n"
+        "How gradually the plugin moves between protecting audience sound "
+        "and suppressing PA bleed, when it changes its mind about which one "
+        "it's hearing. At 0ms it switches instantly, which can be heard as "
+        "pumping; raising it rounds that transition off. The trade-off is "
+        "that protection also engages and releases more gradually, so very "
+        "long settings can let a little more bleed through right after the "
+        "crowd quiets down. Applies live.\n"
         "\n"
         "INPUT HPF\n"
         "A 24dB/octave high-pass filter (80-300Hz), applied identically to "

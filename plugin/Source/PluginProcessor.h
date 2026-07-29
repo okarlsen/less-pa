@@ -55,6 +55,7 @@ public:
     juce::AudioParameterFloat* getNearendSensitivityParameter() const noexcept { return nearendSensitivityParam; }
     juce::AudioParameterFloat* getProtectionHoldTimeParameter() const noexcept { return protectionHoldTimeParam; }
     juce::AudioParameterChoice* getNearendDetectorParameter() const noexcept { return nearendDetectorParam; }
+    juce::AudioParameterFloat* getTransitionSmoothingParameter() const noexcept { return transitionSmoothingParam; }
 
     // Latency-matched internal bypass. Without this override, hosts
     // synthesize their own bypass by routing around the plugin entirely,
@@ -226,6 +227,16 @@ private:
     juce::AudioParameterChoice* nearendDetectorParam = nullptr;
     int appliedNearendDetectorIndex = -1;
 
+    // How long AEC3 crossfades between its normal and near-end suppressor
+    // tunings when the detector flips, instead of swapping them within one
+    // 4ms block. Targets pumping at its source -- the discontinuity in an
+    // individual transition -- rather than reducing how often transitions
+    // occur, which is all the other suppressor controls can do. 0ms is
+    // bit-exact AEC3 stock behavior (verified by full-suite output
+    // comparison), which is what makes this safely A/B-able by ear.
+    juce::AudioParameterFloat* transitionSmoothingParam = nullptr;
+    float appliedTransitionSmoothing = -1.0f;
+
     // Constructs a fresh apm for the given Tail Length (and whatever the
     // other 5 controls currently are) and resets the FIFOs so the pipeline
     // restarts from clean silence (same zero-padded ramp-up as the very
@@ -240,7 +251,7 @@ private:
     // the old instance in the meantime.
     void rebuildEchoCanceller(int tailLengthIndex, int suppressionStrengthIndex, bool limitHfGain,
                               float nearendSensitivity, float protectionHoldTime,
-                              int nearendDetectorIndex);
+                              int nearendDetectorIndex, float transitionSmoothing);
 
     // Everything a live Tail Length change needs, built off the audio
     // thread and handed over through the two atomic slots below. The box
@@ -259,6 +270,7 @@ private:
         float nearendSensitivity = 0.0f;
         float protectionHoldTime = 0.0f;
         int nearendDetectorIndex = 0;
+        float transitionSmoothing = 0.0f;
         double sampleRate = 0.0; // guards against adopting a build from before a re-prepare at a new rate
     };
 
@@ -286,7 +298,7 @@ private:
     // rebuildEchoCanceller must have run at least once).
     void applySuppressorConfigLive(int suppressionStrengthIndex, bool limitHfGain,
                                     float nearendSensitivity, float protectionHoldTime,
-                                    int nearendDetectorIndex);
+                                    int nearendDetectorIndex, float transitionSmoothing);
 
     // Dry/Wet: AEC3 can be too good, stripping correlated ambient content
     // (crowd noise, clapping) along with the real PA leakage and leaving

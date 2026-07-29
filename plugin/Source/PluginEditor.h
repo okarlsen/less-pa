@@ -28,6 +28,8 @@ private:
     void updateNearendSensitivitySlider();
     void protectionHoldTimeSliderChanged();
     void updateProtectionHoldTimeSlider();
+    void transitionSmoothingSliderChanged();
+    void updateTransitionSmoothingSlider();
     void hpfSliderChanged();
     void updateHpfSlider();
     void referenceGainSliderChanged();
@@ -70,6 +72,14 @@ private:
 
     juce::Label protectionHoldTimeLabel{ "protectionHoldTimeLabel", "Protection Hold Time" };
     juce::Slider protectionHoldTimeSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+
+    // How long AEC3 takes to crossfade between its two suppressor tunings
+    // when the near-end detector flips, rather than swapping them within a
+    // single 4ms block. 0ms is AEC3 stock (instant swap); the shipped 40ms
+    // rounds the transition off. Commits at drag-end only, like the two
+    // sliders above -- it rebuilds SuppressionGain via the live path.
+    juce::Label transitionSmoothingLabel{ "transitionSmoothingLabel", "Transition Smoothing" };
+    juce::Slider transitionSmoothingSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     juce::Label hpfLabel{ "hpfLabel", "Input HPF" };
     juce::Slider hpfSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
