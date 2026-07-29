@@ -86,6 +86,14 @@ private:
     // still pointing at it via setLookAndFeel().
     LessPALookAndFeel lookAndFeel;
 
+    // Short per-control hints. Complements the help dialog rather than
+    // replacing it -- one clause each, where the dialog has a paragraph.
+    juce::TooltipWindow tooltipWindow{ this };
+
+    // The SGTM wordmark, drawn in place of a text title (see paint()). A raster
+    // PNG, so juce::Image rather than Drawable.
+    juce::Image logoImage;
+
     juce::TextButton helpButton{ "?" };
 
     // Uppercase group headers. They live inside their panel's top row rather

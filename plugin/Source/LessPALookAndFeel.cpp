@@ -180,7 +180,11 @@ void LessPALookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButton& 
     // on/off switches over a running process rather than checkboxes in a list,
     // and the switch metaphor makes the current state readable at a glance --
     // which matters when the operator is checking it mid-show.
-    const float pillHeight = juce::jmin(18.0f, static_cast<float>(button.getHeight()));
+    // Proportional to the button rather than a literal 18px, so the switch
+    // follows the editor's uniform window scale instead of staying pinned at
+    // the default size while the text around it grows. 0.75 lands on the
+    // designed 18px at the 24px row height resized() uses.
+    const float pillHeight = juce::jlimit(12.0f, 28.0f, static_cast<float>(button.getHeight()) * 0.75f);
     const float pillWidth = pillHeight * (34.0f / 18.0f); // holds the designed 34x18 shape at any scale
     const juce::Rectangle<float> pill(0.0f,
                                       (static_cast<float>(button.getHeight()) - pillHeight) * 0.5f,

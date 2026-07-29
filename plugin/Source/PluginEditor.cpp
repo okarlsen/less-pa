@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <BinaryData.h>
+
 #include <cmath>
 #include <initializer_list>
 
@@ -96,6 +98,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     : AudioProcessorEditor(&p), processor(p)
 {
     setLookAndFeel(&lookAndFeel);
+
+    logoImage = juce::ImageCache::getFromMemory(Assets::sgtm_logo_png, Assets::sgtm_logo_pngSize);
 
     setSize(designWidth, designHeight);
 
@@ -244,6 +248,29 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     delayReadoutLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
     addAndMakeVisible(delayReadoutLabel);
 
+    // One clause each, deliberately much shorter than the corresponding
+    // section of showHelpDialog(): a tooltip answers "what is this?" while the
+    // mouse is already on the control, the dialog answers "how should I set
+    // it?". Duplicating the paragraphs here would make the tooltips too slow
+    // to read to be any use mid-show.
+    helpButton.setTooltip("Full explanation of every control");
+    tailLengthCombo.setTooltip("How long a reverb tail the canceller can model -- match it to your venue");
+    suppressionStrengthCombo.setTooltip("How hard residual echo is cleaned up after the main cancellation");
+    limitHfGainToggle.setTooltip("Extra clamp on high-frequency gain while the filter is still converging");
+    nearendDetectorCombo.setTooltip("Which method decides that a moment is genuine audience content");
+    nearendSensitivitySlider.setTooltip("How readily the detector protects audience sound instead of removing it");
+    protectionHoldTimeSlider.setTooltip("How long that protection lasts after it triggers");
+    transitionSmoothingSlider.setTooltip("How gradually protection and suppression cross-fade -- 0ms can pump");
+    hpfSlider.setTooltip("High-pass cutoff applied to both the mic and the PA reference before cancellation");
+    referenceGainSlider.setTooltip("Gain trim on the PA reference signal only");
+    dryWetSlider.setTooltip("Blends the cancelled output back against the untouched input");
+    metersPostFilterToggle.setTooltip("Show Input and PA-ref after the high-pass filter instead of before");
+    inputMeter.setTooltip("Microphone input level");
+    sidechainMeter.setTooltip("PA reference (sidechain) input level");
+    suppressionMeter.setTooltip("Measured dB reduction from input to output");
+    outputMeter.setTooltip("Level after cancellation");
+    delayReadoutLabel.setTooltip("AEC3's live echo-path delay estimate -- \"--\" means no reference is arriving");
+
     updateTailLengthCombo();
     updateSuppressionStrengthCombo();
     updateLimitHfGainToggle();
@@ -305,9 +332,27 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
     for (const auto& panel : { sections.echo, sections.processing, sections.metering })
         g.fillRoundedRectangle(panel.toFloat(), 6.0f * getUiScale());
 
-    g.setColour(LessPAColours::primaryText);
-    g.setFont(juce::FontOptions(16.0f * getUiScale()));
-    g.drawFittedText("Less PA (AEC3)", sections.title.reduced(28, 0), juce::Justification::centred, 2);
+    // Inset horizontally by more than the help button's width so the wordmark
+    // stays optically centred in the strip rather than centred in the space
+    // left over beside the button.
+    // Only the vertical inset actually constrains the wordmark at the default
+    // size -- at ~4:1 it is height-limited by the strip long before it runs out
+    // of width -- so that one is kept tight. The horizontal inset only matters
+    // at the wide end of the resize range.
+    const auto titleArea = sections.title.reduced(juce::roundToInt(34.0f * getUiScale()),
+                                                 juce::roundToInt(2.0f * getUiScale()));
+
+    if (logoImage.isValid()) {
+        // RectanglePlacement::centred scales to fit while preserving aspect,
+        // so the ~4:1 wordmark ends up height-limited by the title strip.
+        g.drawImage(logoImage, titleArea.toFloat(), juce::RectanglePlacement::centred);
+    } else {
+        // Only reachable if the compiled-in PNG fails to decode. Degrades to
+        // the old text title instead of leaving an empty strip.
+        g.setColour(LessPAColours::primaryText);
+        g.setFont(juce::FontOptions(16.0f * getUiScale()));
+        g.drawFittedText("Less PA (AEC3)", titleArea, juce::Justification::centred, 2);
+    }
 }
 
 void PAEchoCancellerAudioProcessorEditor::resized()

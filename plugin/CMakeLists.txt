@@ -41,6 +41,15 @@ juce_add_plugin(PAEchoCanceller
     COPY_PLUGIN_AFTER_BUILD TRUE
 )
 
+# The SGTM wordmark, compiled in as Assets::sgtm_logo_png. Underscores in the
+# filename are load-bearing: juce_add_binary_data's identifier generator
+# deletes hyphens rather than converting them.
+#
+# Linked into PAEchoCancellerVerify as well as the plugin -- that target
+# compiles Source/PluginEditor.cpp too (to keep the editor linkable), so
+# without it the build fails on unresolved Assets:: symbols.
+juce_add_binary_data(LessPAAssets NAMESPACE Assets SOURCES Resources/sgtm_logo.png)
+
 target_sources(PAEchoCanceller
     PRIVATE
         Source/PluginProcessor.cpp
@@ -63,6 +72,7 @@ target_include_directories(PAEchoCanceller
 
 target_link_libraries(PAEchoCanceller
     PRIVATE
+        LessPAAssets
         juce::juce_audio_utils
         juce::juce_dsp
         PkgConfig::WEBRTC_APM
@@ -104,6 +114,7 @@ target_include_directories(PAEchoCancellerVerify
 
 target_link_libraries(PAEchoCancellerVerify
     PRIVATE
+        LessPAAssets
         juce::juce_audio_utils
         juce::juce_dsp
         PkgConfig::WEBRTC_APM
@@ -112,4 +123,3 @@ target_link_libraries(PAEchoCancellerVerify
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
-
