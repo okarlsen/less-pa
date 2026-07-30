@@ -1,5 +1,40 @@
 #include "LessPALookAndFeel.h"
 
+#include <cmath>
+
+namespace {
+
+// Tooltip metrics. The font size matches JUCE's stock tooltip; the wrap width
+// is the part that differs -- 240 design px sits comfortably inside the 340px
+// editor the TooltipWindow is parented to, so long text wraps onto a second
+// line instead of running past the window edge and being clipped.
+constexpr float tooltipFontSize = 13.0f;
+constexpr int tooltipMaxWidth = 240;
+constexpr int tooltipPaddingX = 14;
+constexpr int tooltipPaddingY = 6;
+
+// Plain createLayout rather than createLayoutWithBalancedLineLengths (which is
+// what JUCE uses): the balanced version picks a width by iterating, so laying
+// the same string out a second time at the width it returned can break
+// differently. getTooltipBounds and drawTooltip are two separate calls that
+// must agree exactly on the line breaks, so a deterministic layout matters
+// more here than prettier line balance on the rare two-line tip.
+juce::TextLayout layoutTooltip(const juce::LookAndFeel& lookAndFeel, const juce::String& text,
+                               juce::Colour colour, float maxWidth)
+{
+    juce::AttributedString attributed;
+    attributed.setJustification(juce::Justification::centred);
+    attributed.append(text, lookAndFeel.withDefaultMetrics(juce::FontOptions(tooltipFontSize,
+                                                                            juce::Font::bold)),
+                      colour);
+
+    juce::TextLayout layout;
+    layout.createLayout(attributed, maxWidth);
+    return layout;
+}
+
+} // namespace
+
 LessPALookAndFeel::LessPALookAndFeel()
     // The base ColourScheme is set as well as the individual IDs below,
     // because it is what every widget this plugin does *not* use falls back
@@ -374,4 +409,53 @@ void LessPALookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& bu
 
     g.setColour(colour);
     g.fillRoundedRectangle(bounds, corner);
+}
+
+juce::Rectangle<int> LessPALookAndFeel::getTooltipBounds(const juce::String& tipText,
+                                                        juce::Point<int> screenPos,
+                                                        juce::Rectangle<int> parentArea)
+{
+    // Never wider than the parent can actually show, so the constrainedWithin()
+    // below only ever *moves* the box rather than shrinking it -- shrinking is
+    // what clipped the text before, because the layout had already been made
+    // at the larger width by then.
+    const float wrapWidth = static_cast<float>(juce::jmax(80, juce::jmin(tooltipMaxWidth,
+                                                                        parentArea.getWidth()
+                                                                            - 2 * tooltipPaddingX)));
+
+    const auto layout = layoutTooltip(*this, tipText, juce::Colours::black, wrapWidth);
+
+    // ceil, not truncate: drawTooltip re-derives its wrap width as
+    // (width - tooltipPaddingX), and that has to be >= the width measured here
+    // or the text would break onto an extra line that the box has no room for.
+    const int width = static_cast<int>(std::ceil(layout.getWidth())) + tooltipPaddingX;
+    const int height = static_cast<int>(std::ceil(layout.getHeight())) + tooltipPaddingY;
+
+    // Placement follows LookAndFeel_V2: offset away from whichever quadrant of
+    // the parent the pointer is in, so the tip never covers the control it
+    // describes.
+    return juce::Rectangle<int>(screenPos.x > parentArea.getCentreX() ? screenPos.x - (width + 12)
+                                                                     : screenPos.x + 24,
+                                screenPos.y > parentArea.getCentreY() ? screenPos.y - (height + 6)
+                                                                      : screenPos.y + 6,
+                                width, height)
+        .constrainedWithin(parentArea);
+}
+
+void LessPALookAndFeel::drawTooltip(juce::Graphics& g, const juce::String& text, int width, int height)
+{
+    const juce::Rectangle<float> bounds(static_cast<float>(width), static_cast<float>(height));
+    constexpr float corner = 5.0f;
+
+    g.setColour(findColour(juce::TooltipWindow::backgroundColourId));
+    g.fillRoundedRectangle(bounds, corner);
+
+    g.setColour(findColour(juce::TooltipWindow::outlineColourId));
+    g.drawRoundedRectangle(bounds.reduced(0.5f), corner, 1.0f);
+
+    // The same wrap width getTooltipBounds measured at (it added exactly
+    // tooltipPaddingX to the layout width), so the drawn breaks match the box.
+    layoutTooltip(*this, text, findColour(juce::TooltipWindow::textColourId),
+                  static_cast<float>(juce::jmax(1, width - tooltipPaddingX)))
+        .draw(g, bounds);
 }

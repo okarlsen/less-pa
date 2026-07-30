@@ -82,15 +82,18 @@ private:
     float scale;
 };
 
-// Row heights, shared between the three sections so the section-height
-// constants in PluginEditor.h can be checked against them by eye.
+// Row heights, shared between the sections so the section-height constants in
+// PluginEditor.h can be checked against them by eye.
 constexpr int sectionHeaderRow = 18;
 constexpr int controlLabelRow = 16;
 constexpr int comboRow = 28;
 constexpr int sliderRow = 26;
 constexpr int toggleRow = 24;
-constexpr int meterBarRow = 108;
+constexpr int meterBarRow = 94;
 constexpr int readoutRow = 18;
+
+// Horizontal clearance between the delay readout and the corner wordmark.
+constexpr int readoutLogoGap = 10;
 
 } // namespace
 
@@ -106,15 +109,29 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // Aspect-locked rather than freely resizable: locking it means the whole
     // window scales by one factor (see getUiScale()), so there is no general
     // reflow problem to solve -- no row has to decide whether to wrap.
-    setResizable(true, true);
-    setResizeLimits(300, 720, 480, 1152);
+    //
+    // useBottomRightCornerResizer is false: JUCE's stock diagonal grip would
+    // draw over the bottom-right corner, which is exactly where the wordmark
+    // now sits. Hosts supply their own window handle for a resizable editor.
+    setResizable(true, false);
+    // Derived from the design size rather than picked, so the stated limits
+    // are the ones the aspect-ratio constrainer will actually allow (the old
+    // literals implied two different aspect ratios).
+    const auto scaledHeight = [](int width) {
+        return juce::roundToInt(static_cast<float>(width)
+                                * static_cast<float>(designHeight) / static_cast<float>(designWidth));
+    };
+    constexpr int minWidth = 300;                   // ~0.88x
+    constexpr int maxWidth = 480;                   // ~1.41x
+    setResizeLimits(minWidth, scaledHeight(minWidth), maxWidth, scaledHeight(maxWidth));
     if (auto* constrainer = getConstrainer())
         constrainer->setFixedAspectRatio(static_cast<double>(designWidth) / static_cast<double>(designHeight));
 
     helpButton.onClick = [this] { showHelpDialog(); };
     addAndMakeVisible(helpButton);
 
-    for (auto* label : { &echoSectionLabel, &processingSectionLabel, &meteringSectionLabel }) {
+    for (auto* label : { &inputSectionLabel, &adaptiveSectionLabel,
+                         &residualSectionLabel, &doubleTalkSectionLabel }) {
         label->setJustificationType(juce::Justification::centredLeft);
         // Secondary text: a group header names the region, it isn't a control,
         // so it should sit behind the labels it groups in the reading order.
@@ -244,32 +261,39 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     metersPostFilterToggle.onClick = [this] { metersPostFilterToggleChanged(); };
     addAndMakeVisible(metersPostFilterToggle);
 
-    delayReadoutLabel.setJustificationType(juce::Justification::centred);
+    // Left-aligned rather than centred on the window: it shares the bottom
+    // strip with the corner wordmark (see computeLogoBounds()), so it is laid
+    // out in the space to the left of the mark and lines up with the control
+    // column above it instead of sitting visibly off-centre.
+    delayReadoutLabel.setJustificationType(juce::Justification::centredLeft);
     delayReadoutLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
     addAndMakeVisible(delayReadoutLabel);
 
-    // One clause each, deliberately much shorter than the corresponding
+    // A few words each, deliberately much shorter than the corresponding
     // section of showHelpDialog(): a tooltip answers "what is this?" while the
     // mouse is already on the control, the dialog answers "how should I set
     // it?". Duplicating the paragraphs here would make the tooltips too slow
-    // to read to be any use mid-show.
-    helpButton.setTooltip("Full explanation of every control");
-    tailLengthCombo.setTooltip("How long a reverb tail the canceller can model -- match it to your venue");
-    suppressionStrengthCombo.setTooltip("How hard residual echo is cleaned up after the main cancellation");
-    limitHfGainToggle.setTooltip("Extra clamp on high-frequency gain while the filter is still converging");
-    nearendDetectorCombo.setTooltip("Which method decides that a moment is genuine audience content");
-    nearendSensitivitySlider.setTooltip("How readily the detector protects audience sound instead of removing it");
-    protectionHoldTimeSlider.setTooltip("How long that protection lasts after it triggers");
-    transitionSmoothingSlider.setTooltip("How gradually protection and suppression cross-fade -- 0ms can pump");
-    hpfSlider.setTooltip("High-pass cutoff applied to both the mic and the PA reference before cancellation");
-    referenceGainSlider.setTooltip("Gain trim on the PA reference signal only");
-    dryWetSlider.setTooltip("Blends the cancelled output back against the untouched input");
-    metersPostFilterToggle.setTooltip("Show Input and PA-ref after the high-pass filter instead of before");
-    inputMeter.setTooltip("Microphone input level");
-    sidechainMeter.setTooltip("PA reference (sidechain) input level");
-    suppressionMeter.setTooltip("Measured dB reduction from input to output");
-    outputMeter.setTooltip("Level after cancellation");
-    delayReadoutLabel.setTooltip("AEC3's live echo-path delay estimate -- \"--\" means no reference is arriving");
+    // to read to be any use mid-show -- and the window is only 340px wide, so
+    // a sentence-length tip is a multi-line block sitting over the controls.
+    // (LessPALookAndFeel::getTooltipBounds now wraps rather than clips, so
+    // length is a readability choice here rather than a correctness one.)
+    helpButton.setTooltip("Full control reference");
+    tailLengthCombo.setTooltip("Match to venue reverb tail");
+    suppressionStrengthCombo.setTooltip("Residual echo cleanup");
+    limitHfGainToggle.setTooltip("Clamp HF while converging");
+    nearendDetectorCombo.setTooltip("How audience is detected");
+    nearendSensitivitySlider.setTooltip("Bias toward keeping audience");
+    protectionHoldTimeSlider.setTooltip("How long protection lasts");
+    transitionSmoothingSlider.setTooltip("Anti-pump crossfade");
+    hpfSlider.setTooltip("Cutoff on mic + reference");
+    referenceGainSlider.setTooltip("Reference gain only");
+    dryWetSlider.setTooltip("Blend cancelled vs original");
+    metersPostFilterToggle.setTooltip("Meter before or after HPF");
+    inputMeter.setTooltip("Mic input");
+    sidechainMeter.setTooltip("PA reference input");
+    suppressionMeter.setTooltip("Reduction, in vs out");
+    outputMeter.setTooltip("After cancellation");
+    delayReadoutLabel.setTooltip("Echo path delay estimate");
 
     updateTailLengthCombo();
     updateSuppressionStrengthCombo();
@@ -310,16 +334,35 @@ PAEchoCancellerAudioProcessorEditor::computeSectionBounds() const
     SectionBounds bounds;
     bounds.title = content.removeFromTop(sc(titleStripHeight));
     content.removeFromTop(sc(titleGap));
-    bounds.echo = content.removeFromTop(sc(echoSectionHeight));
+    bounds.input = content.removeFromTop(sc(inputSectionHeight));
     content.removeFromTop(sc(sectionGap));
-    bounds.processing = content.removeFromTop(sc(processingSectionHeight));
+    bounds.adaptive = content.removeFromTop(sc(adaptiveSectionHeight));
     content.removeFromTop(sc(sectionGap));
-    bounds.metering = content.removeFromTop(sc(meteringSectionHeight));
+    bounds.residual = content.removeFromTop(sc(residualSectionHeight));
+    content.removeFromTop(sc(sectionGap));
+    bounds.doubleTalk = content.removeFromTop(sc(doubleTalkSectionHeight));
+    content.removeFromTop(sc(sectionGap));
+    bounds.ungrouped = content.removeFromTop(sc(ungroupedHeight));
     return bounds;
+}
+
+juce::Rectangle<int> PAEchoCancellerAudioProcessorEditor::computeLogoBounds() const
+{
+    const float scale = getUiScale();
+    const int width = juce::roundToInt(scale * static_cast<float>(logoWidth));
+    const int height = juce::roundToInt(static_cast<float>(width) / logoAspect);
+
+    // Hard against the bottom-right of the content area. The delay readout
+    // shares this strip and is laid out around this rectangle in resized(),
+    // so the two cannot overlap at any point in the resize range -- the whole
+    // window scales by one factor, so their relative widths never change.
+    const auto content = getLocalBounds().reduced(juce::roundToInt(scale * static_cast<float>(outerMargin)));
+    return { content.getRight() - width, content.getBottom() - height, width, height };
 }
 
 void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
 {
+    const float scale = getUiScale();
     g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
 
     const auto sections = computeSectionBounds();
@@ -327,32 +370,56 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
     // Panels, no border: an outline on top of a fill would read as busier
     // without adding any information the fill doesn't already carry, which
     // works against the point of the style. The fill alone is enough contrast
-    // against #14161A to separate the three groups.
+    // against #14161A to separate the four stages.
+    //
+    // sections.ungrouped is deliberately absent: the output stage is left on
+    // the bare background so that "these four boxes are the processing chain"
+    // stays readable at a glance.
     g.setColour(LessPAColours::panel);
-    for (const auto& panel : { sections.echo, sections.processing, sections.metering })
-        g.fillRoundedRectangle(panel.toFloat(), 6.0f * getUiScale());
+    for (const auto& panel : { sections.input, sections.adaptive, sections.residual, sections.doubleTalk })
+        g.fillRoundedRectangle(panel.toFloat(), 6.0f * scale);
 
-    // Inset horizontally by more than the help button's width so the wordmark
-    // stays optically centred in the strip rather than centred in the space
-    // left over beside the button.
-    // Only the vertical inset actually constrains the wordmark at the default
-    // size -- at ~4:1 it is height-limited by the strip long before it runs out
-    // of width -- so that one is kept tight. The horizontal inset only matters
-    // at the wide end of the resize range.
-    const auto titleArea = sections.title.reduced(juce::roundToInt(34.0f * getUiScale()),
-                                                 juce::roundToInt(2.0f * getUiScale()));
+    // A meter bridge, not a fifth section: LevelMeterComponent draws its idle
+    // trough in the *window* background (deliberately darker than a panel, so
+    // a large idle meter reads as a recessed slot rather than disappearing),
+    // which needs something lighter behind it -- and with the metering panel
+    // gone the meters would otherwise sit on that exact same colour and
+    // vanish. Sized to the bars themselves rather than the full strip width so
+    // it reads as an instrument rather than a headerless section panel.
+    //
+    // Taken from the meters' own bounds rather than re-deriving the row
+    // arithmetic here, so it cannot drift from where the Grid actually put
+    // them. Degenerate (and harmless) only before the first resized().
+    const auto meterBars = inputMeter.getBounds().getUnion(outputMeter.getBounds());
+    if (!meterBars.isEmpty())
+        g.fillRoundedRectangle(meterBars.expanded(juce::roundToInt(10.0f * scale),
+                                                  juce::roundToInt(6.0f * scale))
+                                   .toFloat(),
+                               6.0f * scale);
 
-    if (logoImage.isValid()) {
-        // RectanglePlacement::centred scales to fit while preserving aspect,
-        // so the ~4:1 wordmark ends up height-limited by the title strip.
-        g.drawImage(logoImage, titleArea.toFloat(), juce::RectanglePlacement::centred);
-    } else {
-        // Only reachable if the compiled-in PNG fails to decode. Degrades to
-        // the old text title instead of leaving an empty strip.
-        g.setColour(LessPAColours::primaryText);
-        g.setFont(juce::FontOptions(16.0f * getUiScale()));
-        g.drawFittedText("Less PA (AEC3)", titleArea, juce::Justification::centred, 2);
-    }
+    // Left-aligned on the same x as every section header below it, and trimmed
+    // clear of the help button on the right.
+    auto titleArea = sections.title.reduced(juce::roundToInt(scale * static_cast<float>(panelPaddingX)), 0)
+                         .withTrimmedRight(juce::roundToInt(30.0f * scale));
+
+    g.setColour(LessPAColours::primaryText);
+    g.setFont(juce::FontOptions(23.0f * scale).withStyle("Bold"));
+    g.drawFittedText("Less PA", titleArea.removeFromTop(juce::roundToInt(38.0f * scale))
+                                    .withTrimmedTop(juce::roundToInt(6.0f * scale)),
+                     juce::Justification::centredLeft, 1);
+
+    // The subtitle, not the wordmark, is what tells someone opening the plugin
+    // cold what it does -- the help dialog covers the engine behind it.
+    g.setColour(LessPAColours::secondaryText);
+    g.setFont(juce::FontOptions(11.5f * scale));
+    g.drawFittedText("PA bleed removal for audience mics", titleArea,
+                     juce::Justification::centredLeft, 1);
+
+    // The company mark, small and last in the reading order. Placement::centred
+    // scales to fit while preserving aspect, so the ~4:1 wordmark fills the
+    // rectangle computeLogoBounds() already sized to that ratio.
+    if (logoImage.isValid())
+        g.drawImage(logoImage, computeLogoBounds().toFloat(), juce::RectanglePlacement::centred);
 }
 
 void PAEchoCancellerAudioProcessorEditor::resized()
@@ -369,7 +436,8 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     // stale text-box size would silently cap the value text at the default
     // size. Both are skipped when unchanged so the common
     // "same size, re-laid out" path doesn't rebuild the sliders' text boxes.
-    for (auto* label : { &echoSectionLabel, &processingSectionLabel, &meteringSectionLabel })
+    for (auto* label : { &inputSectionLabel, &adaptiveSectionLabel,
+                         &residualSectionLabel, &doubleTalkSectionLabel })
         label->setFont(juce::FontOptions(scale * 11.0f).withStyle("Bold"));
 
     for (auto* label : { &tailLengthLabel, &suppressionStrengthLabel, &nearendDetectorLabel,
@@ -390,70 +458,102 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         if (slider->getTextBoxWidth() != textBoxWidth || slider->getTextBoxHeight() != textBoxHeight)
             slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, textBoxWidth, textBoxHeight);
 
-    // ECHO CANCELLATION -- 18 + 6 + 16 + 28 + 12 + 24 = 104 rows,
-    // + 2 * panelPaddingY = echoSectionHeight (124).
-    //
-    // The two combos share a row: both are short dropdowns in the same
-    // section, and pairing them reclaims ~65px of the height the taller title
-    // strip and the panel padding cost.
-    {
-        SectionGrid grid(2, scale, 12);
-        grid.row(sectionHeaderRow, echoSectionLabel);
-        grid.gap(6);
-        grid.row(controlLabelRow, { &tailLengthLabel, &suppressionStrengthLabel });
-        grid.row(comboRow, { &tailLengthCombo, &suppressionStrengthCombo });
-        grid.gap(12);
-        grid.row(toggleRow, limitHfGainToggle);
-        grid.performLayout(sections.echo.reduced(sc(panelPaddingX), sc(panelPaddingY)));
-    }
-
-    // SIGNAL PROCESSING -- 18 + 6 + 16 + 28 + 10 + 6 * (16 + 26) + 5 * 10
-    // = 380 rows, + 2 * panelPaddingY = processingSectionHeight (400).
-    {
-        SectionGrid grid(1, scale, 0);
-        grid.row(sectionHeaderRow, processingSectionLabel);
-        grid.gap(6);
-        grid.row(controlLabelRow, nearendDetectorLabel);
-        grid.row(comboRow, nearendDetectorCombo);
-
-        struct LabelledSlider { juce::Label* label; juce::Slider* slider; };
-        const LabelledSlider sliderRows[] = {
-            { &nearendSensitivityLabel, &nearendSensitivitySlider },
-            { &protectionHoldTimeLabel, &protectionHoldTimeSlider },
-            { &transitionSmoothingLabel, &transitionSmoothingSlider },
-            { &hpfLabel, &hpfSlider },
-            { &referenceGainLabel, &referenceGainSlider },
-            { &dryWetLabel, &dryWetSlider },
-        };
-
-        for (auto& labelled : sliderRows) {
+    // A labelled slider is always a 16px label sitting directly on top of its
+    // own 26px slider, with the separating air above the pair rather than
+    // between them -- that pairing is what makes a column of sliders readable.
+    struct LabelledSlider { juce::Label* label; juce::Slider* slider; };
+    const auto addSliderRows = [](SectionGrid& grid, std::initializer_list<LabelledSlider> rows) {
+        for (auto& labelled : rows) {
             grid.gap(10); // separates this pair from whatever precedes it
             grid.row(controlLabelRow, *labelled.label);
             grid.row(sliderRow, *labelled.slider); // no gap: the label belongs to this slider
         }
+    };
 
-        grid.performLayout(sections.processing.reduced(sc(panelPaddingX), sc(panelPaddingY)));
+    // INPUT CONDITIONING -- 18 + 2 * (10 + 16 + 26) = 122 rows,
+    // + 2 * panelPaddingY = inputSectionHeight (142). No separate gap after
+    // the header here: the first pair's own leading 10px already provides it.
+    {
+        SectionGrid grid(1, scale, 0);
+        grid.row(sectionHeaderRow, inputSectionLabel);
+        addSliderRows(grid, { { &hpfLabel, &hpfSlider },
+                              { &referenceGainLabel, &referenceGainSlider } });
+        grid.performLayout(sections.input.reduced(sc(panelPaddingX), sc(panelPaddingY)));
     }
 
-    // METERING -- 18 + 6 + 16 + 108 + 10 + 24 + 6 + 18 = 206 rows,
-    // + 2 * panelPaddingY = meteringSectionHeight (226).
+    // ADAPTIVE FILTER -- 18 + 6 + 16 + 28 = 68 rows,
+    // + 2 * panelPaddingY = adaptiveSectionHeight (88).
     //
-    // Four columns rather than the old hand-computed column arithmetic: the
-    // meter bar stays narrow (22px, like a real channel-strip meter) while
-    // its label gets the whole column, which is what "PA-ref(sc)" and
-    // "Suppression" need to read at 12pt.
+    // One control on purpose: Tail Length *is* the linear filter length. It is
+    // the only thing in the plugin that touches the adaptive filter, and the
+    // only one that interrupts audio when changed, so folding it into a
+    // neighbouring section would misrepresent two distinct DSP stages.
     {
-        SectionGrid grid(4, scale, 8);
-        grid.row(sectionHeaderRow, meteringSectionLabel);
+        SectionGrid grid(1, scale, 0);
+        grid.row(sectionHeaderRow, adaptiveSectionLabel);
         grid.gap(6);
+        grid.row(controlLabelRow, tailLengthLabel);
+        grid.row(comboRow, tailLengthCombo);
+        grid.performLayout(sections.adaptive.reduced(sc(panelPaddingX), sc(panelPaddingY)));
+    }
+
+    // RESIDUAL SUPPRESSION -- 18 + 6 + 16 + 28 + 12 + 24 = 104 rows,
+    // + 2 * panelPaddingY = residualSectionHeight (124).
+    {
+        SectionGrid grid(1, scale, 0);
+        grid.row(sectionHeaderRow, residualSectionLabel);
+        grid.gap(6);
+        grid.row(controlLabelRow, suppressionStrengthLabel);
+        grid.row(comboRow, suppressionStrengthCombo);
+        grid.gap(12);
+        grid.row(toggleRow, limitHfGainToggle);
+        grid.performLayout(sections.residual.reduced(sc(panelPaddingX), sc(panelPaddingY)));
+    }
+
+    // DOUBLE-TALK PROTECTION -- 18 + 6 + 16 + 28 + 3 * (10 + 16 + 26) = 224
+    // rows, + 2 * panelPaddingY = doubleTalkSectionHeight (244).
+    {
+        SectionGrid grid(1, scale, 0);
+        grid.row(sectionHeaderRow, doubleTalkSectionLabel);
+        grid.gap(6);
+        grid.row(controlLabelRow, nearendDetectorLabel);
+        grid.row(comboRow, nearendDetectorCombo);
+        addSliderRows(grid, { { &nearendSensitivityLabel, &nearendSensitivitySlider },
+                              { &protectionHoldTimeLabel, &protectionHoldTimeSlider },
+                              { &transitionSmoothingLabel, &transitionSmoothingSlider } });
+        grid.performLayout(sections.doubleTalk.reduced(sc(panelPaddingX), sc(panelPaddingY)));
+    }
+
+    // OUTPUT STAGE, ungrouped -- (16 + 26) + 12 + 16 + 4 + 94 + 12 + 24 + 8 + 18
+    // = 230 rows = ungroupedHeight. No panel and no header: a heading over a
+    // row of meters is noise to the operator this is built for.
+    {
+        auto ungrouped = sections.ungrouped;
+
+        // Bottom strip first, because the readout has to be fitted around the
+        // corner wordmark rather than laid out independently of it.
+        auto bottomStrip = ungrouped.removeFromBottom(sc(readoutRow));
+        delayReadoutLabel.setBounds(bottomStrip
+                                        .withTrimmedLeft(sc(panelPaddingX))
+                                        .withRight(computeLogoBounds().getX() - sc(readoutLogoGap)));
+        ungrouped.removeFromBottom(sc(8));
+
+        // Four columns rather than hand-computed column arithmetic: the meter
+        // bar stays narrow (22px, like a real channel-strip meter) while its
+        // label gets the whole column, which is what "PA-ref(sc)" and
+        // "Suppression" need to read at 12pt. Full-width rows simply span all
+        // four columns.
+        SectionGrid grid(4, scale, 8);
+        grid.row(controlLabelRow, dryWetLabel);
+        grid.row(sliderRow, dryWetSlider);
+        grid.gap(12);
         grid.row(controlLabelRow, { &inputMeterLabel, &sidechainMeterLabel,
                                     &suppressionMeterLabel, &outputMeterLabel });
+        grid.gap(4); // clears the meter bridge's top edge (see paint())
         grid.row(meterBarRow, { &inputMeter, &sidechainMeter, &suppressionMeter, &outputMeter }, 22);
-        grid.gap(10);
+        grid.gap(12); // ditto, its bottom edge
         grid.row(toggleRow, metersPostFilterToggle);
-        grid.gap(6);
-        grid.row(readoutRow, delayReadoutLabel);
-        grid.performLayout(sections.metering.reduced(sc(panelPaddingX), sc(panelPaddingY)));
+        grid.performLayout(ungrouped.reduced(sc(panelPaddingX), 0));
     }
 }
 

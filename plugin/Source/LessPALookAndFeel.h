@@ -75,4 +75,21 @@ public:
 
     void drawButtonBackground(juce::Graphics&, juce::Button&, const juce::Colour& backgroundColour,
                               bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
+
+    // Both halves of the tooltip are overridden, and both have to be.
+    // LookAndFeel_V2::getTooltipBounds lays the text out at up to 400px wide
+    // and only *then* constrains the result into the parent -- and the
+    // TooltipWindow is parented to a ~340px editor, so a long tip was measured
+    // too wide and then squeezed, losing text off the end. LookAndFeel_V4
+    // overrides only drawTooltip, so that behaviour was inherited.
+    //
+    // drawTooltip is not optional here: it re-lays the text out itself, again
+    // at the stock 400px, so overriding the bounds alone would give a
+    // correctly-sized box with clipped text inside it. Both go through
+    // layoutTooltip() in the .cpp at the same wrap width, which is what makes
+    // the measured box and the drawn text agree.
+    juce::Rectangle<int> getTooltipBounds(const juce::String& tipText,
+                                          juce::Point<int> screenPos,
+                                          juce::Rectangle<int> parentArea) override;
+    void drawTooltip(juce::Graphics&, const juce::String& text, int width, int height) override;
 };
