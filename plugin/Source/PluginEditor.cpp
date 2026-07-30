@@ -867,7 +867,9 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
     static const juce::String helpText =
         "LESS PA cancels PA speaker leakage out of an audience microphone, "
         "using the PA feed itself (not a room estimate of it) as a reference "
-        "-- wire the PA signal into the Reference sidechain input.\n"
+        "-- wire the PA signal into the Reference sidechain input. It works "
+        "by applying acoustic echo cancellation (AEC) -- the same technique "
+        "phones and conferencing systems use to remove speaker bleed.\n"
         "\n"
         "The panel follows the signal chain, top to bottom: what reaches the "
         "canceller, then the linear filter that models the leakage and "
@@ -899,7 +901,9 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "TAIL LENGTH\n"
         "How long a reverb tail the canceller can model, matched to your "
         "venue: 50ms (dry room) up to 800ms (very large hall). Longer "
-        "costs a little more CPU per instance.\n"
+        "costs a little more CPU per instance. Tail Length is the only "
+        "control that briefly interrupts audio when changed. It rebuilds "
+        "the adaptive filter.\n"
         "\n"
         "\n"
         "=== RESIDUAL SUPPRESSION ===\n"
@@ -986,9 +990,8 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "means the reference and mic timing is unstable.\n"
         "\n"
         "\n"
-        "Tail Length is the only control that briefly interrupts audio when "
-        "changed (it rebuilds the adaptive filter); everything else applies "
-        "without any dropout.";
+        "Less PA is free to use, provided as-is with no warranty of any "
+        "kind. Use it at your own risk.";
 
     auto* content = new juce::TextEditor();
     content->setMultiLine(true);
