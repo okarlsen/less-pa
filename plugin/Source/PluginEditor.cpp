@@ -23,14 +23,21 @@ namespace {
 class SectionGrid
 {
 public:
-    SectionGrid(int numColumnsIn, float scaleIn, int columnGapDesignPx)
+    // A non-zero firstColumnWidthDesignPx pins the first column to that fixed
+    // width and lets the rest share what is left. That is what a row of
+    // "label: bar" meters needs -- the four labels have to line up as a block
+    // whatever the bar lengths are, which equal fr columns cannot promise.
+    SectionGrid(int numColumnsIn, float scaleIn, int columnGapDesignPx,
+                int firstColumnWidthDesignPx = 0)
         : numColumns(numColumnsIn), scale(scaleIn)
     {
         grid.rowGap = juce::Grid::Px(0);
         grid.columnGap = juce::Grid::Px(scaled(columnGapDesignPx));
 
         for (int i = 0; i < numColumns; ++i)
-            grid.templateColumns.add(juce::Grid::TrackInfo(juce::Grid::Fr(1)));
+            grid.templateColumns.add(i == 0 && firstColumnWidthDesignPx > 0
+                                         ? juce::Grid::TrackInfo(juce::Grid::Px(scaled(firstColumnWidthDesignPx)))
+                                         : juce::Grid::TrackInfo(juce::Grid::Fr(1)));
     }
 
     // Empty row -- vertical spacing only.
@@ -64,6 +71,20 @@ public:
         }
     }
 
+    // One meter: its name in the fixed first column, its bar filling the rest
+    // of the row. The bar is deliberately shorter than the row it sits in --
+    // four full-height bars stacked with only a gap between them read as one
+    // striped block rather than four instruments.
+    void meterRow(int designPx, juce::Component& label, juce::Component& bar, int barHeightDesignPx)
+    {
+        const int line = addTrack(designPx);
+        grid.items.add(juce::GridItem(label).withArea(line, 1));
+        grid.items.add(juce::GridItem(bar)
+                           .withArea(line, 2, line + 1, numColumns + 1)
+                           .withHeight(static_cast<float>(scaled(barHeightDesignPx)))
+                           .withAlignSelf(juce::GridItem::AlignSelf::center));
+    }
+
     void performLayout(juce::Rectangle<int> area) { grid.performLayout(area); }
 
 private:
@@ -81,19 +102,6 @@ private:
     int numColumns;
     float scale;
 };
-
-// Row heights, shared between the sections so the section-height constants in
-// PluginEditor.h can be checked against them by eye.
-constexpr int sectionHeaderRow = 18;
-constexpr int controlLabelRow = 16;
-constexpr int comboRow = 28;
-constexpr int sliderRow = 26;
-constexpr int toggleRow = 24;
-constexpr int meterBarRow = 94;
-constexpr int readoutRow = 18;
-
-// Horizontal clearance between the delay readout and the corner wordmark.
-constexpr int readoutLogoGap = 10;
 
 } // namespace
 
@@ -121,8 +129,10 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
         return juce::roundToInt(static_cast<float>(width)
                                 * static_cast<float>(designHeight) / static_cast<float>(designWidth));
     };
-    constexpr int minWidth = 300;                   // ~0.88x
-    constexpr int maxWidth = 480;                   // ~1.41x
+    constexpr int minWidth = 640;                   // ~0.83x
+    constexpr int maxWidth = 1150;                  // ~1.50x
+    static_assert(minWidth <= designWidth && designWidth <= maxWidth,
+                  "the default design size must be inside its own resize limits");
     setResizeLimits(minWidth, scaledHeight(minWidth), maxWidth, scaledHeight(maxWidth));
     if (auto* constrainer = getConstrainer())
         constrainer->setFixedAspectRatio(static_cast<double>(designWidth) / static_cast<double>(designHeight));
@@ -244,19 +254,23 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     dryWetSlider.onValueChange = [this] { dryWetSliderChanged(); };
     addAndMakeVisible(dryWetSlider);
 
-    // Centred, unlike the control labels: each of these sits directly above
-    // its own narrow meter bar, which is itself centred in its column.
-    // Font sizes for every label are set in resized(), so they track the
-    // window scale.
+    // Left-aligned like the control labels: each meter name now sits to the
+    // left of its own horizontal bar in a fixed-width column, so the four read
+    // as a list. Font sizes for every label are set in resized(), so they
+    // track the window scale.
     for (auto* label : { &inputMeterLabel, &sidechainMeterLabel, &outputMeterLabel, &suppressionMeterLabel }) {
-        label->setJustificationType(juce::Justification::centred);
+        label->setJustificationType(juce::Justification::centredLeft);
         label->setColour(juce::Label::textColourId, LessPAColours::secondaryText);
         addAndMakeVisible(label);
     }
-    addAndMakeVisible(inputMeter);
-    addAndMakeVisible(sidechainMeter);
-    addAndMakeVisible(outputMeter);
-    addAndMakeVisible(suppressionMeter);
+
+    // Horizontal rather than the component's default vertical: four
+    // side-by-side vertical bars needed the whole window width to keep
+    // "PA-ref(sc)" and "Suppression" legible, and column 1 is a third of it.
+    for (auto* meter : { &inputMeter, &sidechainMeter, &outputMeter, &suppressionMeter }) {
+        meter->setOrientation(LevelMeterComponent::Orientation::horizontal);
+        addAndMakeVisible(meter);
+    }
 
     metersPostFilterToggle.onClick = [this] { metersPostFilterToggleChanged(); };
     addAndMakeVisible(metersPostFilterToggle);
@@ -273,8 +287,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // section of showHelpDialog(): a tooltip answers "what is this?" while the
     // mouse is already on the control, the dialog answers "how should I set
     // it?". Duplicating the paragraphs here would make the tooltips too slow
-    // to read to be any use mid-show -- and the window is only 340px wide, so
-    // a sentence-length tip is a multi-line block sitting over the controls.
+    // to read to be any use mid-show -- and a sentence-length tip becomes a
+    // multi-line block sitting over the controls it is meant to explain.
     // (LessPALookAndFeel::getTooltipBounds now wraps rather than clips, so
     // length is a readability choice here rather than a correctness one.)
     helpButton.setTooltip("Full control reference");
@@ -332,32 +346,55 @@ PAEchoCancellerAudioProcessorEditor::computeSectionBounds() const
     auto content = getLocalBounds().reduced(sc(outerMargin));
 
     SectionBounds bounds;
+
+    // Title off the top and footer off the bottom first: both span the full
+    // width, so what is left is exactly the three-column area.
     bounds.title = content.removeFromTop(sc(titleStripHeight));
     content.removeFromTop(sc(titleGap));
-    bounds.input = content.removeFromTop(sc(inputSectionHeight));
-    content.removeFromTop(sc(sectionGap));
-    bounds.adaptive = content.removeFromTop(sc(adaptiveSectionHeight));
-    content.removeFromTop(sc(sectionGap));
-    bounds.residual = content.removeFromTop(sc(residualSectionHeight));
-    content.removeFromTop(sc(sectionGap));
-    bounds.doubleTalk = content.removeFromTop(sc(doubleTalkSectionHeight));
-    content.removeFromTop(sc(sectionGap));
-    bounds.ungrouped = content.removeFromTop(sc(ungroupedHeight));
+    bounds.footer = content.removeFromBottom(sc(footerStripHeight));
+    content.removeFromBottom(sc(footerGap));
+
+    auto column1 = content.removeFromLeft(sc(columnWidth));
+    content.removeFromLeft(sc(columnGap));
+    auto column2 = content.removeFromLeft(sc(columnWidth));
+    content.removeFromLeft(sc(columnGap));
+    // Column 3 takes what is left rather than another sc(columnWidth): five
+    // independently rounded slices can be a pixel or two short of the content
+    // width, and that error would otherwise show up as a ragged right margin
+    // against the corner wordmark, which is aligned to the content edge.
+    auto column3 = content;
+
+    bounds.column1Input = column1.removeFromTop(sc(inputSectionHeight));
+    column1.removeFromTop(sc(column1BlockGap));
+    bounds.column1Output = column1.removeFromTop(sc(outputBlockHeight));
+
+    bounds.column2Adaptive = column2.removeFromTop(sc(adaptiveSectionHeight));
+    column2.removeFromTop(sc(column2PanelGap));
+    bounds.column2Residual = column2.removeFromTop(sc(residualSectionHeight));
+
+    bounds.column3DoubleTalk = column3.removeFromTop(sc(doubleTalkSectionHeight));
     return bounds;
 }
 
 juce::Rectangle<int> PAEchoCancellerAudioProcessorEditor::computeLogoBounds() const
 {
     const float scale = getUiScale();
-    const int width = juce::roundToInt(scale * static_cast<float>(logoWidth));
+    const auto sc = [scale](int designPx) { return juce::roundToInt(scale * static_cast<float>(designPx)); };
+    const int width = sc(logoWidth);
     const int height = juce::roundToInt(static_cast<float>(width) / logoAspect);
 
-    // Hard against the bottom-right of the content area. The delay readout
-    // shares this strip and is laid out around this rectangle in resized(),
-    // so the two cannot overlap at any point in the resize range -- the whole
-    // window scales by one factor, so their relative widths never change.
-    const auto content = getLocalBounds().reduced(juce::roundToInt(scale * static_cast<float>(outerMargin)));
-    return { content.getRight() - width, content.getBottom() - height, width, height };
+    // Hard against the right of the content area, vertically centred in the
+    // footer strip. Centred rather than bottom-pinned because the strip is now
+    // a slider tall and holds three things -- the readout, the inline Dry/Wet
+    // control and this mark all have to sit on one line.
+    //
+    // The delay readout and the Dry/Wet control are laid out around this
+    // rectangle in resized(), and the static_asserts in PluginEditor.h prove
+    // the three fit; the whole window scales by one factor, so proving it once
+    // proves it across the resize range.
+    auto content = getLocalBounds().reduced(sc(outerMargin));
+    const auto footer = content.removeFromBottom(sc(footerStripHeight));
+    return { footer.getRight() - width, footer.getCentreY() - height / 2, width, height };
 }
 
 void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
@@ -372,11 +409,13 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
     // works against the point of the style. The fill alone is enough contrast
     // against #14161A to separate the four stages.
     //
-    // sections.ungrouped is deliberately absent: the output stage is left on
-    // the bare background so that "these four boxes are the processing chain"
-    // stays readable at a glance.
+    // sections.column1Output is deliberately absent: the output stage is left
+    // on the bare background so that "these four boxes are the processing
+    // chain" stays readable at a glance -- now left to right across the three
+    // columns rather than top to bottom down one.
     g.setColour(LessPAColours::panel);
-    for (const auto& panel : { sections.input, sections.adaptive, sections.residual, sections.doubleTalk })
+    for (const auto& panel : { sections.column1Input, sections.column2Adaptive,
+                               sections.column2Residual, sections.column3DoubleTalk })
         g.fillRoundedRectangle(panel.toFloat(), 6.0f * scale);
 
     // A meter bridge, not a fifth section: LevelMeterComponent draws its idle
@@ -390,9 +429,19 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
     // Taken from the meters' own bounds rather than re-deriving the row
     // arithmetic here, so it cannot drift from where the Grid actually put
     // them. Degenerate (and harmless) only before the first resized().
-    const auto meterBars = inputMeter.getBounds().getUnion(outputMeter.getBounds());
+    //
+    // Now that the meters are stacked rows rather than a side-by-side bank,
+    // the first meter's *label* is what sets the bridge's left edge -- the
+    // labels sit to the left of every bar, and leaving them outside the
+    // lighter rectangle would split one instrument across two backgrounds.
+    // The post-HPF toggle is the bank's last row and is unioned in for the
+    // same reason: it selects what the bars above it are showing.
+    const auto meterBars = inputMeterLabel.getBounds()
+                               .getUnion(inputMeter.getBounds())
+                               .getUnion(outputMeter.getBounds())
+                               .getUnion(metersPostFilterToggle.getBounds());
     if (!meterBars.isEmpty())
-        g.fillRoundedRectangle(meterBars.expanded(juce::roundToInt(10.0f * scale),
+        g.fillRoundedRectangle(meterBars.expanded(juce::roundToInt(8.0f * scale),
                                                   juce::roundToInt(6.0f * scale))
                                    .toFloat(),
                                6.0f * scale);
@@ -449,6 +498,15 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                          &suppressionMeterLabel, &delayReadoutLabel })
         label->setFont(juce::FontOptions(scale * 12.0f));
 
+    // The post-HPF toggle is the meter bank's last row, so its text is set to
+    // the meter-label size rather than the height-proportional size every
+    // other toggle gets -- it names part of the instrument, not a control.
+    // juce::ToggleButton has no setFont(), so it is requested by property and
+    // honoured in LessPALookAndFeel::drawToggleButton; the explicit repaint is
+    // because a property change alone does not invalidate the component.
+    metersPostFilterToggle.getProperties().set("fontHeight", scale * 12.0f);
+    metersPostFilterToggle.repaint();
+
     juce::Slider* const sliders[] = { &nearendSensitivitySlider, &protectionHoldTimeSlider,
                                       &transitionSmoothingSlider, &hpfSlider,
                                       &referenceGainSlider, &dryWetSlider };
@@ -461,28 +519,74 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     // A labelled slider is always a 16px label sitting directly on top of its
     // own 26px slider, with the separating air above the pair rather than
     // between them -- that pairing is what makes a column of sliders readable.
+    // The leading gap is passed in rather than fixed: columns 2 and 3 use a
+    // deliberately larger one (see the constants in PluginEditor.h).
+    // The area a panel's rows are laid out in. The top inset is always
+    // panelPaddingY, whatever column the panel is in -- that is what puts the
+    // three top-row section headers on one line. Only the bottom inset varies,
+    // which is how columns 2 and 3 get their extra breathing room.
+    //
+    // Deliberately not Rectangle::reduced(x, y): that insets top and bottom by
+    // the same amount, so giving columns 2 and 3 more vertical padding also
+    // pushed their headers down relative to column 1's. That bug shipped to
+    // the user's host and was visible immediately as three misaligned headers.
+    const auto panelBody = [&sc](juce::Rectangle<int> panel, int bottomPaddingDesignPx) {
+        return panel.reduced(sc(panelPaddingX), 0)
+            .withTrimmedTop(sc(panelPaddingY))
+            .withTrimmedBottom(sc(bottomPaddingDesignPx));
+    };
+
     struct LabelledSlider { juce::Label* label; juce::Slider* slider; };
-    const auto addSliderRows = [](SectionGrid& grid, std::initializer_list<LabelledSlider> rows) {
+    const auto addSliderRows = [](SectionGrid& grid, int gapDesignPx,
+                                  std::initializer_list<LabelledSlider> rows) {
         for (auto& labelled : rows) {
-            grid.gap(10); // separates this pair from whatever precedes it
+            grid.gap(gapDesignPx); // separates this pair from whatever precedes it
             grid.row(controlLabelRow, *labelled.label);
             grid.row(sliderRow, *labelled.slider); // no gap: the label belongs to this slider
         }
     };
 
-    // INPUT CONDITIONING -- 18 + 2 * (10 + 16 + 26) = 122 rows,
-    // + 2 * panelPaddingY = inputSectionHeight (142). No separate gap after
-    // the header here: the first pair's own leading 10px already provides it.
+    // COLUMN 1 -- INPUT CONDITIONING. No separate gap after the header here:
+    // the first pair's own leading column1ControlGap already provides it.
+    // (Every row list below is proved against its section-height constant by
+    // the static_asserts in PluginEditor.h.)
     {
         SectionGrid grid(1, scale, 0);
         grid.row(sectionHeaderRow, inputSectionLabel);
-        addSliderRows(grid, { { &hpfLabel, &hpfSlider },
-                              { &referenceGainLabel, &referenceGainSlider } });
-        grid.performLayout(sections.input.reduced(sc(panelPaddingX), sc(panelPaddingY)));
+        addSliderRows(grid, column1ControlGap, { { &hpfLabel, &hpfSlider },
+                                                 { &referenceGainLabel, &referenceGainSlider } });
+        grid.performLayout(panelBody(sections.column1Input, panelPaddingY));
     }
 
-    // ADAPTIVE FILTER -- 18 + 6 + 16 + 28 = 68 rows,
-    // + 2 * panelPaddingY = adaptiveSectionHeight (88).
+    // COLUMN 1 -- METER BANK, ungrouped. No panel and no header: a heading
+    // over a bank of meters is noise to the operator this is built for.
+    //
+    // Two grid columns: a fixed-width one for the meter names and a stretchy
+    // one for their bars. The "Meters post HPF" toggle is the bank's last row
+    // and simply spans both, so it lines up with the meter names rather than
+    // floating below the instrument it belongs to. The four meters are
+    // horizontal rows here rather than the old side-by-side vertical bank --
+    // see LevelMeterComponent::Orientation.
+    //
+    // The leading and trailing gaps are the room paint() needs to draw the
+    // meter bridge around the bank without overhanging the column.
+    {
+        SectionGrid grid(2, scale, meterLabelGap, meterLabelWidth);
+        grid.gap(meterBridgeClearance);
+        grid.meterRow(meterRowHeight, inputMeterLabel, inputMeter, meterBarHeight);
+        grid.gap(meterRowGap);
+        grid.meterRow(meterRowHeight, sidechainMeterLabel, sidechainMeter, meterBarHeight);
+        grid.gap(meterRowGap);
+        grid.meterRow(meterRowHeight, suppressionMeterLabel, suppressionMeter, meterBarHeight);
+        grid.gap(meterRowGap);
+        grid.meterRow(meterRowHeight, outputMeterLabel, outputMeter, meterBarHeight);
+        grid.gap(meterToggleGap);
+        grid.row(toggleRow, metersPostFilterToggle);
+        grid.gap(meterBridgeClearance);
+        grid.performLayout(sections.column1Output.reduced(sc(panelPaddingX), 0));
+    }
+
+    // COLUMN 2 -- ADAPTIVE FILTER.
     //
     // One control on purpose: Tail Length *is* the linear filter length. It is
     // the only thing in the plugin that touches the adaptive filter, and the
@@ -491,69 +595,63 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     {
         SectionGrid grid(1, scale, 0);
         grid.row(sectionHeaderRow, adaptiveSectionLabel);
-        grid.gap(6);
+        grid.gap(column2HeaderGap);
         grid.row(controlLabelRow, tailLengthLabel);
         grid.row(comboRow, tailLengthCombo);
-        grid.performLayout(sections.adaptive.reduced(sc(panelPaddingX), sc(panelPaddingY)));
+        grid.performLayout(panelBody(sections.column2Adaptive, widePanelPaddingBottom));
     }
 
-    // RESIDUAL SUPPRESSION -- 18 + 6 + 16 + 28 + 12 + 24 = 104 rows,
-    // + 2 * panelPaddingY = residualSectionHeight (124).
+    // COLUMN 2 -- RESIDUAL SUPPRESSION.
     {
         SectionGrid grid(1, scale, 0);
         grid.row(sectionHeaderRow, residualSectionLabel);
-        grid.gap(6);
+        grid.gap(column2HeaderGap);
         grid.row(controlLabelRow, suppressionStrengthLabel);
         grid.row(comboRow, suppressionStrengthCombo);
-        grid.gap(12);
+        grid.gap(column2ControlGap);
         grid.row(toggleRow, limitHfGainToggle);
-        grid.performLayout(sections.residual.reduced(sc(panelPaddingX), sc(panelPaddingY)));
+        grid.performLayout(panelBody(sections.column2Residual, widePanelPaddingBottom));
     }
 
-    // DOUBLE-TALK PROTECTION -- 18 + 6 + 16 + 28 + 3 * (10 + 16 + 26) = 224
-    // rows, + 2 * panelPaddingY = doubleTalkSectionHeight (244).
+    // COLUMN 3 -- DOUBLE-TALK PROTECTION, still stacked top to bottom.
     {
         SectionGrid grid(1, scale, 0);
         grid.row(sectionHeaderRow, doubleTalkSectionLabel);
-        grid.gap(6);
+        grid.gap(column3HeaderGap);
         grid.row(controlLabelRow, nearendDetectorLabel);
         grid.row(comboRow, nearendDetectorCombo);
-        addSliderRows(grid, { { &nearendSensitivityLabel, &nearendSensitivitySlider },
-                              { &protectionHoldTimeLabel, &protectionHoldTimeSlider },
-                              { &transitionSmoothingLabel, &transitionSmoothingSlider } });
-        grid.performLayout(sections.doubleTalk.reduced(sc(panelPaddingX), sc(panelPaddingY)));
+        addSliderRows(grid, column3ControlGap,
+                      { { &nearendSensitivityLabel, &nearendSensitivitySlider },
+                        { &protectionHoldTimeLabel, &protectionHoldTimeSlider },
+                        { &transitionSmoothingLabel, &transitionSmoothingSlider } });
+        grid.performLayout(panelBody(sections.column3DoubleTalk, widePanelPaddingBottom));
     }
 
-    // OUTPUT STAGE, ungrouped -- (16 + 26) + 12 + 16 + 4 + 94 + 12 + 24 + 8 + 18
-    // = 230 rows = ungroupedHeight. No panel and no header: a heading over a
-    // row of meters is noise to the operator this is built for.
+    // FOOTER -- full width under all three columns: delay readout, Dry/Wet
+    // Mix, wordmark, left to right on one line.
+    //
+    // Dry/Wet is centred on the window and the readout is then fitted into
+    // what is left to its *left*, rather than the two being placed
+    // independently -- that is what makes a collision impossible rather than
+    // merely unlikely, and it is the same trick the readout already used
+    // against the wordmark. The static_asserts in PluginEditor.h prove the
+    // remaining space clears both neighbours' worst cases.
     {
-        auto ungrouped = sections.ungrouped;
+        const auto dryWetArea = sections.footer.withSizeKeepingCentre(sc(dryWetFooterWidth),
+                                                                     sections.footer.getHeight());
 
-        // Bottom strip first, because the readout has to be fitted around the
-        // corner wordmark rather than laid out independently of it.
-        auto bottomStrip = ungrouped.removeFromBottom(sc(readoutRow));
-        delayReadoutLabel.setBounds(bottomStrip
+        // Label beside the slider rather than above it: the footer is one
+        // slider tall, so the label-above-slider pairing the panels use does
+        // not fit here.
+        SectionGrid grid(2, scale, dryWetLabelGap, dryWetLabelWidth);
+        grid.row(sliderRow, { &dryWetLabel, &dryWetSlider });
+        grid.performLayout(dryWetArea);
+
+        // Indented by panelPaddingX so it lines up with the section header
+        // text above it rather than with the panel edge.
+        delayReadoutLabel.setBounds(sections.footer
                                         .withTrimmedLeft(sc(panelPaddingX))
-                                        .withRight(computeLogoBounds().getX() - sc(readoutLogoGap)));
-        ungrouped.removeFromBottom(sc(8));
-
-        // Four columns rather than hand-computed column arithmetic: the meter
-        // bar stays narrow (22px, like a real channel-strip meter) while its
-        // label gets the whole column, which is what "PA-ref(sc)" and
-        // "Suppression" need to read at 12pt. Full-width rows simply span all
-        // four columns.
-        SectionGrid grid(4, scale, 8);
-        grid.row(controlLabelRow, dryWetLabel);
-        grid.row(sliderRow, dryWetSlider);
-        grid.gap(12);
-        grid.row(controlLabelRow, { &inputMeterLabel, &sidechainMeterLabel,
-                                    &suppressionMeterLabel, &outputMeterLabel });
-        grid.gap(4); // clears the meter bridge's top edge (see paint())
-        grid.row(meterBarRow, { &inputMeter, &sidechainMeter, &suppressionMeter, &outputMeter }, 22);
-        grid.gap(12); // ditto, its bottom edge
-        grid.row(toggleRow, metersPostFilterToggle);
-        grid.performLayout(ungrouped.reduced(sc(panelPaddingX), 0));
+                                        .withRight(dryWetArea.getX() - sc(readoutLogoGap)));
     }
 }
 
@@ -863,7 +961,9 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
     // Mirrors the panel exactly -- same four stages, same order within each.
     // The panel is laid out as the real signal chain rather than as a flat
     // list, so the help reads as an explanation of that chain instead of an
-    // alphabetical glossary that would send you hunting.
+    // alphabetical glossary that would send you hunting. The dialog reads the
+    // stages top to bottom while the panel now reads them left to right across
+    // its three columns; the *order* is the thing that has to match, and does.
     static const juce::String helpText =
         "LESS PA cancels PA speaker leakage out of an audience microphone, "
         "using the PA feed itself (not a room estimate of it) as a reference "
@@ -871,7 +971,7 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "by applying acoustic echo cancellation (AEC) -- the same technique "
         "phones and conferencing systems use to remove speaker bleed.\n"
         "\n"
-        "The panel follows the signal chain, top to bottom: what reaches the "
+        "The panel follows the signal chain, left to right: what reaches the "
         "canceller, then the linear filter that models the leakage and "
         "subtracts it, then the suppressor that cleans up whatever the filter "
         "missed, then the detector that decides when to ease that suppressor "
@@ -966,12 +1066,6 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "\n"
         "=== OUTPUT AND METERING ===\n"
         "\n"
-        "DRY/WET MIX\n"
-        "Blends the cancelled (wet) output with the original, unprocessed "
-        "(dry) input. 100% is fully cancelled; lower it to let more of the "
-        "original signal (including any residual PA leakage) back in to "
-        "taste.\n"
-        "\n"
         "METERS\n"
         "Input / PA-ref(sc) / Suppression / Output. Suppression is measured "
         "directly as the dB difference between the Input and Output meters, "
@@ -988,6 +1082,12 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "means no reference is reaching the plugin at all (check the "
         "sidechain routing in your host); a value that keeps jumping around "
         "means the reference and mic timing is unstable.\n"
+        "\n"
+        "DRY/WET MIX\n"
+        "Blends the cancelled (wet) output with the original, unprocessed "
+        "(dry) input. 100% is fully cancelled; lower it to let more of the "
+        "original signal (including any residual PA leakage) back in to "
+        "taste.\n"
         "\n"
         "\n"
         "Less PA is free to use, provided as-is with no warranty of any "

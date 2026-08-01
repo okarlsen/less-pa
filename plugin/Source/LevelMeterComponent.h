@@ -4,7 +4,7 @@
 
 #include "LessPALookAndFeel.h"
 
-// Vertical peak meter with instant attack and a fixed dB/tick visual decay.
+// Peak meter with instant attack and a fixed dB/tick visual decay.
 // setLevel() should be called from a UI-thread timer -- this component owns
 // the ballistics, the caller just reports facts.
 //
@@ -22,12 +22,27 @@ class LevelMeterComponent : public juce::Component,
 public:
     enum class Style { signalLevel, suppression };
 
+    // Which way the bar grows. Defaults to vertical -- that is the shape a
+    // channel-strip meter is expected to have, and defaulting to it keeps
+    // every existing use of this component unaffected by the addition. The
+    // editor's meter bank opts into horizontal because four labelled bars
+    // stacked as rows fit a narrow column, where four side-by-side vertical
+    // bars need the width of the whole window to stay legible.
+    enum class Orientation { vertical, horizontal };
+
     explicit LevelMeterComponent(Style styleIn = Style::signalLevel) : style(styleIn) {
         if (style == Style::suppression) {
             rangeMinDb = 0.0f;
             rangeMaxDb = 40.0f;
         }
         displayedDb = rangeMinDb;
+    }
+
+    void setOrientation(Orientation newOrientation) {
+        if (orientation == newOrientation)
+            return;
+        orientation = newOrientation;
+        repaint();
     }
 
     void setLevel(float newValue) {
@@ -41,7 +56,9 @@ public:
         repaint();
     }
 
-    // Palette only -- the dB thresholds and the fill geometry are unchanged.
+    // Only the fill *axis* varies with orientation -- the dB thresholds, the
+    // colour choice and the ballistics are shared, so a horizontal bar reads
+    // green/yellow/red at exactly the same levels as a vertical one.
     void paint(juce::Graphics& g) override {
         auto bounds = getLocalBounds().toFloat();
         constexpr float corner = 3.0f;
@@ -61,7 +78,11 @@ public:
 
         const float proportion = juce::jlimit(0.0f, 1.0f, (displayedDb - rangeMinDb) / (rangeMaxDb - rangeMinDb));
         if (proportion > 0.0f) {
-            auto filled = bounds.removeFromBottom(bounds.getHeight() * proportion);
+            // Vertical grows from the bottom, horizontal from the left --
+            // both being "away from the zero end" of the bar.
+            auto filled = orientation == Orientation::vertical
+                              ? bounds.removeFromBottom(bounds.getHeight() * proportion)
+                              : bounds.removeFromLeft(bounds.getWidth() * proportion);
             const juce::Colour colour = style == Style::suppression
                                              ? LessPAColours::meterSuppression
                                              : (displayedDb > -3.0f    ? LessPAColours::meterDanger
@@ -74,6 +95,7 @@ public:
 
 private:
     Style style;
+    Orientation orientation = Orientation::vertical;
     float rangeMinDb = -60.0f;
     float rangeMaxDb = 0.0f;
     float displayedDb = -60.0f;

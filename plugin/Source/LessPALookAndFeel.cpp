@@ -255,8 +255,17 @@ void LessPALookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButton& 
 
     auto textColour = button.findColour(juce::ToggleButton::textColourId);
     g.setColour(button.isEnabled() ? textColour : textColour.withMultipliedAlpha(0.5f));
-    g.setFont(juce::FontOptions(juce::jlimit(9.0f, 18.0f,
-                                             static_cast<float>(button.getHeight()) * 0.55f)));
+    // Height-proportional by default, so a toggle's text scales with the
+    // window like everything else. juce::ToggleButton has no setFont(), so a
+    // caller needing a specific size -- the editor's "Meters post HPF", which
+    // has to match the meter labels it sits under rather than the controls
+    // around it -- asks for one via a component property. Absent the property
+    // (every other toggle), the default below is unchanged.
+    const auto requestedFontHeight = button.getProperties()["fontHeight"];
+    g.setFont(juce::FontOptions(requestedFontHeight.isVoid()
+                                    ? juce::jlimit(9.0f, 18.0f,
+                                                   static_cast<float>(button.getHeight()) * 0.55f)
+                                    : static_cast<float>(requestedFontHeight)));
     g.drawFittedText(button.getButtonText(),
                      button.getLocalBounds()
                          .withTrimmedLeft(juce::roundToInt(pillWidth) + 10)
