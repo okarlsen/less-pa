@@ -53,7 +53,13 @@
       "Bash(./plugin/build/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify)",
       "Bash(echo \"EXIT=$?\")",
       "Bash(codesign -dv \"plugin/build/PAEchoCanceller_artefacts/Release/AU/Less PA.component\")",
-      "Bash(codesign --verify --strict \"plugin/build/PAEchoCanceller_artefacts/Release/VST3/Less PA.vst3\")"
+      "Bash(codesign --verify --strict \"plugin/build/PAEchoCanceller_artefacts/Release/VST3/Less PA.vst3\")",
+      "Bash(cmake --build build --target PAEchoCancellerVerify -j8)",
+      "Bash(rm -rf build)",
+      "Bash(meson setup *)",
+      "Bash(meson compile *)",
+      "Bash(cmake -B build -S . -DCMAKE_BUILD_TYPE=Release)",
+      "Bash(cmake --build build --target PAEchoCanceller_AU PAEchoCanceller_VST3 PAEchoCancellerVerify -j8)"
     ]
   }
 }

@@ -42,16 +42,27 @@ git submodule update --init --recursive
 
 ```sh
 cd webrtc-audio-processing
-MACOSX_DEPLOYMENT_TARGET=13.0 meson setup build \
-    --default-library=static --force-fallback-for=abseil-cpp
+meson setup build \
+    --default-library=static \
+    --force-fallback-for=abseil-cpp \
+    -Dc_args=-mmacosx-version-min=13.0 \
+    -Dcpp_args=-mmacosx-version-min=13.0 \
+    -Dc_link_args=-mmacosx-version-min=13.0 \
+    -Dcpp_link_args=-mmacosx-version-min=13.0
 meson compile -C build
 ```
 
-Both flags are load-bearing; see [A note on Abseil](#a-note-on-abseil).
-`MACOSX_DEPLOYMENT_TARGET` matches the plugin's own target (macOS 13, set in
-`plugin/CMakeLists.txt`) so the two halves of the build agree — without it
-Meson targets whatever macOS the build machine runs, and the resulting plugin
-silently refuses to load on anything older.
+Every option there is load-bearing:
+
+- `--default-library=static` and `--force-fallback-for=abseil-cpp` keep the
+  plugin self-contained — see [A note on Abseil](#a-note-on-abseil).
+- The four `-mmacosx-version-min=13.0` options match the plugin's own
+  deployment target (macOS 13, set in `plugin/CMakeLists.txt`). Meson
+  otherwise builds for whatever macOS the build machine runs, which produces
+  a plugin that silently refuses to load on anything older. Setting them as
+  Meson options rather than via a `MACOSX_DEPLOYMENT_TARGET` environment
+  variable means they are recorded in the build directory and apply to
+  `meson compile` and to the Abseil subproject too.
 
 This produces `build/webrtc/modules/audio_processing/libwebrtc-audio-processing-2.a`
 plus an uninstalled pkg-config file under `build/meson-uninstalled/`, which is
