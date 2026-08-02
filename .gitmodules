@@ -1,0 +1,6 @@
+[submodule "JUCE"]
+	path = JUCE
+	url = https://github.com/juce-framework/JUCE.git
+[submodule "webrtc-audio-processing"]
+	path = webrtc-audio-processing
+	url = https://github.com/okarlsen/webrtc-audio-processing.git

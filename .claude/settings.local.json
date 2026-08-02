@@ -36,7 +36,24 @@
       "Bash(cmake .)",
       "Bash(cmake --build . --target PAEchoCanceller_AAX -j 8)",
       "Read(//Library/Application Support/Avid/Audio/Plug-Ins/Less PA.aaxplugin/Contents/MacOS/**)",
-      "Bash(ls /Users/oystein/Desktop/Less_PA_Investigation_Report.md 2>&1; ls -d \"/Users/oystein/Developer/pa-echo-canceller/~\" 2>/dev/null && find \"/Users/oystein/Developer/pa-echo-canceller/~\" -type f)"
+      "Bash(ls /Users/oystein/Desktop/Less_PA_Investigation_Report.md 2>&1; ls -d \"/Users/oystein/Developer/pa-echo-canceller/~\" 2>/dev/null && find \"/Users/oystein/Developer/pa-echo-canceller/~\" -type f)",
+      "Bash(brew list *)",
+      "Bash(brew install *)",
+      "Bash(gh auth *)",
+      "Bash(gh repo *)",
+      "Bash(cmake --version)",
+      "Bash(meson --version)",
+      "Bash(ninja --version)",
+      "Bash(pkg-config --version)",
+      "Bash(pkg-config --modversion absl_base)",
+      "Bash(ls /opt/homebrew/opt/abseil/lib/*.a 2>/dev/null | head -3; echo \"--- dylib count ---\"; ls /opt/homebrew/opt/abseil/lib/*.dylib 2>/dev/null | wc -l; echo \"--- static count ---\"; ls /opt/homebrew/opt/abseil/lib/*.a 2>/dev/null | wc -l; echo \"=== lib def ===\"; sed -n '190,215p' /Users/oystein/Developer/pa-echo-canceller/webrtc-audio-processing/webrtc/modules/audio_processing/meson.build)",
+      "Bash(rm -rf plugin/build)",
+      "Bash(cmake -B plugin/build -S plugin -DCMAKE_BUILD_TYPE=Release)",
+      "Bash(cmake --build plugin/build --target PAEchoCanceller_AU PAEchoCanceller_VST3 PAEchoCancellerVerify -j8)",
+      "Bash(./plugin/build/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(codesign -dv \"plugin/build/PAEchoCanceller_artefacts/Release/AU/Less PA.component\")",
+      "Bash(codesign --verify --strict \"plugin/build/PAEchoCanceller_artefacts/Release/VST3/Less PA.vst3\")"
     ]
   }
 }

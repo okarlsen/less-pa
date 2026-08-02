@@ -1,0 +1,39 @@
+Less PA
+
+Less PA cancels PA speaker bleed out of an audience microphone, using the PA
+feed itself as a reference signal.
+
+This installer places two plugins in your personal plug-in folders:
+
+  * Audio Unit (AU)   ->  ~/Library/Audio/Plug-Ins/Components/Less PA.component
+  * VST3              ->  ~/Library/Audio/Plug-Ins/VST3/Less PA.vst3
+
+Both install into your own home folder, so no administrator password is
+needed and nothing is changed system-wide. You can deselect either format on
+the next screen if you only need one.
+
+Requirements: macOS 13 or newer on Apple Silicon, and a DAW that supports AU
+or VST3 plugins with a sidechain / second input bus.
+
+
+A note on Gatekeeper
+
+Less PA is not signed with a paid Apple Developer ID, so macOS treats this
+installer as coming from an unidentified developer. If macOS refused to open
+this .pkg, close this window, then Control-click (or right-click) the
+downloaded .pkg file in Finder and choose Open, and confirm at the prompt.
+Alternatively, open System Settings > Privacy & Security and click "Open
+Anyway".
+
+This is a one-time step for the installer file itself. The plugins it
+installs are ad-hoc signed and will not prompt again, in this or any DAW.
+
+
+After installing
+
+Restart your DAW, or trigger a plugin rescan, so it picks up the new plugin.
+In the plugin, wire your PA feed into the Reference input and the audience
+mic into the main input. Click the "?" button for the full control reference.
+
+Less PA is free software under the AGPLv3, provided as-is with no warranty of
+any kind. Source: https://github.com/okarlsen/less-pa
