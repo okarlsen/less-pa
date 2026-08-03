@@ -21,7 +21,7 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(PAEchoCanceller VERSION 1.0.0)
+project(PAEchoCanceller VERSION 1.0.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -136,6 +136,7 @@ target_sources(PAEchoCancellerVerify
 target_compile_definitions(PAEchoCancellerVerify
     PRIVATE
         JucePlugin_Name="Less PA"
+        JucePlugin_VersionString="${PROJECT_VERSION}"
     PUBLIC
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0

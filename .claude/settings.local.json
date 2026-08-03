@@ -69,7 +69,31 @@
       "Bash(installer -pkg packaging/build/Less-PA-1.0.0.pkg -target CurrentUserHomeDirectory)",
       "Read(//Users/oystein/Library/Audio/Plug-Ins/Components/**)",
       "Bash(codesign --verify --strict ~/Library/Audio/Plug-Ins/Components/\"Less PA.component\")",
-      "Bash(codesign --verify --strict ~/Library/Audio/Plug-Ins/VST3/\"Less PA.vst3\")"
+      "Bash(codesign --verify --strict ~/Library/Audio/Plug-Ins/VST3/\"Less PA.vst3\")",
+      "Bash(otool -L \"/Users/oystein/Library/Audio/Plug-Ins/Components/Less PA.component/Contents/MacOS/Less PA\")",
+      "Bash(grep -v \"^/System\\\\|^/usr/lib\\\\|:$\")",
+      "Bash(otool -L \"/Users/oystein/Library/Audio/Plug-Ins/VST3/Less PA.vst3/Contents/MacOS/Less PA\")",
+      "Bash(vtool -show-build \"/Users/oystein/Library/Audio/Plug-Ins/Components/Less PA.component/Contents/MacOS/Less PA\")",
+      "Bash(awk '{$1=$1;print}')",
+      "Bash(git config *)",
+      "Bash(xcode-select -p)",
+      "Bash(xcrun notarytool *)",
+      "Bash(cmake -B . -S .. -DCMAKE_BUILD_TYPE=Release)",
+      "Bash(cmake --build . --target PAEchoCanceller_AU -j 8)",
+      "Bash(cmake -B . -S ..)",
+      "Bash(cmake --build . --target PAEchoCancellerSnapshot -j 8)",
+      "Bash(./PAEchoCancellerSnapshot_artefacts/Release/PAEchoCancellerSnapshot)",
+      "Bash(git -C /Users/oystein/Developer/pa-echo-canceller status --short plugin/CMakeLists.txt plugin/Source/)",
+      "Bash(chmod +x /Users/oystein/Developer/pa-echo-canceller/packaging/build_beta_zip.sh)",
+      "Bash(./packaging/build_beta_zip.sh)",
+      "Bash(rm -rf /tmp/beta_test)",
+      "Bash(mkdir -p /tmp/beta_test)",
+      "Bash(ditto -x -k \"/Users/oystein/Developer/pa-echo-canceller/packaging/build/Less-PA-1.0.0-beta.zip\" .)",
+      "Bash(codesign --verify --strict \"Less PA.component\")",
+      "Bash(codesign --verify --strict \"Less PA.vst3\")",
+      "Bash(cmake --build . --target PAEchoCancellerVerify PAEchoCanceller_AU PAEchoCanceller_VST3 -j 8)",
+      "Bash(./packaging/build_installer.sh)",
+      "Bash(git add *)"
     ]
   }
 }

@@ -3,6 +3,21 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] — beta
+
+Unsigned interim release while Developer ID signing and notarization are in
+progress (see the project README/BUILDING.md) — no DSP or parameter changes
+from 1.0.0.
+
+- The title bar now shows the running build's version number next to the
+  help button, so a screenshot or a bug report is unambiguous about which
+  copy is running.
+- Added a no-installer `.zip` distribution alongside the `.pkg`
+  (`packaging/build_beta_zip.sh`), for anyone hitting Gatekeeper friction
+  with the unsigned installer package — the zip still needs a one-time
+  quarantine-clearing step (see its included `INSTALL.txt`), but skips
+  Installer.app's stricter check entirely.
+
 ## [1.0.0]
 
 First public release.

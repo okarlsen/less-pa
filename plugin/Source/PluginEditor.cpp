@@ -140,6 +140,11 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     helpButton.onClick = [this] { showHelpDialog(); };
     addAndMakeVisible(helpButton);
 
+    versionLabel.setText("v" JucePlugin_VersionString, juce::dontSendNotification);
+    versionLabel.setJustificationType(juce::Justification::centredRight);
+    versionLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
+    addAndMakeVisible(versionLabel);
+
     for (auto* label : { &inputSectionLabel, &adaptiveSectionLabel,
                          &residualSectionLabel, &doubleTalkSectionLabel }) {
         label->setJustificationType(juce::Justification::centredLeft);
@@ -292,6 +297,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // (LessPALookAndFeel::getTooltipBounds now wraps rather than clips, so
     // length is a readability choice here rather than a correctness one.)
     helpButton.setTooltip("Full control reference");
+    versionLabel.setTooltip("Less PA v" JucePlugin_VersionString);
     tailLengthCombo.setTooltip("Match to venue reverb tail");
     suppressionStrengthCombo.setTooltip("Residual echo cleanup");
     limitHfGainToggle.setTooltip("Clamp HF while converging");
@@ -447,9 +453,10 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
                                6.0f * scale);
 
     // Left-aligned on the same x as every section header below it, and trimmed
-    // clear of the help button on the right.
+    // clear of the version label and help button on the right.
     auto titleArea = sections.title.reduced(juce::roundToInt(scale * static_cast<float>(panelPaddingX)), 0)
-                         .withTrimmedRight(juce::roundToInt(30.0f * scale));
+                         .withTrimmedRight(juce::roundToInt(
+                             scale * static_cast<float>(helpButtonSize + versionHelpGap + versionLabelWidth)));
 
     g.setColour(LessPAColours::primaryText);
     g.setFont(juce::FontOptions(23.0f * scale).withStyle("Bold"));
@@ -479,7 +486,12 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     const auto sections = computeSectionBounds();
 
     auto titleArea = sections.title;
-    helpButton.setBounds(titleArea.removeFromRight(sc(24)).withSizeKeepingCentre(sc(24), sc(24)));
+    helpButton.setBounds(titleArea.removeFromRight(sc(helpButtonSize))
+                             .withSizeKeepingCentre(sc(helpButtonSize), sc(helpButtonSize)));
+    titleArea.removeFromRight(sc(versionHelpGap));
+    versionLabel.setBounds(titleArea.removeFromRight(sc(versionLabelWidth))
+                                .withSizeKeepingCentre(sc(versionLabelWidth), sc(helpButtonSize)));
+    versionLabel.setFont(juce::FontOptions(scale * 10.0f));
 
     // Fonts are the one part of the layout Grid can't scale for us, and a
     // stale text-box size would silently cap the value text at the default

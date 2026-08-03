@@ -39,6 +39,15 @@ private:
     static constexpr int titleStripHeight = 62;
     static constexpr int titleGap = 10;
 
+    // The "?" help button and, to its left, a small version readout -- so
+    // whoever's looking at the plugin (or a screenshot of it) can tell which
+    // build they're running without opening the help dialog. Named and
+    // asserted like everything else here so a future title-strip change
+    // can't silently let the version text run under the subtitle.
+    static constexpr int helpButtonSize = 24;
+    static constexpr int versionHelpGap = 6;
+    static constexpr int versionLabelWidth = 40;
+
     // The three columns are equal width. Column 3 absorbs the sub-pixel
     // remainder in computeSectionBounds() so the right-hand margin stays
     // exactly outerMargin at every scale factor -- the corner wordmark is
@@ -168,6 +177,10 @@ private:
                           + footerGap + footerStripHeight
                       == designHeight,
                   "title, columns, footer, gaps and margins must fill designHeight exactly");
+    static_assert(helpButtonSize + versionHelpGap + versionLabelWidth
+                      <= columnWidth,
+                  "the help button and version label must fit inside the title strip "
+                  "without crowding the product name/subtitle to their left");
 
     static_assert(inputSectionHeight + column1BlockGap + outputBlockHeight == columnAreaHeight,
                   "column 1 must fill the shared column height exactly");
@@ -305,6 +318,13 @@ private:
     juce::Image logoImage;
 
     juce::TextButton helpButton{ "?" };
+
+    // The running build's version, so a screenshot or a report from someone
+    // testing an older/newer copy is unambiguous. Text is set from
+    // JucePlugin_VersionString in the constructor -- CMake's single-sourced
+    // project version (see plugin/CMakeLists.txt) -- rather than duplicated
+    // here as a literal.
+    juce::Label versionLabel{ "versionLabel" };
 
     // Uppercase group headers. They live inside their panel's top row rather
     // than floating above it, so the panel rectangle and the Grid area it is
