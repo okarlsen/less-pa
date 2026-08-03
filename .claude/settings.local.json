@@ -59,7 +59,17 @@
       "Bash(meson setup *)",
       "Bash(meson compile *)",
       "Bash(cmake -B build -S . -DCMAKE_BUILD_TYPE=Release)",
-      "Bash(cmake --build build --target PAEchoCanceller_AU PAEchoCanceller_VST3 PAEchoCancellerVerify -j8)"
+      "Bash(cmake --build build --target PAEchoCanceller_AU PAEchoCanceller_VST3 PAEchoCancellerVerify -j8)",
+      "Bash(git submodule *)",
+      "Bash(git ls-remote *)",
+      "Bash(gh release *)",
+      "Bash(./build/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify)",
+      "Bash(echo \"VERIFY_EXIT=$?\")",
+      "Bash(rm -rf ~/Library/Audio/Plug-Ins/Components/\"Less PA.component\" ~/Library/Audio/Plug-Ins/VST3/\"Less PA.vst3\")",
+      "Bash(installer -pkg packaging/build/Less-PA-1.0.0.pkg -target CurrentUserHomeDirectory)",
+      "Read(//Users/oystein/Library/Audio/Plug-Ins/Components/**)",
+      "Bash(codesign --verify --strict ~/Library/Audio/Plug-Ins/Components/\"Less PA.component\")",
+      "Bash(codesign --verify --strict ~/Library/Audio/Plug-Ins/VST3/\"Less PA.vst3\")"
     ]
   }
 }
