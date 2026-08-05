@@ -3,6 +3,29 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2]
+
+The first fully signed and notarized release. No DSP or parameter changes
+from 1.0.0 — this release exists to fix distribution, not behaviour.
+
+- Both plugins are now signed with an Apple Developer ID (Sounds Good To Me
+  AS) using the hardened runtime, notarized by Apple, and have the
+  notarization ticket stapled to each bundle.
+- The `.pkg` installer is signed with a Developer ID Installer certificate,
+  notarized and stapled, and is back as the recommended download. It installs
+  with no Gatekeeper detour — nothing to approve in System Settings, and no
+  right-click → Open.
+- The `.zip` download no longer needs the one-time `xattr`
+  quarantine-clearing step: its bundles carry their own stapled tickets, so
+  they load straight away, offline included. It has dropped the `-beta` from
+  its name accordingly, since it is no longer an interim workaround.
+- Plugins installed from the `.pkg` are stapled too — the bundles are
+  notarized before being packaged — so neither distribution route depends on
+  a network lookup at first load.
+- `packaging/build_installer.sh` and `packaging/build_zip.sh` (renamed from
+  `build_beta_zip.sh`) now sign, notarize and staple as part of their normal
+  flow, via a shared `packaging/signing.sh`.
+
 ## [1.0.1] — beta
 
 Unsigned interim release while Developer ID signing and notarization are in

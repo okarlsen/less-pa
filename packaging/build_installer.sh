@@ -1,6 +1,7 @@
 #!/bin/bash
 #
-# Builds the Less PA macOS installer package.
+# Builds the Less PA macOS installer package: signed with a Developer ID,
+# notarized by Apple, and stapled.
 #
 # Produces packaging/build/Less-PA-<version>.pkg from an existing Release
 # build in plugin/build (see BUILDING.md). Two pkgbuild components -- the AU
@@ -8,12 +9,24 @@
 # writes into the current user's ~/Library/Audio/Plug-Ins, so it needs no
 # administrator password.
 #
+# The plugin bundles are signed, notarized and stapled *before* being staged
+# into the package, so plugins installed from this .pkg carry their own
+# notarization ticket and load without any network lookup. The finished .pkg
+# is then signed with the Developer ID Installer certificate and notarized in
+# its own right.
+#
+# Requires the Developer ID certificates and a notarytool keychain profile --
+# see the "Code signing" section of BUILDING.md.
+#
 # Usage: ./packaging/build_installer.sh
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
+
+# shellcheck source=packaging/signing.sh
+source "$HERE/signing.sh"
 
 ARTEFACTS="$REPO_ROOT/plugin/build/PAEchoCanceller_artefacts/Release"
 AU_BUNDLE="$ARTEFACTS/AU/Less PA.component"
@@ -43,23 +56,17 @@ done
 
 echo "Less PA $VERSION -- building installer"
 
-# Refuse to ship a plugin that drags in dylibs the end user will not have.
-# This is the exact failure mode a locally-installed Homebrew Abseil causes;
-# see the 'A note on Abseil' section of BUILDING.md.
-for bundle in "$AU_BUNDLE" "$VST3_BUNDLE"; do
-    binary="$bundle/Contents/MacOS/Less PA"
-    strays="$(otool -L "$binary" | tail -n +2 \
-        | grep -v -e '/System/Library/' -e '/usr/lib/' || true)"
-    if [[ -n "$strays" ]]; then
-        echo "error: $(basename "$bundle") links against non-system libraries:" >&2
-        echo "$strays" >&2
-        echo "       These will not exist on an end user's Mac. See BUILDING.md." >&2
-        exit 1
-    fi
-done
-echo "  checked: no non-system dynamic dependencies"
+lesspa_require_signing_identities --with-installer
+lesspa_check_no_stray_dylibs "$AU_BUNDLE" "$VST3_BUNDLE"
 
-rm -rf "$BUILD_DIR"
+# Sign, notarize and staple the plugins before they go into the package.
+lesspa_prepare_bundles "$AU_BUNDLE" "$VST3_BUNDLE"
+
+# Remove only this script's own outputs, not the whole build directory --
+# build_beta_zip.sh writes its zip here too, and blowing that away depending
+# on which script ran last is a needless footgun.
+rm -rf "$STAGE_DIR" "$BUILD_DIR/resources" "$BUILD_DIR/distribution.xml" \
+    "$BUILD_DIR/LessPA-AU.pkg" "$BUILD_DIR/LessPA-VST3.pkg"
 mkdir -p "$STAGE_DIR/au" "$STAGE_DIR/vst3"
 
 # pkgbuild wants a directory whose contents get copied into --install-location,
@@ -127,17 +134,31 @@ XML
 
 FINAL_PKG="$BUILD_DIR/Less-PA-$VERSION.pkg"
 
+# Only the final combined product is signed; the two component packages above
+# are intermediates that get embedded into it, so signing them buys nothing.
 productbuild \
     --quiet \
     --distribution "$BUILD_DIR/distribution.xml" \
     --package-path "$BUILD_DIR" \
     --resources "$RESOURCES" \
+    --sign "$LESSPA_INSTALLER_IDENTITY" \
     "$FINAL_PKG"
+
+echo "  signed the installer package"
+
+lesspa_notarize_artifact "$FINAL_PKG"
+xcrun stapler staple "$FINAL_PKG"
 
 # Tidy up the intermediates so only the shippable .pkg is left behind.
 rm -rf "$STAGE_DIR" "$RESOURCES" \
     "$BUILD_DIR/LessPA-AU.pkg" "$BUILD_DIR/LessPA-VST3.pkg" \
     "$BUILD_DIR/distribution.xml"
+
+echo
+echo "Verification:"
+pkgutil --check-signature "$FINAL_PKG" | sed 's/^/  /'
+xcrun stapler validate "$FINAL_PKG" | sed 's/^/  /'
+spctl -a -vvv -t install "$FINAL_PKG" 2>&1 | sed 's/^/  /'
 
 echo
 echo "Installer: $FINAL_PKG"

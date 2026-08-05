@@ -16,17 +16,12 @@ Requirements: macOS 13 or newer on Apple Silicon, and a DAW that supports AU
 or VST3 plugins with a sidechain / second input bus.
 
 
-A note on Gatekeeper
+Signing
 
-Less PA is not signed with a paid Apple Developer ID, so macOS treats this
-installer as coming from an unidentified developer. If macOS refused to open
-this .pkg, close this window, then Control-click (or right-click) the
-downloaded .pkg file in Finder and choose Open, and confirm at the prompt.
-Alternatively, open System Settings > Privacy & Security and click "Open
-Anyway".
-
-This is a one-time step for the installer file itself. The plugins it
-installs are ad-hoc signed and will not prompt again, in this or any DAW.
+This installer is signed with an Apple Developer ID (Sounds Good To Me AS)
+and notarized by Apple, as are both plugins it installs. Nothing needs to be
+approved in System Settings and there is no Terminal step -- it installs, and
+the plugins load in your DAW, without any Gatekeeper detour.
 
 
 After installing

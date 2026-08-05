@@ -93,7 +93,26 @@
       "Bash(codesign --verify --strict \"Less PA.vst3\")",
       "Bash(cmake --build . --target PAEchoCancellerVerify PAEchoCanceller_AU PAEchoCanceller_VST3 -j 8)",
       "Bash(./packaging/build_installer.sh)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git tag *)",
+      "Bash(git push *)",
+      "Bash(rm -rf /tmp/release_verify)",
+      "Bash(mkdir -p /tmp/release_verify)",
+      "Bash(ditto -x -k Less-PA-1.0.1-beta.zip .)",
+      "Bash(codesign --verify --strict \"Less-PA-1.0.1-beta/Less PA.component\")",
+      "Bash(codesign --verify --strict \"Less-PA-1.0.1-beta/Less PA.vst3\")",
+      "Bash(cat > *)",
+      "Bash(cmake --build build --target PAEchoCancellerVerify PAEchoCanceller_AU PAEchoCanceller_VST3 -j8)",
+      "Bash(git -C /Users/oystein/Developer/pa-echo-canceller diff --stat v1.0.1 -- plugin/Source/verify_main.cpp)",
+      "Bash(git -C /Users/oystein/Developer/pa-echo-canceller diff --stat v1.0.1 -- plugin/)",
+      "Bash(command -v jq)",
+      "Bash(jq --version)",
+      "Bash(echo \"jq: present \\($\\(jq --version\\)\\)\")",
+      "Bash(./packaging/build_zip.sh)",
+      "Bash(codesign -dvvv ~/Library/Audio/Plug-Ins/Components/\"Less PA.component\")",
+      "Read(//Users/oystein/Library/Audio/Plug-Ins/VST3/**)",
+      "Bash(installer -pkg /private/tmp/claude-501/-Users-oystein-Developer-pa-echo-canceller/1c685203-7d14-47c1-944c-8292fd6c03da/scratchpad/quarantined.pkg -target CurrentUserHomeDirectory)"
     ]
   }
 }

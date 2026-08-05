@@ -25,17 +25,18 @@ Built by SGTM on top of [JUCE](https://juce.com) and a patched fork of
 
 ## Install
 
-Download the latest `.zip` from the
-[Releases page](https://github.com/okarlsen/less-pa/releases), unzip it, and
-follow the included `INSTALL.txt` — copy the AU and/or VST3 into your
-user's `~/Library/Audio/Plug-Ins/` (no admin password needed), then run one
-`xattr` command to clear the quarantine flag macOS puts on anything
-downloaded.
+Download the latest `.pkg` from the
+[Releases page](https://github.com/okarlsen/less-pa/releases) and open it.
+It installs the AU and VST3 into your own
+`~/Library/Audio/Plug-Ins/` — no administrator password needed, and you can
+deselect either format if you only want one.
 
-The build isn't code-signed with an Apple Developer ID yet, so that
-quarantine-clearing step is a one-time requirement — without it, your DAW's
-plugin scan will get blocked by Gatekeeper. A signed, notarized `.pkg`
-installer that removes this step entirely is in progress.
+If you would rather not run an installer, the `.zip` on the same page has the
+two plugin bundles to copy into place by hand; see the `INSTALL.txt` inside.
+
+Both downloads are signed with an Apple Developer ID and notarized by Apple,
+so there is no Gatekeeper detour either way — nothing to approve in System
+Settings, and no `xattr` command to run.
 
 ## Using it
 
