@@ -160,18 +160,9 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // column-width and starts at its panel's left edge, so a centred label
     // would sit visibly off from the thing it names -- and the sliders'
     // right-hand value boxes push their visual centre left of the row's.
-    for (auto* label : { &tailLengthLabel, &suppressionStrengthLabel, &nearendDetectorLabel,
-                         &nearendSensitivityLabel, &protectionHoldTimeLabel, &transitionSmoothingLabel,
+    for (auto* label : { &tailLengthLabel, &amountLabel, &maxReductionLabel, &responseLabel,
                          &hpfLabel, &referenceGainLabel, &dryWetLabel })
         label->setJustificationType(juce::Justification::centredLeft);
-
-    engineLabel.setJustificationType(juce::Justification::centredRight);
-    engineLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
-    addAndMakeVisible(engineLabel);
-    engineCombo.addItem("Kalman (low latency)", 1);
-    engineCombo.addItem("Classic", 2);
-    engineCombo.onChange = [this] { engineComboChanged(); };
-    addAndMakeVisible(engineCombo);
 
     addAndMakeVisible(tailLengthLabel);
 
@@ -184,57 +175,31 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     tailLengthCombo.onChange = [this] { tailLengthComboChanged(); };
     addAndMakeVisible(tailLengthCombo);
 
-    addAndMakeVisible(suppressionStrengthLabel);
+    addAndMakeVisible(amountLabel);
+    amountSlider.setRange(0.0, 100.0);
+    amountSlider.setTextValueSuffix(" %");
+    amountSlider.setNumDecimalPlacesToDisplay(0);
+    amountSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
+    amountSlider.onValueChange = [this] { amountSliderChanged(); };
+    addAndMakeVisible(amountSlider);
 
-    suppressionStrengthCombo.addItem("Gentle", 1);
-    suppressionStrengthCombo.addItem("Moderate", 2);
-    suppressionStrengthCombo.addItem("Hard", 3);
-    suppressionStrengthCombo.onChange = [this] { suppressionStrengthComboChanged(); };
-    addAndMakeVisible(suppressionStrengthCombo);
-
-    limitHfGainToggle.onClick = [this] { limitHfGainToggleChanged(); };
-
-
-    nearendDetectorCombo.addItem("Classic", 1);
-    nearendDetectorCombo.addItem("Subband (2-4kHz)", 2);
-    nearendDetectorCombo.onChange = [this] { nearendDetectorComboChanged(); };
-
-    addAndMakeVisible(nearendSensitivityLabel);
-
-    nearendSensitivitySlider.setRange(0.0, 100.0);
-    nearendSensitivitySlider.setTextValueSuffix(" %");
-    nearendSensitivitySlider.setNumDecimalPlacesToDisplay(0);
-    nearendSensitivitySlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
-    // Applies live (see PluginProcessor.h) -- still only commit at drag-end
-    // or on a discrete text entry (guarded onValueChange, which also covers
-    // keyboard/text-box edits that never trigger onDragEnd), never
-    // per-pixel mid-drag: no rebuild either way now, but reconstructing
-    // SuppressionGain on every pixel of a drag would still be wasteful.
-    nearendSensitivitySlider.onDragEnd = [this] { nearendSensitivitySliderChanged(); };
-    nearendSensitivitySlider.onValueChange = [this] {
-        if (!nearendSensitivitySlider.isMouseButtonDown()) nearendSensitivitySliderChanged();
+    addAndMakeVisible(maxReductionLabel);
+    maxReductionSlider.setRange(0.0, 24.0);
+    maxReductionSlider.textFromValueFunction = [](double depth) {
+        return depth < 0.05 ? juce::String("0 dB") : "-" + juce::String(depth, 1) + " dB";
     };
-    addAndMakeVisible(nearendSensitivitySlider);
-
-
-    protectionHoldTimeSlider.setRange(40.0, 800.0);
-    protectionHoldTimeSlider.setTextValueSuffix(" ms");
-    protectionHoldTimeSlider.setNumDecimalPlacesToDisplay(0);
-    protectionHoldTimeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
-    protectionHoldTimeSlider.onDragEnd = [this] { protectionHoldTimeSliderChanged(); };
-    protectionHoldTimeSlider.onValueChange = [this] {
-        if (!protectionHoldTimeSlider.isMouseButtonDown()) protectionHoldTimeSliderChanged();
+    maxReductionSlider.valueFromTextFunction = [](const juce::String& text) {
+        return std::abs(text.retainCharacters("0123456789.-").getDoubleValue()); // "-12", "12 dB" both mean 12 dB
     };
+    maxReductionSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
+    maxReductionSlider.onValueChange = [this] { maxReductionSliderChanged(); };
+    addAndMakeVisible(maxReductionSlider);
 
-
-    transitionSmoothingSlider.setRange(0.0, 200.0);
-    transitionSmoothingSlider.setTextValueSuffix(" ms");
-    transitionSmoothingSlider.setNumDecimalPlacesToDisplay(0);
-    transitionSmoothingSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
-    transitionSmoothingSlider.onDragEnd = [this] { transitionSmoothingSliderChanged(); };
-    transitionSmoothingSlider.onValueChange = [this] {
-        if (!transitionSmoothingSlider.isMouseButtonDown()) transitionSmoothingSliderChanged();
-    };
+    responseSlider.setRange(3.0, 50.0);
+    responseSlider.setTextValueSuffix(" ms");
+    responseSlider.setNumDecimalPlacesToDisplay(0);
+    responseSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
+    responseSlider.onValueChange = [this] { responseSliderChanged(); };
 
     addAndMakeVisible(hpfLabel);
 
@@ -282,13 +247,12 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
         addAndMakeVisible(meter);
     }
 
-    // Peaks of about -36..-3 dBFS. Swept over reference peaks of -39..+6 dBFS on
-    // a real PA-heavy recording: below about -36 dBFS the high frequencies stop
-    // adapting well even with the lowered adaptation gate (see
-    // kAdaptationNoiseGate); above the zone nothing gates -- PA removal keeps
-    // rising -- but audience loss grows steadily (~1-2dB near 0 dBFS) and a feed
-    // that hot risks clipping upstream. The zone is deliberately wide because a
-    // PA feed is very dynamic and cannot be held to a narrow band.
+    // Peaks of about -36..-3 dBFS. The Kalman filter scales itself to the
+    // reference level, so the zone is about the edges: well below it the PA
+    // can drop under the canceller's "PA present" threshold (about -50 dBFS
+    // RMS, see KalmanEchoCanceller::startRefPower), and above it a feed risks
+    // clipping upstream. Deliberately wide because a PA feed is very dynamic
+    // and cannot be held to a narrow band.
     sidechainMeter.setTargetZone(-36.0f, -3.0f);
 
     // The canceller's state, in words, under the output meters.
@@ -302,16 +266,14 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     fineTuningButton.onClick = [this] { setFineTuningVisible(true); };
     addAndMakeVisible(fineTuningButton);
 
-    // The detector's expert controls live on the overlay, which is added
-    // last so it covers columns 2 and 3 when shown.
+    // The expert control lives on the overlay, which is added last so it
+    // covers columns 2 and 3 when shown.
     fineTuningDoneButton.onClick = [this] { setFineTuningVisible(false); };
     fineTuningResetButton.onClick = [this] { resetFineTuningToDefaults(); };
-    fineTuningResetButton.setTooltip("Restore the four settings on this page");
+    fineTuningResetButton.setTooltip("Restore the setting on this page");
     for (auto* component : std::initializer_list<juce::Component*>{
              &fineTuningSectionLabel, &fineTuningDoneButton, &fineTuningResetButton,
-             &nearendDetectorLabel, &nearendDetectorCombo, &limitHfGainToggle,
-             &protectionHoldTimeLabel, &protectionHoldTimeSlider,
-             &transitionSmoothingLabel, &transitionSmoothingSlider, &fineTuningHintLabel })
+             &responseLabel, &responseSlider, &fineTuningHintLabel })
         fineTuningOverlay.addAndMakeVisible(component);
     fineTuningHintLabel.setJustificationType(juce::Justification::bottomLeft);
     fineTuningHintLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
@@ -327,18 +289,14 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // length is a readability choice here rather than a correctness one.)
     helpButton.setTooltip("Full control reference");
     versionLabel.setTooltip("Less PA v" JucePlugin_VersionString);
-    engineCombo.setTooltip("Kalman: about 4 ms latency. Classic: about 19 ms");
     tailLengthCombo.setTooltip("Match to the venue's reverb");
-    suppressionStrengthCombo.setTooltip("Residual echo cleanup");
-    limitHfGainToggle.setTooltip("Clamp HF while converging");
-    nearendDetectorCombo.setTooltip("How audience is detected");
-    nearendSensitivitySlider.setTooltip("Higher keeps more crowd sound");
-    protectionHoldTimeSlider.setTooltip("How long protection lasts");
-    transitionSmoothingSlider.setTooltip("Anti-pump crossfade");
+    amountSlider.setTooltip("Cleanup after the filter; 0% = filter only");
+    maxReductionSlider.setTooltip("Deepest cut at any frequency");
+    responseSlider.setTooltip("Shorter = tighter, longer = smoother");
     hpfSlider.setTooltip("Cutoff on mic + reference");
     referenceGainSlider.setTooltip("Reference gain only");
     dryWetSlider.setTooltip("Blend cancelled vs original");
-    fineTuningButton.setTooltip("Detector timing and HF clamp");
+    fineTuningButton.setTooltip("Response, and reset");
     inputMeter.setTooltip("Mic, after the HPF");
     sidechainMeter.setTooltip("After HPF and trim; aim for the zone");
     suppressionMeter.setTooltip("Reduction, in vs out");
@@ -346,17 +304,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     delayReadoutLabel.setTooltip("Echo path delay estimate");
     statusLabel.setTooltip("What the canceller is doing");
 
-    updateEngineCombo();
     updateTailLengthCombo();
-    updateSuppressionStrengthCombo();
-    updateLimitHfGainToggle();
-    updateNearendDetectorCombo();
-    updateNearendSensitivitySlider();
-    updateProtectionHoldTimeSlider();
-    updateTransitionSmoothingSlider();
-    updateHpfSlider();
-    updateReferenceGainSlider();
-    updateDryWetSlider();
+    updateSliders();
     updateFineTuningButton();
     startTimerHz(30); // meter ballistics + keeps controls in sync with host automation
 }
@@ -450,8 +399,7 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
     // clear of the version label and help button on the right.
     auto titleArea = sections.title.reduced(juce::roundToInt(scale * static_cast<float>(panelPaddingX)), 0)
                          .withTrimmedRight(juce::roundToInt(
-                             scale * static_cast<float>(helpButtonSize + versionHelpGap + versionLabelWidth
-                                                        + engineSelectorWidth)));
+                             scale * static_cast<float>(helpButtonSize + versionHelpGap + versionLabelWidth)));
 
     g.setColour(LessPAColours::primaryText);
     g.setFont(juce::FontOptions(23.0f * scale).withStyle("Bold"));
@@ -484,12 +432,6 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     versionLabel.setBounds(titleArea.removeFromRight(sc(versionLabelWidth))
                                 .withSizeKeepingCentre(sc(versionLabelWidth), sc(helpButtonSize)));
     versionLabel.setFont(juce::FontOptions(scale * 10.0f));
-    titleArea.removeFromRight(sc(engineVersionGap));
-    engineCombo.setBounds(titleArea.removeFromRight(sc(engineComboWidth))
-                              .withSizeKeepingCentre(sc(engineComboWidth), sc(comboRow)));
-    engineLabel.setBounds(titleArea.removeFromRight(sc(engineLabelWidth))
-                              .withSizeKeepingCentre(sc(engineLabelWidth), sc(comboRow)));
-    engineLabel.setFont(juce::FontOptions(scale * 12.5f));
 
     // Fonts are the one part of the layout Grid can't scale for us, and a
     // stale text-box size would silently cap the value text at the default
@@ -499,8 +441,7 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                          &outputSectionLabel, &fineTuningSectionLabel })
         label->setFont(juce::FontOptions(scale * 11.0f).withStyle("Bold"));
 
-    for (auto* label : { &tailLengthLabel, &suppressionStrengthLabel, &nearendDetectorLabel,
-                         &nearendSensitivityLabel, &protectionHoldTimeLabel, &transitionSmoothingLabel,
+    for (auto* label : { &tailLengthLabel, &amountLabel, &maxReductionLabel, &responseLabel,
                          &hpfLabel, &referenceGainLabel, &dryWetLabel })
         label->setFont(juce::FontOptions(scale * 12.5f));
 
@@ -514,9 +455,8 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         button->repaint(); // a property change alone doesn't invalidate it
     }
 
-    juce::Slider* const sliders[] = { &nearendSensitivitySlider, &protectionHoldTimeSlider,
-                                      &transitionSmoothingSlider, &hpfSlider,
-                                      &referenceGainSlider, &dryWetSlider };
+    juce::Slider* const sliders[] = { &amountSlider, &maxReductionSlider, &responseSlider,
+                                      &hpfSlider, &referenceGainSlider, &dryWetSlider };
     const int textBoxWidth = sc(60);
     const int textBoxHeight = sc(24);
     for (auto* slider : sliders)
@@ -575,8 +515,8 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         SectionGrid grid(1, scale, 0);
         grid.row(sectionHeaderRow, cancellationSectionLabel);
         addLabelled(grid, headerGap, tailLengthLabel, tailLengthCombo, comboRow);
-        addLabelled(grid, controlGap, suppressionStrengthLabel, suppressionStrengthCombo, comboRow);
-        addLabelled(grid, controlGap, nearendSensitivityLabel, nearendSensitivitySlider, sliderRow);
+        addLabelled(grid, controlGap, amountLabel, amountSlider, sliderRow);
+        addLabelled(grid, controlGap, maxReductionLabel, maxReductionSlider, sliderRow);
         grid.gap(controlGap);
         grid.row(buttonRow, fineTuningButton);
         grid.performLayout(panelBody(sections.column2));
@@ -599,8 +539,8 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                      suppressionMeterLabel, suppressionMeter, outputMeterLabel, outputMeter);
     }
 
-    // FINE TUNING overlay across columns 2 and 3: the detector's choice and
-    // HF clamp on the left, its two timing controls on the right.
+    // FINE TUNING overlay across columns 2 and 3: Response on the left, the
+    // hint across the bottom.
     {
         fineTuningOverlay.scale = scale;
         fineTuningOverlay.setBounds(sections.fineTuning);
@@ -619,17 +559,10 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         auto right = body;
 
         SectionGrid leftGrid(1, scale, 0);
-        addLabelled(leftGrid, headerGap, nearendDetectorLabel, nearendDetectorCombo, comboRow);
-        leftGrid.gap(controlGap);
-        leftGrid.row(toggleRow, limitHfGainToggle);
+        addLabelled(leftGrid, headerGap, responseLabel, responseSlider, sliderRow);
         leftGrid.performLayout(left);
 
         fineTuningHintLabel.setBounds(left.getUnion(right).removeFromBottom(sc(3 * statusRow)));
-
-        SectionGrid rightGrid(1, scale, 0);
-        addLabelled(rightGrid, headerGap, protectionHoldTimeLabel, protectionHoldTimeSlider, sliderRow);
-        addLabelled(rightGrid, controlGap, transitionSmoothingLabel, transitionSmoothingSlider, sliderRow);
-        rightGrid.performLayout(right);
     }
 }
 
@@ -659,10 +592,9 @@ void PAEchoCancellerAudioProcessorEditor::updateFineTuningButton()
         fineTuningResetButton.setEnabled(modified);
 }
 
-std::array<juce::RangedAudioParameter*, 4> PAEchoCancellerAudioProcessorEditor::getFineTuningParameters() const
+std::array<juce::RangedAudioParameter*, 1> PAEchoCancellerAudioProcessorEditor::getFineTuningParameters() const
 {
-    return { processor.getNearendDetectorParameter(), processor.getProtectionHoldTimeParameter(),
-             processor.getTransitionSmoothingParameter(), processor.getLimitHfGainParameter() };
+    return { processor.getResponseParameter() };
 }
 
 void PAEchoCancellerAudioProcessorEditor::resetFineTuningToDefaults()
@@ -670,7 +602,7 @@ void PAEchoCancellerAudioProcessorEditor::resetFineTuningToDefaults()
     // One gesture per parameter, like any other control edit, so hosts record
     // the reset as ordinary automation/undo steps. The controls themselves
     // pick the new values up from the 30Hz timer sync, and the processor
-    // applies them live like any other suppressor-only change.
+    // applies them live like any other change.
     for (auto* param : getFineTuningParameters()) {
         param->beginChangeGesture();
         param->setValueNotifyingHost(param->getDefaultValue());
@@ -696,218 +628,70 @@ void PAEchoCancellerAudioProcessorEditor::updateTailLengthCombo()
         tailLengthCombo.setSelectedId(currentId, juce::dontSendNotification);
 }
 
-void PAEchoCancellerAudioProcessorEditor::engineComboChanged()
+namespace {
+
+// One host gesture per committed slider value, so hosts record an edit as an
+// ordinary automation/undo step.
+void setParameterFromUi(juce::RangedAudioParameter& param, float value)
 {
-    const int index = engineCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
-    auto* param = processor.getEngineParameter();
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(index)));
-    param->endChangeGesture();
+    param.beginChangeGesture();
+    param.setValueNotifyingHost(param.convertTo0to1(value));
+    param.endChangeGesture();
 }
 
-void PAEchoCancellerAudioProcessorEditor::updateEngineCombo()
+void syncSlider(juce::Slider& slider, double value, double tolerance)
 {
-    const int index = processor.getEngineParameter()->getIndex();
-    if (engineCombo.getSelectedId() != index + 1)
-        engineCombo.setSelectedId(index + 1, juce::dontSendNotification);
-
-    // The Fine tuning page shapes the Classic engine's crowd detector only;
-    // under Kalman, Tail Length, Suppression Strength and Crowd Protection
-    // are the whole story, so grey the page out rather than let it look live.
-    const bool classic = index == PAEchoCancellerAudioProcessor::engineClassic;
-    if (nearendDetectorCombo.isEnabled() != classic) {
-        for (auto* component : std::initializer_list<juce::Component*>{
-                 &nearendDetectorLabel, &nearendDetectorCombo, &limitHfGainToggle,
-                 &protectionHoldTimeLabel, &protectionHoldTimeSlider,
-                 &transitionSmoothingLabel, &transitionSmoothingSlider })
-            component->setEnabled(classic);
-        // The look-and-feel draws disabled sliders and toggles at full
-        // strength, so dim them by hand to match the greyed labels.
-        for (auto* component : std::initializer_list<juce::Component*>{
-                 &limitHfGainToggle, &protectionHoldTimeSlider, &transitionSmoothingSlider })
-            component->setAlpha(classic ? 1.0f : 0.45f);
-        fineTuningHintLabel.setText(
-            classic ? "These shape how the crowd detector switches on and off. "
-                      "The defaults suit most shows; Crowd Protection on the main "
-                      "panel is the control to reach for first."
-                    : "These tune the Classic engine only. With Kalman, Tail Length, "
-                      "Suppression Strength and Crowd Protection on the main panel "
-                      "are all there is to set.",
-            juce::dontSendNotification);
-    }
+    if (std::abs(slider.getValue() - value) > tolerance)
+        slider.setValue(value, juce::dontSendNotification);
 }
 
-void PAEchoCancellerAudioProcessorEditor::suppressionStrengthComboChanged()
+} // namespace
+
+void PAEchoCancellerAudioProcessorEditor::amountSliderChanged()
 {
-    const int index = suppressionStrengthCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
-    auto* param = processor.getSuppressionStrengthParameter();
-    const float normalized = static_cast<float>(index) / 2.0f; // 3 choices: 0, 0.5, 1
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
+    setParameterFromUi(*processor.getAmountParameter(), static_cast<float>(amountSlider.getValue()));
 }
 
-void PAEchoCancellerAudioProcessorEditor::updateSuppressionStrengthCombo()
+void PAEchoCancellerAudioProcessorEditor::maxReductionSliderChanged()
 {
-    const int currentId = processor.getSuppressionStrengthParameter()->getIndex() + 1;
-    if (suppressionStrengthCombo.getSelectedId() != currentId)
-        suppressionStrengthCombo.setSelectedId(currentId, juce::dontSendNotification);
+    setParameterFromUi(*processor.getMaxReductionParameter(), -static_cast<float>(maxReductionSlider.getValue()));
 }
 
-void PAEchoCancellerAudioProcessorEditor::limitHfGainToggleChanged()
+void PAEchoCancellerAudioProcessorEditor::responseSliderChanged()
 {
-    auto* param = processor.getLimitHfGainParameter();
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(limitHfGainToggle.getToggleState() ? 1.0f : 0.0f);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateLimitHfGainToggle()
-{
-    const bool current = processor.getLimitHfGainParameter()->get();
-    if (limitHfGainToggle.getToggleState() != current)
-        limitHfGainToggle.setToggleState(current, juce::dontSendNotification);
-}
-
-void PAEchoCancellerAudioProcessorEditor::nearendDetectorComboChanged()
-{
-    const int index = nearendDetectorCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
-    auto* param = processor.getNearendDetectorParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(index));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateNearendDetectorCombo()
-{
-    const int currentId = processor.getNearendDetectorParameter()->getIndex() + 1;
-    if (nearendDetectorCombo.getSelectedId() != currentId)
-        nearendDetectorCombo.setSelectedId(currentId, juce::dontSendNotification);
-}
-
-void PAEchoCancellerAudioProcessorEditor::nearendSensitivitySliderChanged()
-{
-    auto* param = processor.getNearendSensitivityParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(nearendSensitivitySlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateNearendSensitivitySlider()
-{
-    // Skip while actively dragging: the parameter is deliberately not
-    // updated until drag-end (see the constructor wiring), so syncing from
-    // it mid-drag would snap the slider back to the pre-drag value 30
-    // times a second, fighting the user's own gesture.
-    if (nearendSensitivitySlider.isMouseButtonDown())
-        return;
-    const double currentPercent = static_cast<double>(processor.getNearendSensitivityParameter()->get());
-    if (std::abs(nearendSensitivitySlider.getValue() - currentPercent) > 0.05)
-        nearendSensitivitySlider.setValue(currentPercent, juce::dontSendNotification);
-}
-
-void PAEchoCancellerAudioProcessorEditor::protectionHoldTimeSliderChanged()
-{
-    auto* param = processor.getProtectionHoldTimeParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(protectionHoldTimeSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateProtectionHoldTimeSlider()
-{
-    // See the same guard in updateNearendSensitivitySlider() -- avoids
-    // fighting an in-progress drag whose value hasn't committed yet.
-    if (protectionHoldTimeSlider.isMouseButtonDown())
-        return;
-    const double currentMs = static_cast<double>(processor.getProtectionHoldTimeParameter()->get());
-    if (std::abs(protectionHoldTimeSlider.getValue() - currentMs) > 0.5)
-        protectionHoldTimeSlider.setValue(currentMs, juce::dontSendNotification);
-}
-
-void PAEchoCancellerAudioProcessorEditor::transitionSmoothingSliderChanged()
-{
-    auto* param = processor.getTransitionSmoothingParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(transitionSmoothingSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateTransitionSmoothingSlider()
-{
-    // See the same guard in updateNearendSensitivitySlider().
-    if (transitionSmoothingSlider.isMouseButtonDown())
-        return;
-    const double currentMs = static_cast<double>(processor.getTransitionSmoothingParameter()->get());
-    if (std::abs(transitionSmoothingSlider.getValue() - currentMs) > 0.5)
-        transitionSmoothingSlider.setValue(currentMs, juce::dontSendNotification);
+    setParameterFromUi(*processor.getResponseParameter(), static_cast<float>(responseSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::hpfSliderChanged()
 {
-    auto* param = processor.getHpfFrequencyParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(hpfSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateHpfSlider()
-{
-    const double currentHz = static_cast<double>(processor.getHpfFrequencyParameter()->get());
-    if (std::abs(hpfSlider.getValue() - currentHz) > 0.05)
-        hpfSlider.setValue(currentHz, juce::dontSendNotification);
+    setParameterFromUi(*processor.getHpfFrequencyParameter(), static_cast<float>(hpfSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::referenceGainSliderChanged()
 {
-    auto* param = processor.getReferenceGainParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(referenceGainSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateReferenceGainSlider()
-{
-    const double currentDb = static_cast<double>(processor.getReferenceGainParameter()->get());
-    if (std::abs(referenceGainSlider.getValue() - currentDb) > 0.05)
-        referenceGainSlider.setValue(currentDb, juce::dontSendNotification);
+    setParameterFromUi(*processor.getReferenceGainParameter(), static_cast<float>(referenceGainSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::dryWetSliderChanged()
 {
-    auto* param = processor.getDryWetMixParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(dryWetSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
+    setParameterFromUi(*processor.getDryWetMixParameter(), static_cast<float>(dryWetSlider.getValue()));
 }
 
-void PAEchoCancellerAudioProcessorEditor::updateDryWetSlider()
+void PAEchoCancellerAudioProcessorEditor::updateSliders()
 {
-    const double currentPercent = static_cast<double>(processor.getDryWetMixParameter()->get());
-    if (std::abs(dryWetSlider.getValue() - currentPercent) > 0.05)
-        dryWetSlider.setValue(currentPercent, juce::dontSendNotification);
+    // Keeps every slider in step with host automation and session loads.
+    syncSlider(amountSlider, processor.getAmountParameter()->get(), 0.05);
+    syncSlider(maxReductionSlider, -processor.getMaxReductionParameter()->get(), 0.05);
+    syncSlider(responseSlider, processor.getResponseParameter()->get(), 0.05);
+    syncSlider(hpfSlider, processor.getHpfFrequencyParameter()->get(), 0.05);
+    syncSlider(referenceGainSlider, processor.getReferenceGainParameter()->get(), 0.05);
+    syncSlider(dryWetSlider, processor.getDryWetMixParameter()->get(), 0.05);
 }
 
 void PAEchoCancellerAudioProcessorEditor::timerCallback()
 {
-    updateEngineCombo();
     updateTailLengthCombo();
-    updateSuppressionStrengthCombo();
-    updateLimitHfGainToggle();
-    updateNearendDetectorCombo();
-    updateNearendSensitivitySlider();
-    updateProtectionHoldTimeSlider();
-    updateTransitionSmoothingSlider();
-    updateHpfSlider();
-    updateReferenceGainSlider();
-    updateDryWetSlider();
+    updateSliders();
     updateFineTuningButton();
 
     // Two different ways "nothing is happening" can look, both of which
@@ -943,24 +727,16 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
         return;
     }
 
-    // AEC3's live echo-path delay estimate. A steady value = the delay
-    // estimator has a solid lock on the PA-to-mic relationship; "--" with
-    // signal present = the reference likely isn't reaching the plugin at
-    // all (e.g. sidechain pins not routed); a value that keeps jumping =
-    // the reference/mic timing itself is unstable. The median (1s
-    // aggregation) is shown alongside the instantaneous value so a
-    // momentary excursion is distinguishable from a genuine change.
+    // The filter's echo-path delay readout (already held steady over ~2 s
+    // in the canceller). "--" with signal present = the reference likely
+    // isn't reaching the plugin at all (e.g. sidechain pins not routed).
     {
         const int delayMs = processor.getEstimatedEchoPathDelayMs();
-        const int medianMs = processor.getEchoPathDelayMedianMs();
         juce::String text("PA delay: ");
         if (delayMs < 0)
             text << "--";
-        else {
+        else
             text << delayMs << " ms";
-            if (medianMs >= 0)
-                text << "  (median " << medianMs << ")";
-        }
         delayReadoutLabel.setText(text, juce::dontSendNotification);
 
         // The same facts, as the sentence an operator needs: is there a PA
@@ -985,22 +761,15 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     outputMeter.setLevel(displayedOutputLevel);
 
     // Suppression is measured directly from peak levels (dB reduction from
-    // input to output), rather than AEC3's own ERLE statistic. ERLE only
-    // reflects the linear adaptive filter's internal echo reduction -- it
-    // doesn't account for the nonlinear suppression stage that runs after it
-    // (the stage Suppression Strength/Near-end Sensitivity tune) -- so it
-    // never lined up with what Input/Output actually showed. Measuring it
-    // directly makes it sum correctly by construction, at the cost of also
-    // picking up any level change from Dry/Wet Mix or plain near-end
-    // dynamics, not only echo removal.
+    // input to output), so it matches what Input/Output show by
+    // construction, at the cost of also picking up any level change from
+    // Mix or plain near-end dynamics, not only echo removal.
     //
-    // The Input side uses the post-HPF, delay-compensated reading -- Output always reflects Input from getLatencySamples()
-    // earlier (the internal frame-buffering latency plus AEC3's own
-    // internal processing delay -- getLatencySamples() reports the true
-    // total, see that getter's comment), so comparing it against the
-    // *live* Input peak makes fast transients (kick/snare) look heavily
-    // suppressed when they simply haven't reached the output yet. See
-    // getInputPeakLevelPostDelayed()'s comment.
+    // The Input side uses the post-HPF, delay-compensated reading -- Output
+    // always reflects Input from getLatencySamples() earlier, so comparing
+    // it against the *live* Input peak makes fast transients (kick/snare)
+    // look heavily suppressed when they simply haven't reached the output
+    // yet. See getInputPeakLevelPostDelayed()'s comment.
     constexpr float levelFloorLinear = 1.0e-6f; // -120dB, matches the silence threshold above
     constexpr float suppressionJitterFloorDb = 0.5f;
     const float delayCompensatedInputLevel =
@@ -1020,7 +789,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 
 void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
 {
-    // Mirrors the panel exactly: the engine choice, the three columns left to right, then the
+    // Mirrors the panel exactly: the three columns left to right, then the
     // Fine tuning overlay, then how to use it live and in post. The order is
     // the thing that has to match the panel, and does.
     static const juce::String helpText =
@@ -1034,32 +803,16 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "canceller, how it cancels, and what comes out.\n"
         "\n"
         "\n"
-        "=== ENGINE ===\n"
-        "\n"
-        "Top right. Two cancellers to choose between; both use the same "
-        "panel, and switching applies live.\n"
-        "Kalman (low latency), the default: a full-band adaptive filter "
-        "with a light cleanup stage. About 4 ms of latency (192 samples at "
-        "44.1/48kHz). On real venue recordings it removed more PA and "
-        "sounded more natural.\n"
-        "Classic: the WebRTC AEC3 engine from earlier versions. About 19 ms "
-        "of latency. The Fine tuning page applies to Classic only.\n"
-        "The new latency is reported to the host when you switch; some "
-        "hosts only pick it up after playback is stopped and restarted.\n"
-        "\n"
-        "\n"
         "=== INPUT ===\n"
         "\n"
         "PA REFERENCE TRIM\n"
         "A plain gain trim on the reference signal. The PA ref meter has a "
         "wide marked zone (peaks of about -36 to -3dBFS) because a PA feed "
-        "is very dynamic: keep the loud parts inside it. A feed that sits "
-        "below the zone adapts slowly and unevenly, especially at high "
-        "frequencies, so raise the trim. Above the zone nothing breaks, but "
-        "a hotter reference also suppresses a little more of the audience "
-        "(about 1-2dB near 0dBFS) and risks clipping, so there is no "
-        "benefit in going further. Not a substitute for Suppression "
-        "Strength.\n"
+        "is very dynamic: keep the loud parts inside it. Well below the "
+        "zone the canceller may not register the feed as PA, so raise the "
+        "trim. Above the zone nothing breaks, but "
+        "a feed that hot risks clipping, so there is no benefit in going "
+        "further. Not a substitute for Amount.\n"
         "\n"
         "INPUT HPF\n"
         "A 24dB/octave high-pass filter (80-300Hz), applied identically to "
@@ -1078,21 +831,19 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "TAIL LENGTH\n"
         "How long a reverb tail the canceller models. Pick by venue: 50 ms "
         "for a small room, up to 800 ms for an arena or outdoor rig. Longer "
-        "costs a little more CPU. With Classic this is the one control that "
-        "restarts the canceller when changed, so set it before the show "
-        "rather than during it; with Kalman it applies live.\n"
+        "costs a little more CPU. Applies live.\n"
         "\n"
-        "SUPPRESSION STRENGTH\n"
-        "Gentle / Moderate / Hard. How hard leftover bleed is cleaned up "
-        "after the main cancellation. Hard removes the most but can sound "
-        "processed on crowd noise; Gentle is the most natural but lets a "
-        "little more PA through. Applies live.\n"
+        "AMOUNT\n"
+        "How hard the PA left over after the main filter is cleaned up. "
+        "0% is the filter alone: the most natural sound. Higher removes "
+        "more PA, and more of the crowd with it. 25% is a good start; "
+        "raise it if PA still comes through, lower it if the crowd sounds "
+        "thin or watery. Applies live.\n"
         "\n"
-        "CROWD PROTECTION\n"
-        "How readily the plugin decides a moment is real audience sound to "
-        "keep rather than PA bleed to remove. Raise it if the crowd sounds "
-        "gated or pumpy; lower it if PA bleed comes through when the crowd "
-        "is loud. Applies live.\n"
+        "MAX REDUCTION\n"
+        "The deepest cut the cleanup may make at any frequency. Closer to "
+        "0 dB keeps more of the room under the PA; -24 dB lets it go "
+        "furthest. Has no effect at 0% Amount. Applies live.\n"
         "\n"
         "\n"
         "=== OUTPUT ===\n"
@@ -1116,40 +867,23 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "\n"
         "\n"
         "=== FINE TUNING ===\n"
-        "Behind the Fine tuning button, and for the Classic engine only "
-        "(greyed out under Kalman). The defaults suit most shows; the "
-        "button says \"adjusted\" when anything in here is off its default, "
-        "and Reset to defaults puts all four back in one click.\n"
+        "Behind the Fine tuning button. The default suits most shows; the "
+        "button says \"adjusted\" when the setting in here is off its "
+        "default, and Reset to defaults puts it back in one click.\n"
         "\n"
-        "NEAR-END DETECTOR\n"
-        "How audience sound is recognised. Classic watches the overall "
-        "low-frequency balance and protects most of the time. Subband "
-        "(2-4kHz) compares bass against the range where crowd sound lives, "
-        "so it protects less often but more precisely. Different "
-        "characters, not better/worse -- A/B them on your material.\n"
-        "\n"
-        "PROTECTION HOLD TIME\n"
-        "How long protection lasts once triggered. Longer is smoother but "
-        "can let some PA through just after the crowd quiets; shorter can "
-        "pulse on intermittent crowd noise.\n"
-        "\n"
-        "TRANSITION SMOOTHING\n"
-        "How gradually the plugin moves between protecting the crowd and "
-        "suppressing the PA. 0 ms switches instantly, which can pump; higher "
-        "rounds the switch off.\n"
-        "\n"
-        "LIMIT HF GAIN\n"
-        "An extra clamp on high-frequency gain. Usually off; try it if you "
-        "hear excess high-end bleed.\n"
+        "RESPONSE\n"
+        "How quickly the cleanup follows the sound (3-50 ms). Shorter "
+        "tracks the PA more tightly but can make crowd noise flutter; "
+        "longer is smoother but lets a little more PA through on fast "
+        "changes. Applies live.\n"
         "\n"
         "\n"
         "=== LIVE AND IN POST ===\n"
         "\n"
         "Live (e.g. LiveProfessor, MainStage): the plugin adds about 4 ms "
-        "of latency with Kalman (about 19 ms with Classic) and reports it to "
-        "the host. Give it a few seconds of PA signal to lock on before "
-        "relying on it. With Classic, avoid changing Tail Length mid-show; "
-        "everything else applies without interruption.\n"
+        "of latency (192 samples at 44.1/48kHz, 320 at 96kHz) and reports "
+        "it to the host. Give it a few seconds of PA signal to lock on "
+        "before relying on it. Every control applies without interruption.\n"
         "\n"
         "In post: insert it on the mic track with the PA feed on the "
         "sidechain. An offline bounce sounds the same as playing back from "

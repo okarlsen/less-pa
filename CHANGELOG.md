@@ -5,21 +5,37 @@ All notable changes to Less PA are documented here. Versions follow
 
 ## [Unreleased]
 
-### Added
+Planned as 1.1.0.
 
-- **Engine** switch in the title strip. **Kalman (low latency)** is a new
-  full-band adaptive filter with a light cleanup stage: 192 samples (4.0 ms)
-  of latency at 44.1/48 kHz and 320 samples (3.3 ms) at 96 kHz, against
-  about 19 ms for **Classic**, the WebRTC AEC3 engine of earlier versions.
-  On three real venue recordings it removed 3-6 dB more PA bleed. Kalman is
-  the default, including for sessions saved by earlier versions; pick
-  Classic to get the old sound back. Switching applies live and reports the
-  new latency to the host. Tail Length, Suppression Strength and Crowd
-  Protection drive both engines; the Fine tuning page applies to Classic
-  only and is greyed out under Kalman.
-- A **Reset to defaults** button on the Fine tuning page puts Near-end
-  Detector, Protection Hold Time, Transition Smoothing and Limit HF Gain back
-  to their defaults. It is greyed out when nothing there has been changed.
+### Changed
+
+- **New canceller.** Less PA now uses a full-band Kalman adaptive filter
+  with a light cleanup stage, in place of the WebRTC AEC3 engine of 1.0.x.
+  Latency drops from about 19 ms to 192 samples (4.0 ms) at 44.1/48 kHz and
+  320 samples (3.3 ms) at 96 kHz. On three real venue recordings it removed
+  3-6 dB more PA bleed. It starts from the mic/PA level ratio, so it locks
+  on within a few seconds of PA, and every control applies live with no
+  dropout.
+- **New cancellation controls.** Tail Length stays. Suppression Strength
+  and Crowd Protection are replaced by **Amount** (0-100%, default 25%: how
+  hard the PA left over after the filter is cleaned up; 0% is the filter
+  alone) and **Max Reduction** (0 to -24 dB, default -12 dB: the deepest cut
+  at any frequency). The Fine tuning page now holds **Response** (3-50 ms,
+  default 20 ms: how quickly the cleanup follows the sound) and Reset to
+  defaults.
+- The PA delay readout comes from the filter itself and holds steady.
+
+### Removed
+
+- The Classic (AEC3) engine and its controls: Near-end Detector,
+  Protection Hold Time, Transition Smoothing and Limit HF Gain. The WebRTC
+  library is no longer part of the build.
+
+### Upgrading
+
+- Sessions saved by 1.0.x keep their Tail Length, PA Reference Trim, Input
+  HPF and Mix. Amount, Max Reduction and Response start at their defaults;
+  saved values of the removed controls are ignored.
 
 ### Fixed
 

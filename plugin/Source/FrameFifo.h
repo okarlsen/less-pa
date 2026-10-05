@@ -4,8 +4,8 @@
 #include <vector>
 
 // Fixed-capacity single-channel circular buffer of floats. Used to bridge
-// between the host's arbitrary per-block sample counts and AEC3's fixed
-// ~10ms frame size, adding no more buffering than that gap requires.
+// between the host's arbitrary per-block sample counts and the canceller's
+// fixed frame size, adding no more buffering than that gap requires.
 // Not thread-safe -- assumes single-threaded use from the audio callback.
 class FrameFifo {
 public:

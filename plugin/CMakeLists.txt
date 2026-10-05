@@ -14,9 +14,6 @@ endif()
 # Without this, CMake defaults the deployment target to whatever macOS the
 # build machine happens to run, which quietly produces a plugin that refuses
 # to load on anything older. Released builds target macOS 13.
-#
-# webrtc-audio-processing has to be built to match -- see BUILDING.md, which
-# sets MACOSX_DEPLOYMENT_TARGET for the Meson stage.
 if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
@@ -27,38 +24,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../JUCE JUCE)
-
-set(WEBRTC_APM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../webrtc-audio-processing")
-
-find_package(PkgConfig REQUIRED)
-set(ENV{PKG_CONFIG_PATH} "${WEBRTC_APM_ROOT}/build/meson-uninstalled:$ENV{PKG_CONFIG_PATH}")
-pkg_check_modules(WEBRTC_APM REQUIRED IMPORTED_TARGET webrtc-audio-processing-2)
-
-# Abseil. webrtc-audio-processing resolves absl_base/absl_flags/... through
-# pkg-config, and on a machine with Homebrew's `abseil` installed it will
-# happily pick that up -- which links the plugin against ~50 dylibs under
-# /opt/homebrew/opt/abseil/lib that do not exist on anyone else's Mac, so the
-# resulting .component/.vst3 simply fails to load once distributed. Release
-# builds therefore configure Meson with --force-fallback-for=abseil-cpp
-# (see BUILDING.md) so Abseil is built as static archives inside the Meson
-# build tree.
-#
-# In that fallback case upstream's meson.build deliberately emits an empty
-# `Requires:` in the generated .pc, and the webrtc static library leaves
-# Abseil's out-of-line symbols undefined -- so the archives have to be added
-# to the link line here.
-file(GLOB WEBRTC_APM_ABSL_LIBS
-    "${WEBRTC_APM_ROOT}/build/subprojects/abseil-cpp-*/libabsl_*.a")
-
-if(WEBRTC_APM_ABSL_LIBS)
-    message(STATUS "Less PA: linking statically against the vendored Abseil subproject")
-else()
-    message(WARNING
-        "Less PA: no vendored Abseil found under ${WEBRTC_APM_ROOT}/build/subprojects. "
-        "Falling back to whatever Abseil pkg-config resolves (typically Homebrew's "
-        "shared libraries). The build will work on this machine but the resulting "
-        "plugins are NOT redistributable -- see BUILDING.md.")
-endif()
 
 juce_add_plugin(PAEchoCanceller
     COMPANY_NAME "SGTM"
@@ -96,12 +61,6 @@ target_compile_definitions(PAEchoCanceller
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
-        WEBRTC_APM_DEBUG_DUMP=0
-)
-
-target_include_directories(PAEchoCanceller
-    PRIVATE
-        ${WEBRTC_APM_ROOT}
 )
 
 target_link_libraries(PAEchoCanceller
@@ -109,9 +68,6 @@ target_link_libraries(PAEchoCanceller
         LessPAAssets
         juce::juce_audio_utils
         juce::juce_dsp
-        PkgConfig::WEBRTC_APM
-        ${WEBRTC_APM_ABSL_LIBS}
-        "$<$<PLATFORM_ID:Darwin>:-framework CoreFoundation>"
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -119,8 +75,8 @@ target_link_libraries(PAEchoCanceller
 )
 
 # Standalone harness that drives PAEchoCancellerAudioProcessor directly
-# (no AU/VST3 host wrapper) to verify the frame accumulator and AEC3 wiring
-# at all required sample rates with irregular block sizes.
+# (no AU/VST3 host wrapper) to verify the frame accumulator and canceller
+# wiring at all required sample rates with irregular block sizes.
 juce_add_console_app(PAEchoCancellerVerify
     PRODUCT_NAME "Less PA Verify"
 )
@@ -142,12 +98,6 @@ target_compile_definitions(PAEchoCancellerVerify
         JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
-        WEBRTC_APM_DEBUG_DUMP=0
-)
-
-target_include_directories(PAEchoCancellerVerify
-    PRIVATE
-        ${WEBRTC_APM_ROOT}
 )
 
 target_link_libraries(PAEchoCancellerVerify
@@ -155,9 +105,6 @@ target_link_libraries(PAEchoCancellerVerify
         LessPAAssets
         juce::juce_audio_utils
         juce::juce_dsp
-        PkgConfig::WEBRTC_APM
-        ${WEBRTC_APM_ABSL_LIBS}
-        "$<$<PLATFORM_ID:Darwin>:-framework CoreFoundation>"
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags

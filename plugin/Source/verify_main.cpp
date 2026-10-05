@@ -1,6 +1,6 @@
 // Standalone harness that drives PAEchoCancellerAudioProcessor directly
 // (bypassing the AU/VST3 host wrapper) to prove the FIFO frame-accumulator
-// bridges arbitrary/irregular host block sizes into AEC3's fixed 10ms
+// bridges arbitrary/irregular host block sizes into the canceller's fixed
 // frames correctly, at all three required sample rates, and to report the
 // actual latency introduced.
 
@@ -235,128 +235,12 @@ double rmsDbfs(const std::vector<float>& samples, int sampleRate, double startS,
     return rms > 0.0 ? 20.0 * std::log10(rms) : -1000.0;
 }
 
-// Drives a raw webrtc::AudioProcessing instance directly with the given
-// config, bypassing PAEchoCancellerAudioProcessor entirely. Needed for
-// comparisons against configs the plugin itself can no longer produce (e.g.
-// pre-fix dominant_nearend_detection thresholds) -- fixed 10ms frames only,
-// no irregular-block-size bridging, since that's not what's being tested
-// here.
-std::vector<float> runRawAec3(const webrtc::EchoCanceller3Config& config, int sampleRate,
-                               const std::vector<float>& reference, const std::vector<float>& mic) {
-    auto apm = webrtc::AudioProcessingBuilder()
-                   .SetEchoControlFactory(std::make_unique<TailLengthEchoControlFactory>(config))
-                   .Create();
-    webrtc::AudioProcessing::Config apmConfig;
-    apmConfig.echo_canceller.enabled = true;
-    apmConfig.echo_canceller.mobile_mode = false;
-    apmConfig.gain_controller1.enabled = false;
-    apmConfig.gain_controller2.enabled = false;
-    apmConfig.high_pass_filter.enabled = false;
-    apmConfig.noise_suppression.enabled = false;
-    apm->ApplyConfig(apmConfig);
-
-    const int frameSize = sampleRate / 100;
-    const int n = static_cast<int>(mic.size());
-    std::vector<float> output(static_cast<size_t>(n), 0.0f);
-    std::vector<float> refFrame(static_cast<size_t>(frameSize));
-    std::vector<float> micFrame(static_cast<size_t>(frameSize));
-    float* refPtr = refFrame.data();
-    float* micPtr = micFrame.data();
-    const webrtc::StreamConfig streamConfig(sampleRate, 1);
-
-    int pos = 0;
-    while (pos + frameSize <= n) {
-        std::copy_n(reference.data() + pos, frameSize, refFrame.data());
-        std::copy_n(mic.data() + pos, frameSize, micFrame.data());
-        apm->ProcessReverseStream(&refPtr, streamConfig, streamConfig, &refPtr);
-        apm->ProcessStream(&micPtr, streamConfig, streamConfig, &micPtr);
-        std::copy_n(micFrame.data(), frameSize, output.data() + pos);
-        pos += frameSize;
-    }
-    return output;
-}
-
-// Which engine the suite is exercising. The original suite was written
-// against AEC3 and runs with Classic; main() then re-runs the
-// engine-agnostic tests (latency, dry/wet, bypass, bounce, robustness)
-// with Kalman. Every test processor gets it right after construction.
-int gTestEngine = PAEchoCancellerAudioProcessor::engineClassic;
-
-void applyTestEngine(PAEchoCancellerAudioProcessor& proc) {
-    auto* engine = proc.getEngineParameter();
-    engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(gTestEngine)));
-}
-
 bool setMonoLayout(PAEchoCancellerAudioProcessor& proc) {
     PAEchoCancellerAudioProcessor::BusesLayout layout;
     layout.inputBuses.add(juce::AudioChannelSet::mono());
     layout.inputBuses.add(juce::AudioChannelSet::mono());
     layout.outputBuses.add(juce::AudioChannelSet::mono());
     return proc.setBusesLayout(layout);
-}
-
-// Confirms AEC3's ERLE (echo_return_loss_enhancement) stat actually updates
-// in real time rather than sitting stale, before we trust it for a live
-// suppression meter. Runs ~15s (well past AEC3's 2.5s initial phase) with a
-// simple fixed 512-sample block size, polling getSuppressionDb() ~1x/second.
-bool testSuppressionMeterUpdates(int sampleRate) {
-    printf("\n=== Suppression meter (ERLE) update test (%d Hz) ===\n", sampleRate);
-    const double durationS = 15.0;
-    auto signals = makeSignals(sampleRate, durationS);
-
-    PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
-    if (!setMonoLayout(proc)) {
-        printf("  FAILED to set mono layout\n");
-        return false;
-    }
-
-    const int blockSize = 512;
-    proc.prepareToPlay(sampleRate, blockSize);
-
-    const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
-    juce::AudioBuffer<float> buffer(totalChannels, blockSize);
-    juce::MidiBuffer midi;
-
-    const int n = static_cast<int>(signals.mic.size());
-    const int pollEvery = sampleRate; // ~once per second
-    int nextPoll = 0;
-    std::vector<float> polledDb;
-
-    int pos = 0;
-    while (pos + blockSize <= n) {
-        buffer.setSize(totalChannels, blockSize, false, false, true);
-        buffer.clear();
-
-        auto mainIn = proc.getBusBuffer(buffer, true, 0);
-        auto refIn = proc.getBusBuffer(buffer, true, 1);
-        for (int ch = 0; ch < mainIn.getNumChannels(); ++ch)
-            mainIn.copyFrom(ch, 0, signals.mic.data() + pos, blockSize);
-        for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
-            refIn.copyFrom(ch, 0, signals.reference.data() + pos, blockSize);
-
-        proc.processBlock(buffer, midi);
-        pos += blockSize;
-
-        if (pos >= nextPoll) {
-            float db = proc.getSuppressionDb();
-            polledDb.push_back(db);
-            printf("  t=%.1fs  ERLE=%.1f dB\n", static_cast<double>(pos) / sampleRate, db);
-            nextPoll += pollEvery;
-        }
-    }
-    proc.releaseResources();
-
-    // Pass if the value moved off zero/stuck and settled to something
-    // plausible (positive dB, i.e. genuine suppression) by the end.
-    bool allZero = true;
-    for (float db : polledDb) if (db != 0.0f) allZero = false;
-    float lastDb = polledDb.empty() ? 0.0f : polledDb.back();
-
-    const bool pass = !allZero && lastDb > 3.0f;
-    printf("  %s\n", pass ? "PASS -- ERLE updates in real time and settles to a plausible value"
-                           : "CHECK -- ERLE looks stuck or implausible, don't trust it for a live meter");
-    return pass;
 }
 
 // User report: muting the reference track (so no PA signal reaches the
@@ -367,10 +251,9 @@ bool testSuppressionMeterUpdates(int sampleRate) {
 // measured-suppression formula (getInputPeakLevelPostDelayed() minus
 // getOutputPeakLevel(), floored, matching PluginEditor.cpp's timerCallback)
 // to see how long any residual reading actually persists post-mute.
-bool testSuppressionMeterAfterReferenceMute(int sampleRate, int suppressionStrengthIndex,
-                                             const char* suppressionStrengthName) {
+bool testSuppressionMeterAfterReferenceMute(int sampleRate, float amountPercent, const char* amountName) {
     printf("\n=== Suppression meter after reference mute test (%d Hz, %s) ===\n",
-           sampleRate, suppressionStrengthName);
+           sampleRate, amountName);
     const double totalDurationS = 10.0;
     const double muteAtS = 6.0; // longer pre-mute run so a long reverberant tail actually converges
     const int n = static_cast<int>(sampleRate * totalDurationS);
@@ -397,12 +280,10 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, int suppressionStren
     for (auto& v : audience) v = 0.4f * v / audiencePeak; // present throughout, before and after the mute
 
     // A single 5ms tap (as used in earlier tests) is a dry, direct path with
-    // no reverberant tail -- AEC3's ResidualEchoEstimator has almost nothing
-    // to build a reverb-decay estimate from, so it can't exercise the
-    // mechanism this test is actually after. This uses the same spread-out,
-    // decaying multi-tap room response as testLargeRoomBenefit (5ms direct
-    // plus reflections out to 320ms) so the adaptive filter -- and AEC3's
-    // internal reverb model -- has a genuine decaying tail to learn, the
+    // no reverberant tail, so it can't exercise the mechanism this test is
+    // actually after. This uses the same spread-out, decaying multi-tap room
+    // response as testLargeRoomBenefit (5ms direct plus reflections out to
+    // 320ms) so the adaptive filter has a genuine decaying tail to learn, the
     // same way a real hall recording would (see the Oslo Spektrum test
     // material notes on why short synthetic taps can miss real-material
     // behavior).
@@ -421,19 +302,16 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, int suppressionStren
     }
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
     }
-    // Everything else stays at its plugin default (Tail Length 800ms,
-    // Near-end Sensitivity 75%, Protection Hold Time 100ms) -- exactly what
-    // a user hears out of the box.
-    juce::AudioProcessorParameter* suppressionParam = proc.getSuppressionStrengthParameter();
-    suppressionParam->setValueNotifyingHost(static_cast<float>(suppressionStrengthIndex) /
-                                            static_cast<float>(suppressionParam->getNumSteps() - 1));
+    // Everything else stays at its plugin default (Tail Length 800ms, Max
+    // Reduction -12 dB, Response 20 ms) -- exactly what a user hears out of
+    // the box.
+    proc.getAmountParameter()->setValueNotifyingHost(proc.getAmountParameter()->convertTo0to1(amountPercent));
 
-    const int blockSize = sampleRate / 100; // 10ms, matches AEC3's own frame
+    const int blockSize = sampleRate / 100; // 10ms
     proc.prepareToPlay(sampleRate, blockSize);
 
     const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
@@ -486,9 +364,8 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, int suppressionStren
 // User report: a fast near-end transient (kick/snare) makes the Suppression
 // meter show significant activity even with no real echo to remove.
 // Mechanism: Output at any instant reflects Input from getLatencySamples()
-// earlier (the internal frame-buffering latency, plus AEC3's own internal
-// processing delay -- getLatencySamples() reports the true total, see that
-// getter's comment) -- comparing it against
+// earlier (one frame of buffering plus the suppressor FIR's delay) --
+// comparing it against
 // the *live* Input peak means a sharp attack sitting in the current Input
 // block hasn't reached the Output yet, and looks "suppressed" purely from
 // that timing gap. Confirms getInputPeakLevelPostDelayed() fixes it: a
@@ -530,7 +407,6 @@ bool testSuppressionMeterTransientAlignment(int sampleRate) {
     const std::vector<float> reference(static_cast<size_t>(n), 0.0f); // no PA content whatsoever
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -585,23 +461,22 @@ bool testSuppressionMeterTransientAlignment(int sampleRate) {
     return pass;
 }
 
-// Confirms that changing Tail Length mid-stream never produces a spike, only
-// a brief mute -- the "small mute is always better than any noise" rule.
+// Confirms that changing Tail Length mid-stream never produces a spike, and
+// that it applies live: the canceller keeps the near part of its filter, so
+// the output must not drop out either.
 bool testClickFreeRoomChange(int sampleRate) {
     printf("\n=== Click-free Tail Length change test (%d Hz) ===\n", sampleRate);
     const double durationS = 6.0;
     auto signals = makeSignals(sampleRate, durationS);
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
     }
 
     // Target index 0 ("50ms"): must differ from the plugin's default (index 3,
-    // "800ms") or the parameter "change" is a no-op and never triggers a
-    // rebuild at all.
+    // "800ms") or the parameter "change" is a no-op.
     const int changeAtSample = static_cast<int>(sampleRate * durationS / 2.0);
     int changeSampleIndex = -1;
     auto output = runThroughProcessor(proc, sampleRate, signals.reference, signals.mic,
@@ -618,18 +493,10 @@ bool testClickFreeRoomChange(int sampleRate) {
         if (a > inputPeak * 1.5f && spikeIndex < 0) spikeIndex = static_cast<int>(i);
     }
 
-    // The rebuild now happens on a background thread (see
-    // PAEchoCancellerAudioProcessor::run()), so the clean restart doesn't
-    // land at the block where the parameter was set -- the audio thread
-    // keeps playing the old instance until the new one is staged (~tens of
-    // wall-clock ms; a large span of *stream* samples here, since this
-    // harness processes much faster than realtime). So instead of checking
-    // a fixed window at the change point, scan everything after it for the
-    // restart's signature: a run of exact zeros (FIFO reset -> zero-padded
-    // reads) at least half an AEC3 frame long. That both proves the swap
-    // actually applied and locates it, and the existing no-spike check
-    // still covers the "click/pop" half of the test's original purpose.
-    const int minZeroRun = sampleRate / 200; // half an AEC3 frame, ~5ms
+    // A dropout would show as a run of exact zeros (the old AEC3 engine
+    // restarted with zero-padded FIFO reads here); the Kalman filter must
+    // carry on without one.
+    const int minZeroRun = sampleRate / 200; // ~5ms
     int zeroRunStart = -1, zeroRun = 0, foundZeroRunAt = -1;
     for (size_t i = static_cast<size_t>(std::max(0, changeSampleIndex)); i < output.size(); ++i) {
         if (std::abs(output[i]) < 1.0e-7f) {
@@ -642,14 +509,14 @@ bool testClickFreeRoomChange(int sampleRate) {
 
     printf("  Tail Length change requested at sample %d (param set at sample %d)\n", changeAtSample, changeSampleIndex);
     printf("  Input peak (mic): %.4f   Output peak (whole run): %.4f\n", inputPeak, outputPeak);
-    printf("  Clean-restart zero gap (>=%d samples): %s at sample %d\n", minZeroRun,
-           foundZeroRunAt >= 0 ? "found" : "NOT FOUND", foundZeroRunAt);
+    printf("  Zero gap (>=%d samples) after the change: %s\n", minZeroRun,
+           foundZeroRunAt >= 0 ? "FOUND" : "none");
 
     const bool noSpike = (spikeIndex < 0);
-    const bool swapApplied = (foundZeroRunAt >= 0);
-    const bool pass = noSpike && swapApplied;
+    const bool noGap = (foundZeroRunAt < 0);
+    const bool pass = noSpike && noGap;
     printf("  %s%s%s\n", pass ? "PASS" : "CHECK", noSpike ? "" : " -- SPIKE DETECTED",
-           swapApplied ? "" : " -- BACKGROUND REBUILD NEVER APPLIED");
+           noGap ? "" : " -- OUTPUT DROPPED OUT");
     return pass;
 }
 
@@ -669,7 +536,6 @@ bool testLargeRoomBenefit(int sampleRate) {
 
     auto runWithRoomSize = [&](int roomSizeIndex) {
         PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
         setMonoLayout(proc);
         auto* param = proc.getParameters()[0];
         param->setValueNotifyingHost(static_cast<float>(roomSizeIndex) / static_cast<float>(param->getNumSteps() - 1));
@@ -679,12 +545,8 @@ bool testLargeRoomBenefit(int sampleRate) {
     auto smallOutput = runWithRoomSize(0);
     auto largeOutput = runWithRoomSize(2);
 
-    // AEC3 uses a separate, short "initial" filter for the first
-    // filter.initial_state_seconds (default 2.5s) regardless of room size --
-    // that's intentional (fast bootstrap convergence), but it means the
-    // Room Size setting can't show its effect until after that window. Voice
-    // occupies 2.0-4.0s here, so measure the PA-only tail (4.0-6.0s):
-    // past both the initial phase and the voice burst.
+    // Voice occupies 2.0-4.0s here, so measure the PA-only tail (4.0-6.0s):
+    // past both the canceller's start-up and the voice burst.
     const double picS0 = durationS * (4.0 / 6.0), picS1 = durationS;
     const double mic_pa = rmsDbfs(signals.mic, sampleRate, picS0, picS1);
     const double small_pa = rmsDbfs(smallOutput, sampleRate, picS0, picS1);
@@ -693,108 +555,14 @@ bool testLargeRoomBenefit(int sampleRate) {
     printf("  PA-only window: mic=%.1f dBFS  Small=%.1f dBFS (%.1f dB reduction)  Large=%.1f dBFS (%.1f dB reduction)\n",
            mic_pa, small_pa, mic_pa - small_pa, large_pa, mic_pa - large_pa);
 
-    // Note: AEC3 isn't purely the linear adaptive filter -- it also has a
-    // nonlinear residual suppressor doing broadband gating on top, which
-    // compensates a lot for a too-short filter when the reference is
-    // stationary noise (as here). So the gap between Small and Large is
-    // real but modest in this synthetic test; a dramatic dB gap isn't the
-    // right bar. What matters is that Large is measurably, consistently
-    // better, never worse, on a tail the Small filter physically can't
-    // reach (echo taps out to 320ms vs its 52ms window).
+    // The suppressor after the filter compensates somewhat for a too-short
+    // filter, so a dramatic dB gap isn't the right bar. What matters is
+    // that Large is consistently better, never worse, on a tail the Small
+    // filter physically can't reach (echo taps out to 320ms vs its 50ms).
     const bool pass = (large_pa < small_pa);
     printf("  %s\n", pass ? "PASS -- Large outperforms Small on a long room tail (as expected)" : "CHECK");
     return pass;
 }
-
-// Confirms the Suppression Strength presets actually do what they claim.
-// Neither a PA-only window nor a voice tone loud enough to dominate the
-// leak discriminates them -- AEC3's suppressor squashes a frame based on
-// overall energy match against the reference, not source separation, so
-// the artifact this control targets only shows up when a *quiet, PA-
-// uncorrelated* signal (crowd murmur, ambient room noise -- exactly what
-// the user's real recording had) shares frames with real leak at a
-// comparable level. This builds that scenario directly: leak and an
-// independent low-level ambient noise bed run continuously together, and
-// since the mic input is byte-identical across the three runs, any
-// difference in output level in steady state is attributable to how much
-// of the (uncorrelated, "wanted") ambient bed each preset's suppressor let
-// through -- Gentle should measurably outscore Hard.
-bool testSuppressionStrengthPresets(int sampleRate) {
-    printf("\n=== Suppression Strength presets test (%d Hz) ===\n", sampleRate);
-    const double durationS = 8.0;
-    const int n = static_cast<int>(sampleRate * durationS);
-
-    std::mt19937 refRng(1), ambientRng(2);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-    std::vector<float> reference(static_cast<size_t>(n));
-    for (auto& v : reference) v = dist(refRng);
-    reference = onePoleLowpass(reference, 0.90f);
-    reference = onePoleLowpass(reference, 0.90f);
-    float refPeak = 1e-9f;
-    for (float v : reference) refPeak = std::max(refPeak, std::abs(v));
-    for (auto& v : reference) v = 0.8f * v / refPeak;
-
-    // Kept well below the leak level (not just "quieter but comparable" as
-    // before the dominant_nearend_detection fix) so this test stays isolated
-    // to normal_tuning's own behavior. With that fix, a louder/more
-    // comparable ambient bed now correctly engages dominant-nearend
-    // protection (nearend_tuning, itself much more permissive across all
-    // three presets), compressing the gap between presets -- which is
-    // correct new behavior, just no longer what this specific test is
-    // isolating (see testDominantNearendDetectionFix for that).
-    std::vector<float> ambient(static_cast<size_t>(n));
-    for (auto& v : ambient) v = dist(ambientRng);
-    ambient = onePoleLowpass(ambient, 0.6f);
-    float ambientPeak = 1e-9f;
-    for (float v : ambient) ambientPeak = std::max(ambientPeak, std::abs(v));
-    for (auto& v : ambient) v = 0.12f * v / ambientPeak;
-
-    const int delaySamples = static_cast<int>(sampleRate * 5.0 / 1000.0);
-    std::vector<float> mic(static_cast<size_t>(n), 0.0f);
-    for (int s = 0; s < n; ++s) {
-        float leak = (s - delaySamples >= 0) ? 0.5f * reference[static_cast<size_t>(s - delaySamples)] : 0.0f;
-        mic[static_cast<size_t>(s)] = leak + ambient[static_cast<size_t>(s)];
-    }
-
-    auto runWithStrength = [&](int strengthIndex) {
-        PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
-        setMonoLayout(proc);
-        proc.getParameters()[1]->setValueNotifyingHost(static_cast<float>(strengthIndex) / 2.0f);
-        return runThroughProcessor(proc, sampleRate, reference, mic);
-    };
-
-    auto gentleOutput = runWithStrength(0);
-    auto moderateOutput = runWithStrength(1);
-    auto hardOutput = runWithStrength(2);
-
-    // Past AEC3's 2.5s initial-phase bootstrap, well into steady state.
-    const double picS0 = 4.0, picS1 = durationS;
-    const double mic_level = rmsDbfs(mic, sampleRate, picS0, picS1);
-    const double gentle_level = rmsDbfs(gentleOutput, sampleRate, picS0, picS1);
-    const double moderate_level = rmsDbfs(moderateOutput, sampleRate, picS0, picS1);
-    const double hard_level = rmsDbfs(hardOutput, sampleRate, picS0, picS1);
-
-    printf("  Steady-state (leak+ambient) window: mic=%.1f dBFS  Gentle=%.1f dBFS  Moderate=%.1f dBFS  Hard=%.1f dBFS\n",
-           mic_level, gentle_level, moderate_level, hard_level);
-
-    // Gentle should retain measurably more level (more of the ambient bed
-    // surviving) than Hard; Moderate should sit strictly in between.
-    const bool pass = (gentle_level > moderate_level + 0.5) && (moderate_level > hard_level + 0.5);
-    printf("  %s\n", pass ? "PASS -- Gentle > Moderate > Hard in how much of the ambient bed survives, as expected"
-                          : "CHECK");
-    return pass;
-}
-
-// A non-realtime warm-up/priming mechanism used to live here (primed AEC3
-// on the first 3s, replayed that exact clip through the primed filter, then
-// streamed normally) to give offline renders full cancellation from sample
-// 0. Removed 2026-07-28: it caused a measurable regression instead -- see
-// testOfflineVsLiveSpectralShiftAfterWarmup below. Offline (isNonRealtime())
-// and live now take the exact same processBlock code path unconditionally;
-// there is deliberately no special-cased "instant convergence" behavior for
-// offline rendering to test anymore.
 
 // User report: an offline Reaper render of the same material sounds
 // different from live playback -- more HF content coming through,
@@ -860,7 +628,6 @@ bool testOfflineVsLiveDynamicHfContent(int sampleRate) {
     }
 
     PAEchoCancellerAudioProcessor liveProc;
-    applyTestEngine(liveProc);
     if (!setMonoLayout(liveProc)) {
         printf("  FAILED to set mono layout (live)\n");
         return false;
@@ -869,7 +636,6 @@ bool testOfflineVsLiveDynamicHfContent(int sampleRate) {
                                            -1, -1, nullptr, /*nonRealtime*/ false);
 
     PAEchoCancellerAudioProcessor offlineProc;
-    applyTestEngine(offlineProc);
     if (!setMonoLayout(offlineProc)) {
         printf("  FAILED to set mono layout (offline)\n");
         return false;
@@ -1016,7 +782,6 @@ bool testOfflineVsLiveSpectralShiftAfterWarmup(int sampleRate) {
     }
 
     PAEchoCancellerAudioProcessor liveProc;
-    applyTestEngine(liveProc);
     if (!setMonoLayout(liveProc)) {
         printf("  FAILED to set mono layout (live)\n");
         return false;
@@ -1025,7 +790,6 @@ bool testOfflineVsLiveSpectralShiftAfterWarmup(int sampleRate) {
                                            -1, -1, nullptr, /*nonRealtime*/ false);
 
     PAEchoCancellerAudioProcessor offlineProc;
-    applyTestEngine(offlineProc);
     if (!setMonoLayout(offlineProc)) {
         printf("  FAILED to set mono layout (offline)\n");
         return false;
@@ -1074,13 +838,12 @@ bool testOfflineVsLiveSpectralShiftAfterWarmup(int sampleRate) {
 // pick up the *current* (non-default) parameter values, or could it end up
 // using constructor defaults instead? None of the tests above actually
 // checked this -- both offline comparisons so far left every parameter at
-// its default for both runs. This sets deliberately non-default,
-// HF-suppressing settings (Hard + Limit HF Gain on, vs. the plugin's actual
-// defaults of Moderate + Limit HF Gain off) *before* prepareToPlay ever
-// runs, then renders the same material offline both ways -- if the
-// non-default settings are being ignored by the warm-up path, the two
-// offline renders would come out sounding the same (both defaulting);
-// if they're correctly applied, Hard+Limit should show clearly less HF.
+// its default for both runs. This sets two deliberately different,
+// non-default settings (Amount 0% -- the filter alone -- vs. Amount 100%
+// with Max Reduction -24 dB) *before* prepareToPlay ever runs, then renders
+// the same material offline both ways -- if the settings were being
+// ignored, both renders would come out at the defaults and match; if
+// they're correctly applied, the strongest setting shows clearly less HF.
 bool testOfflineRenderUsesCurrentSettingsNotDefaults(int sampleRate) {
     printf("\n=== Offline render respects current (non-default) settings test (%d Hz) ===\n", sampleRate);
     const double durationS = 24.0;
@@ -1116,21 +879,21 @@ bool testOfflineRenderUsesCurrentSettingsNotDefaults(int sampleRate) {
         mic[static_cast<size_t>(s)] = leak + ambient[static_cast<size_t>(s)];
     }
 
-    auto runOffline = [&](bool useHardAndLimitHf) {
+    auto runOffline = [&](bool strongest) {
         PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
         setMonoLayout(proc);
-        if (useHardAndLimitHf) {
-            proc.getSuppressionStrengthParameter()->setValueNotifyingHost(1.0f); // Hard (index 2 of 0-2)
-            proc.getLimitHfGainParameter()->setValueNotifyingHost(1.0f);         // on
+        if (strongest) {
+            proc.getAmountParameter()->setValueNotifyingHost(1.0f);       // 100%
+            proc.getMaxReductionParameter()->setValueNotifyingHost(0.0f); // -24 dB
+        } else {
+            proc.getAmountParameter()->setValueNotifyingHost(0.0f);       // 0%: the filter alone
         }
-        // else: leave everything at its constructor default (Moderate, Limit HF Gain off)
         return runThroughProcessor(proc, sampleRate, reference, mic,
                                     -1, -1, nullptr, /*nonRealtime*/ true);
     };
 
-    auto defaultOfflineOutput = runOffline(false);
-    auto hardLimitOfflineOutput = runOffline(true);
+    auto filterOnlyOfflineOutput = runOffline(false);
+    auto strongestOfflineOutput = runOffline(true);
 
     auto measureHfRms = [&](const std::vector<float>& output) {
         HighPassFilterChain hfMeasure;
@@ -1146,12 +909,12 @@ bool testOfflineRenderUsesCurrentSettingsNotDefaults(int sampleRate) {
         return std::sqrt(sumSq / count);
     };
 
-    const double hfDefault = measureHfRms(defaultOfflineOutput);
-    const double hfHardLimit = measureHfRms(hardLimitOfflineOutput);
-    const double reducedByDb = 20.0 * std::log10(hfDefault / std::max(hfHardLimit, 1e-12));
+    const double hfFilterOnly = measureHfRms(filterOnlyOfflineOutput);
+    const double hfStrongest = measureHfRms(strongestOfflineOutput);
+    const double reducedByDb = 20.0 * std::log10(hfFilterOnly / std::max(hfStrongest, 1e-12));
 
-    printf("  Offline HF (>6kHz) content: default settings=%.6f  Hard+LimitHF=%.6f  (%.1f dB less with Hard+LimitHF)\n",
-           hfDefault, hfHardLimit, reducedByDb);
+    printf("  Offline HF (>6kHz) content: Amount 0%%=%.6f  Amount 100%%/-24dB=%.6f  (%.1f dB less)\n",
+           hfFilterOnly, hfStrongest, reducedByDb);
 
     const bool pass = reducedByDb > 3.0;
     printf("  %s\n", pass ? "PASS -- offline render correctly applies non-default settings, not constructor defaults"
@@ -1160,7 +923,7 @@ bool testOfflineRenderUsesCurrentSettingsNotDefaults(int sampleRate) {
 }
 
 // Confirms the Dry/Wet blend's dry path is correctly delay-matched against
-// the wet (AEC3) path. This is the critical risk in any dry/wet design: if
+// the wet (cancelled) path. This is the critical risk in any dry/wet design: if
 // the two paths are misaligned by even a few samples, blending them would
 // comb-filter the content they share (mostly voice) instead of cleanly
 // mixing. Checked by setting the mix to 0% (fully dry) and confirming the
@@ -1173,7 +936,6 @@ bool testDryWetAlignment(int sampleRate) {
     auto signals = makeSignals(sampleRate, durationS);
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -1329,7 +1091,6 @@ bool testDryWetCombFiltering(int sampleRate) {
 
     auto runWithMix = [&](float wetMixPercent, int blockSize) {
         PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
         setMonoLayout(proc);
         proc.getDryWetMixParameter()->setValueNotifyingHost(wetMixPercent / 100.0f);
         proc.prepareToPlay(sampleRate, blockSize);
@@ -1448,7 +1209,6 @@ bool testGetLatencySamplesAccuracyAllRates() {
         const std::vector<float> reference(static_cast<size_t>(n), 0.0f); // silent: AEC3 stays transparent
 
         PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
         if (!setMonoLayout(proc)) {
             printf("  FAILED to set mono layout\n");
             allPass = false;
@@ -1548,64 +1308,6 @@ bool testGetLatencySamplesAccuracyAllRates() {
     return allPass;
 }
 
-// Diagnostic: does AEC3/APM's own ProcessStream introduce internal
-// algorithmic delay (beyond simply needing a full frame's worth of input
-// before producing output), separate from anything the plugin's own
-// FrameFifo bookkeeping does? Uses runRawAec3, which processes fixed,
-// exactly-frameSize-aligned 10ms frames with none of the plugin's own
-// host-block/FIFO complexity -- if a click's position still shifts from
-// input to output here, that shift is coming from inside APM itself.
-bool diagnoseAec3InternalDelay(int sampleRate) {
-    printf("\n=== Diagnostic: AEC3/APM internal processing delay (%d Hz) ===\n", sampleRate);
-    const int frameSize = sampleRate / 100;
-    const double durationS = 2.0;
-    const int n = static_cast<int>(sampleRate * durationS);
-    const int clickSample = n / 2;
-    const int clickLenSamples = static_cast<int>(sampleRate * 0.001);
-
-    std::mt19937 clickRng(71);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    std::vector<float> mic(static_cast<size_t>(n), 0.0f);
-    for (int i = 0; i < clickLenSamples; ++i) {
-        const int s = clickSample + i;
-        if (s >= n) break;
-        const float envelope = 1.0f - static_cast<float>(i) / static_cast<float>(clickLenSamples);
-        mic[static_cast<size_t>(s)] = 0.8f * envelope * dist(clickRng);
-    }
-    const std::vector<float> reference(static_cast<size_t>(n), 0.0f);
-
-    // Align mic/reference to an exact frame boundary so runRawAec3's
-    // fixed-frame loop processes the click cleanly.
-    const int alignedClickSample = (clickSample / frameSize) * frameSize;
-
-    const auto config = makeEchoCanceller3Config(3, 1, false, 75.0f, 100.0f); // plugin defaults: 800ms, Moderate
-    auto output = runRawAec3(config, sampleRate, reference, mic);
-
-    int inputPeakPos = clickSample, outputPeakPos = clickSample;
-    float inputPeakVal = 0.0f, outputPeakVal = 0.0f;
-    for (int i = alignedClickSample - frameSize; i < alignedClickSample + 4 * frameSize && i < n; ++i) {
-        if (std::abs(mic[static_cast<size_t>(i)]) > inputPeakVal) {
-            inputPeakVal = std::abs(mic[static_cast<size_t>(i)]);
-            inputPeakPos = i;
-        }
-        if (std::abs(output[static_cast<size_t>(i)]) > outputPeakVal) {
-            outputPeakVal = std::abs(output[static_cast<size_t>(i)]);
-            outputPeakPos = i;
-        }
-    }
-
-    const int shiftSamples = outputPeakPos - inputPeakPos;
-    printf("  Click peak position: input=%d  output=%d  (APM-internal shift: %d samples, %.2fms)\n",
-           inputPeakPos, outputPeakPos, shiftSamples, 1000.0 * shiftSamples / sampleRate);
-    printf("  (informational only -- not pass/fail)\n");
-    return true;
-}
-
-bool diagnoseAec3InternalDelayAllRates() {
-    for (int rate : { 44100, 48000, 96000 }) diagnoseAec3InternalDelay(rate);
-    return true;
-}
-
 // Confirms the HPF is a genuine 4th-order (24dB/octave) Butterworth
 // response -- not, say, a single 2nd-order (12dB/octave) section or two
 // identical (non-Butterworth-aligned) stages -- by checking measured
@@ -1631,7 +1333,6 @@ bool testReferenceGainTrim() {
     const int blockSize = 512;
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -1671,441 +1372,6 @@ bool testReferenceGainTrim() {
     return pass;
 }
 
-// Confirms Limit HF Gain actually costs high-frequency content when on, and
-// that it's independent of Suppression Strength (both runs use Gentle).
-// This is the control split out after conservative_hf_suppression turned
-// out to be clamping HF gain down (a safety measure against an under-
-// converged filter estimate), not a gentleness knob -- it was previously
-// forced on for Gentle/Moderate, which was audibly stealing high end
-// exactly when those presets were trying to let more through.
-bool testLimitHfGainToggle(int sampleRate) {
-    printf("\n=== Limit HF Gain toggle test (%d Hz) ===\n", sampleRate);
-    const double durationS = 8.0;
-    const int n = static_cast<int>(sampleRate * durationS);
-
-    std::mt19937 refRng(5), ambientRng(6);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-    std::vector<float> reference(static_cast<size_t>(n));
-    for (auto& v : reference) v = dist(refRng);
-    reference = onePoleLowpass(reference, 0.90f);
-    reference = onePoleLowpass(reference, 0.90f);
-    float refPeak = 1e-9f;
-    for (float v : reference) refPeak = std::max(refPeak, std::abs(v));
-    for (auto& v : reference) v = 0.8f * v / refPeak;
-
-    // Left unfiltered (full-bandwidth white noise) rather than lowpassed --
-    // real crowd noise/clapping/cymbals have plenty of genuine high-frequency
-    // energy, and a heavily-lowpassed synthetic bed would leave the HF gain
-    // clamp little to actually clamp, masking the effect being tested here.
-    std::vector<float> ambient(static_cast<size_t>(n));
-    for (auto& v : ambient) v = dist(ambientRng);
-    float ambientPeak = 1e-9f;
-    for (float v : ambient) ambientPeak = std::max(ambientPeak, std::abs(v));
-    for (auto& v : ambient) v = 0.15f * v / ambientPeak;
-
-    // Stronger leak-to-ambient ratio than the Suppression Strength presets
-    // test -- pushes the suppressor into actively pulling gain down for
-    // more of the signal (rather than staying near-transparent), which is
-    // where an HF-specific clamp on top of that gain actually has material
-    // to act on.
-    const int delaySamples = static_cast<int>(sampleRate * 5.0 / 1000.0);
-    std::vector<float> mic(static_cast<size_t>(n), 0.0f);
-    for (int s = 0; s < n; ++s) {
-        float leak = (s - delaySamples >= 0) ? 0.8f * reference[static_cast<size_t>(s - delaySamples)] : 0.0f;
-        mic[static_cast<size_t>(s)] = leak + ambient[static_cast<size_t>(s)];
-    }
-
-    auto runWithLimitHfGain = [&](bool limitHfGain) {
-        PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
-        setMonoLayout(proc);
-        proc.getSuppressionStrengthParameter()->setValueNotifyingHost(0.0f); // Gentle
-        proc.getLimitHfGainParameter()->setValueNotifyingHost(limitHfGain ? 1.0f : 0.0f);
-        return runThroughProcessor(proc, sampleRate, reference, mic);
-    };
-
-    auto outputWithLimit = runWithLimitHfGain(true);
-    auto outputWithoutLimit = runWithLimitHfGain(false);
-
-    auto measureHfRms = [&](const std::vector<float>& output) {
-        HighPassFilterChain hfMeasure;
-        hfMeasure.setCutoff(sampleRate, 6000.0f);
-        double sumSq = 0.0;
-        int count = 0;
-        const int start = static_cast<int>(4.0 * sampleRate); // past AEC3's initial-phase bootstrap
-        for (int i = start; i < static_cast<int>(output.size()); ++i) {
-            float f = hfMeasure.processSample(output[static_cast<size_t>(i)]);
-            sumSq += static_cast<double>(f) * f;
-            ++count;
-        }
-        return std::sqrt(sumSq / count);
-    };
-
-    const double hfRmsWithLimit = measureHfRms(outputWithLimit);
-    const double hfRmsWithoutLimit = measureHfRms(outputWithoutLimit);
-    const double gainedDb = 20.0 * std::log10(hfRmsWithoutLimit / std::max(hfRmsWithLimit, 1e-12));
-
-    printf("  HF (>6kHz) content: Limit ON=%.6f  Limit OFF=%.6f  (OFF retains %.1f dB more HF)\n",
-           hfRmsWithLimit, hfRmsWithoutLimit, gainedDb);
-
-    const bool pass = gainedDb > 1.0;
-    printf("  %s\n", pass ? "PASS -- Limit HF Gain OFF retains more high-frequency content, as expected"
-                          : "CHECK");
-    return pass;
-}
-
-// Confirms Suppression Strength now updates live via
-// EchoCanceller3::UpdateSuppressorConfig() -- unlike a Tail Length change
-// (which resets the FIFOs and reads back zero-padded silence for a frame,
-// verified in testClickFreeRoomChange), this should show NO dip at all at
-// the switch point, since only the suppressor is replaced -- the FIFOs,
-// adaptive filter, and delay estimator are never touched. Also confirms the
-// switch actually changes suppression behavior (Gentle lets more of a
-// steady ambient bed through than Hard), so this isn't a no-op live update.
-bool testLiveSuppressorConfigUpdate(int sampleRate) {
-    printf("\n=== Live suppressor config update test (%d Hz) ===\n", sampleRate);
-    const double durationS = 8.0;
-    const int n = static_cast<int>(sampleRate * durationS);
-
-    std::mt19937 refRng(13), ambientRng(14);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-    std::vector<float> reference(static_cast<size_t>(n));
-    for (auto& v : reference) v = dist(refRng);
-    reference = onePoleLowpass(reference, 0.9f);
-    reference = onePoleLowpass(reference, 0.9f);
-    float refPeak = 1e-9f;
-    for (float v : reference) refPeak = std::max(refPeak, std::abs(v));
-    for (auto& v : reference) v = 0.8f * v / refPeak;
-
-    // Ambient bed deliberately quiet relative to the leak (0.06 vs 0.8x
-    // leak below): the Hard-vs-Gentle discriminator at the end of this test
-    // measures how much of this bed each preset's suppressor gates away,
-    // and raising erle.min to its measured real-material value (see
-    // TailLengthEchoControl.h) legitimately backed the suppressor off
-    // across the board -- with the original 0.15 ambient / 0.5 leak mix the
-    // steady-state Hard/Gentle delta collapsed from >1dB to ~0.3dB and the
-    // test tripped, not because the live update stopped working but
-    // because both presets had less left to disagree about. A more
-    // echo-dominant mix restores the pressure difference the test needs.
-    std::vector<float> ambient(static_cast<size_t>(n));
-    for (auto& v : ambient) v = dist(ambientRng);
-    float ambientPeak = 1e-9f;
-    for (float v : ambient) ambientPeak = std::max(ambientPeak, std::abs(v));
-    for (auto& v : ambient) v = 0.06f * v / ambientPeak;
-
-    const int delaySamples = static_cast<int>(sampleRate * 5.0 / 1000.0);
-    std::vector<float> mic(static_cast<size_t>(n), 0.0f);
-    for (int s = 0; s < n; ++s) {
-        float leak = (s - delaySamples >= 0) ? 0.8f * reference[static_cast<size_t>(s - delaySamples)] : 0.0f;
-        mic[static_cast<size_t>(s)] = leak + ambient[static_cast<size_t>(s)];
-    }
-
-    PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
-    if (!setMonoLayout(proc)) {
-        printf("  FAILED to set mono layout\n");
-        return false;
-    }
-    proc.getSuppressionStrengthParameter()->setValueNotifyingHost(
-        proc.getSuppressionStrengthParameter()->convertTo0to1(2.0f)); // start at Hard
-
-    const int changeAtSample = static_cast<int>(sampleRate * durationS / 2.0);
-    int changeSampleIndex = -1;
-    auto output = runThroughProcessor(proc, sampleRate, reference, mic,
-                                      changeAtSample, /* Gentle */ 0, &changeSampleIndex,
-                                      /*nonRealtime*/ false, /*paramIndexToChange*/ 1);
-
-    const int checkSamples = sampleRate / 10; // 100ms
-    double sumSqBefore = 0.0, sumSqAfter = 0.0;
-    for (int i = changeSampleIndex - checkSamples; i < changeSampleIndex; ++i)
-        sumSqBefore += static_cast<double>(output[static_cast<size_t>(i)]) * output[static_cast<size_t>(i)];
-    for (int i = changeSampleIndex; i < changeSampleIndex + checkSamples; ++i)
-        sumSqAfter += static_cast<double>(output[static_cast<size_t>(i)]) * output[static_cast<size_t>(i)];
-    const double rmsBefore = std::sqrt(sumSqBefore / checkSamples);
-    const double rmsAfter = std::sqrt(sumSqAfter / checkSamples);
-
-    const double levelBefore = rmsDbfs(output, sampleRate, 3.0, durationS / 2.0 - 0.2);
-    const double levelAfter = rmsDbfs(output, sampleRate, durationS / 2.0 + 0.2, durationS - 0.5);
-
-    printf("  Around the switch (100ms each side): before=%.4f RMS  after=%.4f RMS (no FIFO reset expected)\n",
-           rmsBefore, rmsAfter);
-    printf("  Steady-state level: Hard (before)=%.1f dBFS  Gentle (after)=%.1f dBFS\n", levelBefore, levelAfter);
-
-    const bool noDip = rmsAfter > rmsBefore * 0.3;
-    const bool behaviorChanged = levelAfter > levelBefore + 1.0;
-
-    printf("  %s\n", (noDip && behaviorChanged)
-                         ? "PASS -- suppressor updated live with no dip, and behavior actually changed"
-                         : "CHECK");
-    return noDip && behaviorChanged;
-}
-
-// Near-end Detector (Classic vs Subband) is the fifth control riding the
-// applySuppressorConfigLive() path -- use_subband_nearend_detection is read
-// in SuppressionGain's constructor, which UpdateSuppressorConfig
-// reconstructs wholesale, so the toggle must apply mid-stream with no FIFO
-// reset (no zero gap), no click/spike, and no dip. Unlike
-// testLiveSuppressorConfigUpdate, no level-direction assertion is made
-// around the switch itself: the two detectors differ in *when* they
-// protect, and which way that moves the level is material-dependent (the
-// whole reason this ships as an ear-decided A/B). The end-to-end "the
-// parameter actually reaches AEC3 through the full plugin path" proof is
-// instead the two extra full runs below: identical input, detector set
-// Classic vs Subband from the start -- deterministic processing means
-// byte-identical outputs if (and only if) the setting never made it into
-// the config, so any post-convergence difference proves the wiring.
-bool testLiveNearendDetectorToggle(int sampleRate) {
-    printf("\n=== Live Near-end Detector toggle test (%d Hz) ===\n", sampleRate);
-    const double durationS = 8.0;
-    const int n = static_cast<int>(sampleRate * durationS);
-
-    // Signal design note: a first version reused testDominantNearendDetectionFix's
-    // loud HF audience + LF leak, and the two detectors produced BYTE-IDENTICAL
-    // output -- both sit pinned in nearend state on that material, so the
-    // toggle is genuinely inert there (measured, not assumed). The detectors
-    // only diverge when they *disagree*, so the audience here is deliberately
-    // VERY LF-heavy (three 0.95 one-pole stages: LF-to-2-4kHz power ratio far
-    // above the subband path's nearend_threshold of 64 at the default 75%)
-    // and bursty (0.4s on/off, keeping it nonstationary enough for Classic's
-    // SNR gate): during bursts Classic protects (near-end clearly dominant)
-    // while Subband refuses (the band ratio reads it as bass, i.e. PA-like) --
-    // exactly the character difference the A/B exists to audition.
-    std::mt19937 refRng(41), audienceRng(42);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-    std::vector<float> reference(static_cast<size_t>(n));
-    for (auto& v : reference) v = dist(refRng);
-    for (int stage = 0; stage < 2; ++stage) reference = onePoleLowpass(reference, 0.9f);
-    float refPeak = 1e-9f;
-    for (float v : reference) refPeak = std::max(refPeak, std::abs(v));
-    for (auto& v : reference) v = 0.8f * v / refPeak;
-
-    std::vector<float> audience(static_cast<size_t>(n));
-    for (auto& v : audience) v = dist(audienceRng);
-    for (int stage = 0; stage < 3; ++stage) audience = onePoleLowpass(audience, 0.95f);
-    float audiencePeak = 1e-9f;
-    for (float v : audience) audiencePeak = std::max(audiencePeak, std::abs(v));
-    const int burstPeriod = static_cast<int>(sampleRate * 0.8);
-    for (int s = 0; s < n; ++s) {
-        const bool burstOn = (s % burstPeriod) < burstPeriod / 2;
-        audience[static_cast<size_t>(s)] *= burstOn ? 0.8f / audiencePeak : 0.0f;
-    }
-
-    const int delaySamples = static_cast<int>(sampleRate * 5.0 / 1000.0);
-    std::vector<float> mic(static_cast<size_t>(n), 0.0f);
-    for (int s = 0; s < n; ++s) {
-        float leak = (s - delaySamples >= 0) ? 0.3f * reference[static_cast<size_t>(s - delaySamples)] : 0.0f;
-        mic[static_cast<size_t>(s)] = leak + audience[static_cast<size_t>(s)];
-    }
-
-    // Run 1: toggle Classic -> Subband mid-stream through the public
-    // parameter API. The detector parameter was appended last, after bypass.
-    PAEchoCancellerAudioProcessor toggleProc;
-    applyTestEngine(toggleProc);
-    if (!setMonoLayout(toggleProc)) {
-        printf("  FAILED to set mono layout\n");
-        return false;
-    }
-    const int detectorParamIndex = toggleProc.getParameters().indexOf(toggleProc.getNearendDetectorParameter());
-    const int changeAtSample = static_cast<int>(sampleRate * durationS / 2.0);
-    int changeSampleIndex = -1;
-    auto toggled = runThroughProcessor(toggleProc, sampleRate, reference, mic,
-                                       changeAtSample, /* Subband */ 1, &changeSampleIndex,
-                                       /*nonRealtime*/ false, detectorParamIndex);
-
-    float inputPeak = 0.0f;
-    for (float v : mic) inputPeak = std::max(inputPeak, std::abs(v));
-    float outputPeak = 0.0f;
-    int spikeIndex = -1;
-    for (size_t i = 0; i < toggled.size(); ++i) {
-        const float a = std::abs(toggled[i]);
-        outputPeak = std::max(outputPeak, a);
-        if (a > inputPeak * 1.5f && spikeIndex < 0) spikeIndex = static_cast<int>(i);
-    }
-
-    // A rebuild would reset the FIFOs and leave a >=half-frame run of exact
-    // zeros (that's testClickFreeRoomChange's positive signature) -- the live
-    // path must never produce one after the switch.
-    const int minZeroRun = sampleRate / 200; // half an AEC3 frame, ~5ms
-    int zeroRun = 0, foundZeroRunAt = -1;
-    for (size_t i = static_cast<size_t>(std::max(0, changeSampleIndex)); i < toggled.size(); ++i) {
-        if (std::abs(toggled[i]) < 1.0e-7f) {
-            if (++zeroRun >= minZeroRun) { foundZeroRunAt = static_cast<int>(i) - zeroRun + 1; break; }
-        } else {
-            zeroRun = 0;
-        }
-    }
-
-    const int checkSamples = sampleRate / 10; // 100ms either side of the switch
-    double sumSqBefore = 0.0, sumSqAfter = 0.0;
-    for (int i = changeSampleIndex - checkSamples; i < changeSampleIndex; ++i)
-        sumSqBefore += static_cast<double>(toggled[static_cast<size_t>(i)]) * toggled[static_cast<size_t>(i)];
-    for (int i = changeSampleIndex; i < changeSampleIndex + checkSamples; ++i)
-        sumSqAfter += static_cast<double>(toggled[static_cast<size_t>(i)]) * toggled[static_cast<size_t>(i)];
-    const double rmsBefore = std::sqrt(sumSqBefore / checkSamples);
-    const double rmsAfter = std::sqrt(sumSqAfter / checkSamples);
-
-    // Runs 2+3: full runs with the detector fixed from the start, identical
-    // input -- the wiring proof (see the block comment above).
-    auto runWithDetector = [&](int detectorIndex) {
-        PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
-        setMonoLayout(proc);
-        auto* param = proc.getNearendDetectorParameter();
-        param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(detectorIndex)));
-        return runThroughProcessor(proc, sampleRate, reference, mic);
-    };
-    auto classicOut = runWithDetector(0);
-    auto subbandOut = runWithDetector(1);
-    float maxAbsDiff = 0.0f;
-    const size_t compareStart = static_cast<size_t>(sampleRate) * 4; // past AEC3's 2.5s initial state
-    for (size_t i = compareStart; i < std::min(classicOut.size(), subbandOut.size()); ++i)
-        maxAbsDiff = std::max(maxAbsDiff, std::abs(classicOut[i] - subbandOut[i]));
-
-    const double classicLevel = rmsDbfs(classicOut, sampleRate, 4.0, durationS);
-    const double subbandLevel = rmsDbfs(subbandOut, sampleRate, 4.0, durationS);
-
-    printf("  Toggle at sample %d: 100ms RMS before=%.4f after=%.4f; zero gap after switch: %s; spike: %s\n",
-           changeSampleIndex, rmsBefore, rmsAfter,
-           foundZeroRunAt >= 0 ? "FOUND (rebuild leaked in?)" : "none",
-           spikeIndex >= 0 ? "FOUND" : "none");
-    printf("  Fixed-detector runs (4s..end): Classic=%.1f dBFS  Subband=%.1f dBFS  max|diff|=%.5f\n",
-           classicLevel, subbandLevel, maxAbsDiff);
-
-    const bool noSpike = (spikeIndex < 0);
-    const bool noRebuild = (foundZeroRunAt < 0);
-    const bool noDip = rmsAfter > rmsBefore * 0.3;
-    const bool detectorReached = maxAbsDiff > 1.0e-5f; // byte-identical would mean the setting never reached AEC3
-    const bool pass = noSpike && noRebuild && noDip && detectorReached;
-    printf("  %s%s%s%s%s\n", pass ? "PASS -- detector toggles live, click-free, no rebuild, and provably reaches AEC3" : "CHECK",
-           noSpike ? "" : " -- SPIKE", noRebuild ? "" : " -- UNEXPECTED REBUILD ZERO-GAP",
-           noDip ? "" : " -- DIP AT SWITCH", detectorReached ? "" : " -- OUTPUTS IDENTICAL, TOGGLE INERT");
-    return pass;
-}
-
-// Confirms the dominant_nearend_detection fix actually protects genuine
-// double-talk (audience loud together with real PA bleed) better than the
-// stock AEC3 thresholds -- this is the "whole signal gets gated whenever
-// the reference is present" symptom, reproduced here with a PA reference
-// and an "audience" signal that overlap in frequency (so there's real
-// suppression pressure) but skew differently across the detector's own
-// low-frequency-only energy sums (reference more LF-heavy, audience more
-// mid-heavy) -- exactly the profile a bass-heavy concert PA vs. crowd
-// noise/clapping/voices would have. Compares stock vs fixed thresholds
-// directly on raw AEC3 at the exact settings (50ms tail, Hard suppression)
-// the user reported the symptom at, since the plugin itself can no longer
-// produce the stock (pre-fix) config. (Verified directly during
-// development that stock thresholds never once entered nearend-state
-// across the whole test, while the fixed thresholds did ~60% of the time
-// -- confirming this isn't just a coincidental level difference.)
-bool testDominantNearendDetectionFix(int sampleRate) {
-    printf("\n=== Double-talk (dominant near-end) protection test (%d Hz) ===\n", sampleRate);
-    const double durationS = 8.0;
-    const int n = static_cast<int>(sampleRate * durationS);
-
-    std::mt19937 refRng(9), audienceRng(10);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-    std::vector<float> reference(static_cast<size_t>(n));
-    for (auto& v : reference) v = dist(refRng);
-    for (int stage = 0; stage < 2; ++stage) reference = onePoleLowpass(reference, 0.9f);
-    float refPeak = 1e-9f;
-    for (float v : reference) refPeak = std::max(refPeak, std::abs(v));
-    for (auto& v : reference) v = 0.8f * v / refPeak;
-
-    std::vector<float> audience(static_cast<size_t>(n));
-    for (auto& v : audience) v = dist(audienceRng);
-    HighPassFilterChain audienceHpf;
-    audienceHpf.setCutoff(sampleRate, 1000.0f);
-    for (auto& v : audience) v = audienceHpf.processSample(v);
-    float audiencePeak = 1e-9f;
-    for (float v : audience) audiencePeak = std::max(audiencePeak, std::abs(v));
-    for (auto& v : audience) v = 0.5f * v / audiencePeak; // genuinely loud, comparable to the leak
-
-    const int delaySamples = static_cast<int>(sampleRate * 5.0 / 1000.0);
-    std::vector<float> mic(static_cast<size_t>(n), 0.0f);
-    for (int s = 0; s < n; ++s) {
-        float leak = (s - delaySamples >= 0) ? 0.6f * reference[static_cast<size_t>(s - delaySamples)] : 0.0f;
-        mic[static_cast<size_t>(s)] = leak + audience[static_cast<size_t>(s)];
-    }
-
-    webrtc::EchoCanceller3Config oldConfig = makeEchoCanceller3Config(0, 2, false, 70.0f, 200.0f); // 50ms, Hard
-    oldConfig.suppressor.dominant_nearend_detection.enr_threshold = .25f;
-    oldConfig.suppressor.dominant_nearend_detection.enr_exit_threshold = 10.f;
-    oldConfig.suppressor.dominant_nearend_detection.snr_threshold = 30.f;
-
-    const webrtc::EchoCanceller3Config newConfig = makeEchoCanceller3Config(0, 2, false, 70.0f, 200.0f); // same, fix already baked in
-
-    auto oldOutput = runRawAec3(oldConfig, sampleRate, reference, mic);
-    auto newOutput = runRawAec3(newConfig, sampleRate, reference, mic);
-
-    const double picS0 = 4.0, picS1 = durationS;
-    const double mic_level = rmsDbfs(mic, sampleRate, picS0, picS1);
-    const double old_level = rmsDbfs(oldOutput, sampleRate, picS0, picS1);
-    const double new_level = rmsDbfs(newOutput, sampleRate, picS0, picS1);
-
-    printf("  Steady-state (leak+audience) window: mic=%.1f dBFS  Old detector=%.1f dBFS  New detector=%.1f dBFS\n",
-           mic_level, old_level, new_level);
-
-    const bool pass = (new_level > old_level + 1.0);
-    printf("  %s\n", pass ? "PASS -- looser dominant-nearend thresholds preserve more real double-talk content"
-                          : "CHECK");
-    return pass;
-}
-
-// Confirms Near-end Sensitivity and Protection Hold Time actually reach the
-// config fields they're documented to control, and move in the expected
-// direction. The underlying detector behavior itself (does loosening these
-// actually protect double-talk better) is already proven by
-// testDominantNearendDetectionFix -- this just checks the GUI-facing
-// mapping is wired correctly.
-//
-// Note: a follow-up attempt to also synthetically reproduce "does a shorter
-// hold time audibly pulse more" (the user's real-world report after
-// dropping to 100ms) did not pan out -- three different signal designs
-// (continuous ambient, then 300ms/300ms bursts, then 300ms/150ms bursts
-// with early/late bleed measurement within the gap) all showed no
-// measurable difference between 100ms and 200ms hold in this offline
-// harness, despite the underlying hold_counters_ decrement logic being
-// confirmed correct by direct instrumentation earlier (see
-// testDominantNearendDetectionFix's history). Removed rather than keep a
-// test that doesn't actually confirm what it claims to -- the mechanism
-// explanation given to the user rests on the source-level logic, not on a
-// synthetic proof of the specific audible consequence.
-bool testNearendSensitivityAndHoldTime() {
-    printf("\n=== Near-end Sensitivity / Protection Hold Time mapping test ===\n");
-
-    const auto low = makeEchoCanceller3Config(2, 2, false, 0.0f, 40.0f);
-    const auto high = makeEchoCanceller3Config(2, 2, false, 100.0f, 800.0f);
-
-    printf("  Sensitivity 0%%:   enr_threshold=%.3f snr_threshold=%.3f\n",
-           low.suppressor.dominant_nearend_detection.enr_threshold,
-           low.suppressor.dominant_nearend_detection.snr_threshold);
-    printf("  Sensitivity 100%%: enr_threshold=%.3f snr_threshold=%.3f\n",
-           high.suppressor.dominant_nearend_detection.enr_threshold,
-           high.suppressor.dominant_nearend_detection.snr_threshold);
-    printf("  Hold time 40ms:  hold_duration=%d blocks\n", low.suppressor.dominant_nearend_detection.hold_duration);
-    printf("  Hold time 800ms: hold_duration=%d blocks\n", high.suppressor.dominant_nearend_detection.hold_duration);
-
-    // Higher sensitivity = easier to trigger = higher enr_threshold, lower
-    // snr_threshold (see applyNearendSensitivity's comment).
-    const bool sensitivityOk =
-        high.suppressor.dominant_nearend_detection.enr_threshold >
-            low.suppressor.dominant_nearend_detection.enr_threshold &&
-        high.suppressor.dominant_nearend_detection.snr_threshold <
-            low.suppressor.dominant_nearend_detection.snr_threshold;
-    // 40ms / 800ms at 4ms per block -> 10 / 200 blocks.
-    const bool holdTimeOk = low.suppressor.dominant_nearend_detection.hold_duration == 10 &&
-                            high.suppressor.dominant_nearend_detection.hold_duration == 200;
-
-    const bool pass = sensitivityOk && holdTimeOk;
-    printf("  %s\n", pass ? "PASS -- both controls reach the expected config fields in the expected direction"
-                          : "CHECK");
-    return pass;
-}
-
 // The PA-ref meter has a target zone, so both of its readings (before and
 // after the HPF) must include PA Reference Trim -- otherwise turning the trim
 // would not move the bar toward the zone. A 0.1-amplitude 1kHz reference
@@ -2117,7 +1383,6 @@ bool testReferenceMeterIncludesTrim() {
     bool ok = true;
     for (float trimDb : { -12.0f, 0.0f, 12.0f }) {
         PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
         setMonoLayout(proc);
         auto* trim = proc.getReferenceGainParameter();
         trim->setValueNotifyingHost(trim->convertTo0to1(trimDb));
@@ -2147,98 +1412,6 @@ bool testReferenceMeterIncludesTrim() {
     return ok;
 }
 
-// Pins the adaptation noise gate (see kAdaptationNoiseGate in
-// TailLengthEchoControl.h): the stock 2.0e7 starves a typical PA reference of
-// adaptation, so it must be well below stock on all four filters at every
-// Tail Length.
-bool testAdaptationNoiseGateConfig() {
-    printf("\n=== Adaptation noise gate config test ===\n");
-    bool ok = true;
-    for (int tail = 0; tail < 4; ++tail) {
-        const auto c = makeEchoCanceller3Config(tail, 1, false, 75.0f, 100.0f);
-        const float gates[] = { c.filter.refined.noise_gate, c.filter.coarse.noise_gate,
-                                c.filter.refined_initial.noise_gate, c.filter.coarse_initial.noise_gate };
-        for (float g : gates) ok = ok && g > 0.0f && g <= 2.0e6f;
-        printf("  tail %d: gates refined=%.1e coarse=%.1e refined_initial=%.1e coarse_initial=%.1e\n", tail,
-               gates[0], gates[1], gates[2], gates[3]);
-    }
-    printf("  %s\n", ok ? "PASS -- all adaptation gates are at least 10x below AEC3's stock 2.0e7"
-                         : "CHECK -- an adaptation gate is back at (or near) the speech-level stock value");
-    return ok;
-}
-
-// Confirms the Near-end Detector choice reaches AEC3's config with the
-// venue-measured band pair hardcoded for the subband path, and that the two
-// existing knobs remap correctly onto it: Near-end Sensitivity onto
-// nearend_threshold (8->128 log-spaced -- the 75% default must land on 64,
-// the top of the measured 32-64 sweet spot; see applyNearendDetectorChoice)
-// and Protection Hold Time onto the vendored subband hold_duration. Same
-// direct config-field pattern as testNearendSensitivityAndHoldTime.
-bool testNearendDetectorConfigMapping() {
-    printf("\n=== Near-end Detector config mapping test ===\n");
-
-    const auto classic = makeEchoCanceller3Config(2, 1, false, 75.0f, 100.0f, 4.0f, -96.0f, 0);
-    const auto subband = makeEchoCanceller3Config(2, 1, false, 75.0f, 100.0f, 4.0f, -96.0f, 1);
-    const auto& sd = subband.suppressor.subband_nearend_detection;
-
-    printf("  Classic: use_subband_nearend_detection=%d\n",
-           static_cast<int>(classic.suppressor.use_subband_nearend_detection));
-    printf("  Subband: use_subband=%d subband1={%zu,%zu} subband2={%zu,%zu} avg_blocks=%zu snr=%.1f\n",
-           static_cast<int>(subband.suppressor.use_subband_nearend_detection),
-           sd.subband1.low, sd.subband1.high, sd.subband2.low, sd.subband2.high,
-           sd.nearend_average_blocks, sd.snr_threshold);
-
-    const bool detectorSelectOk = !classic.suppressor.use_subband_nearend_detection &&
-                                  subband.suppressor.use_subband_nearend_detection;
-    const bool bandsOk = sd.subband1.low == 1 && sd.subband1.high == 15 &&   // 125-1875Hz
-                         sd.subband2.low == 16 && sd.subband2.high == 32 &&  // 2-4kHz
-                         sd.nearend_average_blocks == 16 &&
-                         std::abs(sd.snr_threshold - 1.0f) < 1e-6f;
-
-    // Sensitivity remap: 8 * 16^t. Report where the shipped 75% default
-    // lands -- it must be 64.0 (measured sweet spot 32-64 spans 50%-75%).
-    const auto sub0 = makeEchoCanceller3Config(2, 1, false, 0.0f, 100.0f, 4.0f, -96.0f, 1);
-    const auto sub50 = makeEchoCanceller3Config(2, 1, false, 50.0f, 100.0f, 4.0f, -96.0f, 1);
-    const auto sub100 = makeEchoCanceller3Config(2, 1, false, 100.0f, 100.0f, 4.0f, -96.0f, 1);
-    printf("  nearend_threshold: 0%%=%.2f 50%%=%.2f 75%%=%.2f (default) 100%%=%.2f\n",
-           sub0.suppressor.subband_nearend_detection.nearend_threshold,
-           sub50.suppressor.subband_nearend_detection.nearend_threshold,
-           sd.nearend_threshold,
-           sub100.suppressor.subband_nearend_detection.nearend_threshold);
-    const bool sensitivityOk =
-        std::abs(sub0.suppressor.subband_nearend_detection.nearend_threshold - 8.0f) < 0.01f &&
-        std::abs(sub50.suppressor.subband_nearend_detection.nearend_threshold - 32.0f) < 0.01f &&
-        std::abs(sd.nearend_threshold - 64.0f) < 0.01f &&
-        std::abs(sub100.suppressor.subband_nearend_detection.nearend_threshold - 128.0f) < 0.01f;
-
-    // Protection Hold Time reaches the vendored subband hold (same ms->blocks
-    // conversion as the dominant detector's), and the trigger debounce
-    // matches the dominant default so both A/B sides debounce identically.
-    const auto subHold40 = makeEchoCanceller3Config(2, 1, false, 75.0f, 40.0f, 4.0f, -96.0f, 1);
-    const auto subHold800 = makeEchoCanceller3Config(2, 1, false, 75.0f, 800.0f, 4.0f, -96.0f, 1);
-    printf("  hold_duration: 40ms=%d 100ms=%d 800ms=%d blocks; trigger_threshold=%d\n",
-           subHold40.suppressor.subband_nearend_detection.hold_duration,
-           sd.hold_duration,
-           subHold800.suppressor.subband_nearend_detection.hold_duration,
-           sd.trigger_threshold);
-    const bool holdOk = subHold40.suppressor.subband_nearend_detection.hold_duration == 10 &&
-                        sd.hold_duration == 25 &&
-                        subHold800.suppressor.subband_nearend_detection.hold_duration == 200 &&
-                        sd.trigger_threshold == 12;
-
-    // Classic path must be untouched by the detector parameter existing:
-    // identical dominant-detection fields with the toggle at 0.
-    const auto& dc = classic.suppressor.dominant_nearend_detection;
-    const auto& ds = subband.suppressor.dominant_nearend_detection;
-    const bool classicUntouched = std::abs(dc.enr_threshold - ds.enr_threshold) < 1e-6f &&
-                                  dc.hold_duration == ds.hold_duration;
-
-    const bool pass = detectorSelectOk && bandsOk && sensitivityOk && holdOk && classicUntouched;
-    printf("  %s\n", pass ? "PASS -- detector toggle reaches AEC3 config with the measured bands and knob remaps"
-                          : "CHECK");
-    return pass;
-}
-
 // Confirms getStateInformation/setStateInformation actually round-trip
 // every parameter. These were empty no-ops for a while -- harmless in this
 // standalone harness (which never calls them), but in a real host it means
@@ -2260,7 +1433,6 @@ bool testOversizedHostBlock(int sampleRate) {
     const int oversizedBlock = 4096; // 16x what we told the host we expected
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -2347,7 +1519,6 @@ bool testNonFiniteInputRecovery(int sampleRate) {
             (i % 2 == 0) ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -2406,13 +1577,10 @@ bool testNonFiniteInputRecovery(int sampleRate) {
     return pass;
 }
 
-// Proves the assumption the live Tail Length swap rests on: AEC3's internal
-// processing delay (measured once per prepareToPlay and *reused* for every
-// live swap -- see aec3InternalDelaySamples in PluginProcessor.h) is a
-// function of sample rate only, not of the filter length. If a future AEC3
-// change ever made the delay tail-dependent, silently reusing a stale
-// measurement would corrupt both the reported latency and the dry-path
-// alignment -- this catches that before it ships.
+// The reported latency is set once per prepareToPlay, and Tail Length then
+// changes live: so the latency must be a function of the sample rate only,
+// never of the filter length, or the dry path and the host's delay
+// compensation would drift on every tail change.
 bool testLatencyInvariantAcrossTailLengths() {
     printf("\n=== Latency invariance across Tail Lengths test ===\n");
     const int rates[] = { 44100, 48000, 96000 };
@@ -2421,7 +1589,6 @@ bool testLatencyInvariantAcrossTailLengths() {
         int latencies[4] = { -1, -1, -1, -1 };
         for (int tailIndex = 0; tailIndex < 4; ++tailIndex) {
             PAEchoCancellerAudioProcessor proc;
-            applyTestEngine(proc);
             setMonoLayout(proc);
             auto* param = proc.getTailLengthParameter();
             param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(tailIndex)));
@@ -2435,26 +1602,23 @@ bool testLatencyInvariantAcrossTailLengths() {
                latencies[0], latencies[1], latencies[2], latencies[3], rateOk ? "invariant" : "VARIES");
         pass = pass && rateOk;
     }
-    printf("  %s\n", pass ? "PASS -- safe to measure once per prepareToPlay and reuse across live tail swaps"
-                          : "CHECK -- delay depends on Tail Length; the cached measurement is WRONG");
+    printf("  %s\n", pass ? "PASS -- latency is independent of Tail Length"
+                          : "CHECK -- latency depends on Tail Length");
     return pass;
 }
 
-// The regression test for the audio-thread stall this replaced: changing
-// Tail Length mid-stream used to run the whole rebuild inside processBlock,
-// including a ~3-second calibration simulation -- ~150ms+ of blocking work
-// in one audio callback, a guaranteed live-rig dropout. Now processBlock
-// only requests the rebuild and later adopts the result, so no single
-// callback may take longer than a generous "something is very wrong"
-// threshold, and the change must still actually apply (background thread
-// delivers, audio thread adopts) while audio keeps flowing.
+// Changing Tail Length mid-stream must never stall the audio callback (the
+// AEC3 engine of 1.0.x once rebuilt inside processBlock, ~150ms+ of blocking
+// work, a guaranteed live-rig dropout). The Kalman filter only drops or adds
+// partitions, so no single callback may take longer than a generous
+// "something is very wrong" threshold, and the reported latency must not
+// move.
 bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
     printf("\n=== Live Tail Length change is non-blocking test (%d Hz) ===\n", sampleRate);
     const double durationS = 10.0;
     auto signals = makeSignals(sampleRate, durationS);
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -2469,10 +1633,9 @@ bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
     juce::MidiBuffer midi;
 
     const int n = static_cast<int>(signals.mic.size());
-    const int changeAtSample = static_cast<int>(sampleRate * 4.0); // past AEC3's 2.5s initial phase
+    const int changeAtSample = static_cast<int>(sampleRate * 4.0); // past the canceller's start-up
     bool changeApplied = false;
     double maxBlockMsAfterChange = 0.0;
-    int adoptedAtSample = -1;
 
     for (int pos = 0; pos + blockSize <= n; pos += blockSize) {
         if (!changeApplied && pos >= changeAtSample) {
@@ -2496,13 +1659,10 @@ bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
         if (changeApplied) {
             const double blockMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
             maxBlockMsAfterChange = std::max(maxBlockMsAfterChange, blockMs);
-            if (adoptedAtSample < 0 && proc.getAppliedTailLengthIndex() == 0)
-                adoptedAtSample = pos;
         }
     }
 
     const int latencyAfter = proc.getLatencySamples();
-    const bool adopted = adoptedAtSample >= 0;
     proc.releaseResources();
 
     // 80ms: far above any sane per-block cost (the steady-state cost of a
@@ -2513,34 +1673,23 @@ bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
     const bool noStall = maxBlockMsAfterChange < 80.0;
     const bool latencyStable = (latencyAfter == latencyBefore);
 
-    printf("  Change requested at sample %d, adopted at sample %d (%s)\n", changeAtSample, adoptedAtSample,
-           adopted ? "applied" : "NEVER APPLIED");
+    printf("  Change requested at sample %d\n", changeAtSample);
     printf("  Max single processBlock after change: %.2f ms (limit 80ms; old inline rebuild: ~150ms+)\n",
            maxBlockMsAfterChange);
     printf("  Reported latency: %d -> %d samples (%s)\n", latencyBefore, latencyAfter,
            latencyStable ? "unchanged, as designed" : "CHANGED");
 
-    const bool pass = adopted && noStall && latencyStable;
+    const bool pass = noStall && latencyStable;
     printf("  %s\n", pass ? "PASS -- live tail change applies without blocking the audio thread" : "CHECK");
     return pass;
 }
 
-// A Tail Length that differs from what prepareToPlay built goes through the
-// background rebuild thread, which polls on a 30ms *wall-clock* wait and
-// then spends wall-clock time constructing the new AEC3. Live that costs a
-// fraction of a second of audio; in a faster-than-realtime bus bounce the
-// same wall-clock cost spans many seconds of audio, all processed on the
-// wrong (default 800ms) instance before the swap -- which then resets the
-// filter and re-converges. This is the case when a host applies the saved
-// session state after prepareToPlay, or re-prepares with defaults before a
-// bounce. The reference run sets the saved Tail Length *before*
-// prepareToPlay (what a bounce does when state is restored first); the
-// other two set it right after, unpaced (bounce speed, with the host's
-// non-realtime flag set the way a bounce sets it) and paced at roughly
-// realtime. Reported per run: how much audio went by before the saved value
-// took effect, and the suppression reached in fixed windows. Offline the
-// plugin builds the new instance inline, so the bounce must adopt it on its
-// first block and match the reference from the start.
+// A host may apply a session's saved Tail Length after prepareToPlay (or
+// re-prepare with defaults before a bounce). With the 1.0.x AEC3 engine that
+// went through a background rebuild polled on wall-clock time, so at bounce
+// speed seconds of audio ran on the wrong filter. The Kalman filter applies
+// Tail Length at the next block, so a bounce with the tail set after
+// prepareToPlay must match one with it set before, from the start.
 bool testFastBounceTailLengthAppliedPromptly(int sampleRate) {
     printf("\n=== Fast-bounce Tail Length applied promptly test (%d Hz) ===\n", sampleRate);
     const double durationS = 14.0; // makeSignals puts the voice burst at ~4.7-9.3s
@@ -2548,39 +1697,25 @@ bool testFastBounceTailLengthAppliedPromptly(int sampleRate) {
     const int savedTailIndex = 2; // 400ms; the plugin's default is index 3 (800ms)
     const int blockSize = 512;
 
-    enum class Mode { tailBeforePrepare, unpacedAfterPrepare, pacedAfterPrepare };
-    struct Result {
-        std::vector<float> out;
-        double adoptedAtS = -1.0;
-        double wallMs = 0.0;
-    };
-
-    auto run = [&](Mode mode) {
-        Result r;
+    auto run = [&](bool tailBeforePrepare) {
         PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
         setMonoLayout(proc);
         auto setSavedTail = [&] {
             auto* param = proc.getTailLengthParameter();
             param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(savedTailIndex)));
         };
-        if (mode == Mode::tailBeforePrepare)
+        if (tailBeforePrepare)
             setSavedTail();
-        if (mode == Mode::unpacedAfterPrepare)
-            proc.setNonRealtime(true);
+        proc.setNonRealtime(true);
         proc.prepareToPlay(sampleRate, blockSize);
-        if (mode != Mode::tailBeforePrepare)
+        if (!tailBeforePrepare)
             setSavedTail();
 
         const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
         juce::AudioBuffer<float> buffer(totalChannels, blockSize);
         juce::MidiBuffer midi;
         const int n = static_cast<int>(signals.mic.size());
-        r.out.assign(static_cast<size_t>(n), 0.0f);
-        if (proc.getAppliedTailLengthIndex() == savedTailIndex)
-            r.adoptedAtS = 0.0;
-
-        const auto wallStart = std::chrono::steady_clock::now();
+        std::vector<float> out(static_cast<size_t>(n), 0.0f);
         for (int pos = 0; pos + blockSize <= n; pos += blockSize) {
             buffer.clear();
             auto mainIn = proc.getBusBuffer(buffer, true, 0);
@@ -2589,81 +1724,42 @@ bool testFastBounceTailLengthAppliedPromptly(int sampleRate) {
                 mainIn.copyFrom(ch, 0, signals.mic.data() + pos, blockSize);
             for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
                 refIn.copyFrom(ch, 0, signals.reference.data() + pos, blockSize);
-
             proc.processBlock(buffer, midi);
-
             auto mainOut = proc.getBusBuffer(buffer, false, 0);
             for (int s = 0; s < blockSize; ++s)
-                r.out[static_cast<size_t>(pos + s)] = mainOut.getSample(0, s);
-
-            if (r.adoptedAtS < 0.0 && proc.getAppliedTailLengthIndex() == savedTailIndex)
-                r.adoptedAtS = static_cast<double>(pos + blockSize) / sampleRate;
-
-            // Realtime pacing only until the change lands; the rest of the
-            // run is unpaced for every mode so the three stay comparable.
-            if (mode == Mode::pacedAfterPrepare && r.adoptedAtS < 0.0)
-                std::this_thread::sleep_for(std::chrono::duration<double>(static_cast<double>(blockSize) / sampleRate));
+                out[static_cast<size_t>(pos + s)] = mainOut.getSample(0, s);
         }
-        r.wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wallStart).count();
         proc.releaseResources();
-        return r;
+        return out;
     };
 
-    const auto reference = run(Mode::tailBeforePrepare);
-    const auto unpaced = run(Mode::unpacedAfterPrepare);
-    const auto paced = run(Mode::pacedAfterPrepare);
+    const auto before = run(true);
+    const auto after = run(false);
 
-    // Suppression = mic level minus output level over the window. The mic
-    // carries the leakage in every window except the voice burst, so the
-    // windows sit before (3.0-4.5s) and after (10.5-14s) it.
-    auto suppressionDb = [&](const std::vector<float>& out, double a, double b) {
-        return rmsDbfs(signals.mic, sampleRate, a, b) - rmsDbfs(out, sampleRate, a, b);
-    };
-    const auto report = [&](const char* name, const Result& r) {
-        printf("  %-34s adopted after %5.2f s of audio | suppression early(0.5-2.5s) %5.1f dB, "
-               "pre-voice(3-4.5s) %5.1f dB, late(10.5-14s) %5.1f dB | wall %6.0f ms\n",
-               name, r.adoptedAtS, suppressionDb(r.out, 0.5, 2.5), suppressionDb(r.out, 3.0, 4.5),
-               suppressionDb(r.out, 10.5, 14.0), r.wallMs);
-    };
-    report("tail set before prepareToPlay", reference);
-    report("tail set after, offline (bounce)", unpaced);
-    report("tail set after, paced (~realtime)", paced);
+    // The two runs must be sample-identical: the tail applies at the first
+    // block either way. Any difference means audio ran on the wrong tail.
+    double maxDiff = 0.0;
+    for (size_t i = 0; i < before.size(); ++i)
+        maxDiff = std::max(maxDiff, static_cast<double>(std::abs(before[i] - after[i])));
+    printf("  Max sample difference, tail set before vs after prepareToPlay: %.3g\n", maxDiff);
 
-    const bool allAdopted = reference.adoptedAtS >= 0.0 && unpaced.adoptedAtS >= 0.0 && paced.adoptedAtS >= 0.0;
-    const double lateGapDb = std::abs(suppressionDb(reference.out, 10.5, 14.0) - suppressionDb(unpaced.out, 10.5, 14.0));
-    const double preVoiceGapDb = suppressionDb(reference.out, 3.0, 4.5) - suppressionDb(unpaced.out, 3.0, 4.5);
-    const double earlyGapDb = std::abs(suppressionDb(reference.out, 0.5, 2.5) - suppressionDb(unpaced.out, 0.5, 2.5));
-    // Offline the swap happens inside the first processBlock, so no audio at
-    // all may pass on the wrong instance beyond that one block.
-    const double maxAdoptS = static_cast<double>(blockSize) / sampleRate;
-    const bool promptly = unpaced.adoptedAtS >= 0.0 && unpaced.adoptedAtS <= maxAdoptS + 1e-9;
-    const bool lateEqual = lateGapDb < 1.5;
-    const bool earlyEqual = earlyGapDb < 1.5;
-
-    printf("  Offline adoption window: %.2f s of audio (paced: %.2f s, limit %.2f s)\n",
-           unpaced.adoptedAtS, paced.adoptedAtS, maxAdoptS);
-    printf("  Suppression gap vs reference: early %.2f dB, late %.2f dB (limit 1.5 each); pre-voice shortfall: %.2f dB\n",
-           earlyGapDb, lateGapDb, preVoiceGapDb);
-
-    const bool pass = allAdopted && promptly && lateEqual && earlyEqual;
-    printf("  %s\n", pass ? "PASS -- a Tail Length applied after prepareToPlay takes effect promptly even at bounce speed"
-                          : "CHECK -- the saved Tail Length is applied late or the result differs when processing outruns real time");
+    const bool pass = maxDiff < 1e-6;
+    printf("  %s\n", pass ? "PASS -- a Tail Length applied after prepareToPlay takes effect from the first block"
+                          : "CHECK -- the saved Tail Length is applied late");
     return pass;
 }
 
-// The delay readout added to the editor is only useful if AEC3's delay
-// stats actually flow through the new getters -- confirm an estimate
-// appears once the canceller has signal to lock onto, and that it lands in
-// a sane range (the synthetic leak is at 5ms, and AEC3's estimate also
-// absorbs its own internal buffering, so accept anything from 0 up to
-// ~100ms -- the point is "present and plausible", not a precise figure).
+// The delay readout in the editor is only useful if the canceller's
+// estimate flows through the getter -- confirm an estimate appears once the
+// canceller has signal to lock onto, that it lands in a sane range (the
+// synthetic leak is at 5ms; the point is "present and plausible", not a
+// precise figure), and that release clears it.
 bool testDelayStatsExposed(int sampleRate) {
     printf("\n=== Echo-path delay stats exposed test (%d Hz) ===\n", sampleRate);
     const double durationS = 8.0;
     auto signals = makeSignals(sampleRate, durationS);
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -2689,12 +1785,11 @@ bool testDelayStatsExposed(int sampleRate) {
     }
 
     const int delayMs = proc.getEstimatedEchoPathDelayMs();
-    const int medianMs = proc.getEchoPathDelayMedianMs();
     proc.releaseResources();
     const int delayAfterRelease = proc.getEstimatedEchoPathDelayMs();
 
-    printf("  Before audio: %d   After 8s of leak: instantaneous=%d ms, median=%d ms   After release: %d\n",
-           delayBeforeAudio, delayMs, medianMs, delayAfterRelease);
+    printf("  Before audio: %d   After 8s of leak: %d ms   After release: %d\n",
+           delayBeforeAudio, delayMs, delayAfterRelease);
 
     const bool pass = delayMs >= 0 && delayMs <= 100 && delayAfterRelease == -1;
     printf("  %s\n", pass ? "PASS -- delay estimate is exposed and plausible"
@@ -2702,122 +1797,44 @@ bool testDelayStatsExposed(int sampleRate) {
     return pass;
 }
 
-// Kalman <-> Classic while playing: each engine reports its own latency
-// (from the message thread, after the switch), the audio thread never
-// blocks on the switch, and the output resumes cleanly on the new engine.
-bool testEngineSwitch(int sampleRate) {
-    printf("\n=== Engine switch test (%d Hz) ===\n", sampleRate);
-    juce::MessageManager::getInstance(); // the latency report is posted to the message thread -- this one
-    const double durationS = 9.0;
-    auto signals = makeSignals(sampleRate, durationS);
-
-    PAEchoCancellerAudioProcessor proc;
-    auto* engine = proc.getEngineParameter();
-    engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(PAEchoCancellerAudioProcessor::engineClassic)));
-    if (!setMonoLayout(proc)) { printf("  FAILED to set mono layout\n"); return false; }
-    engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(PAEchoCancellerAudioProcessor::engineClassic)));
-
-    const int blockSize = 512;
-    proc.prepareToPlay(sampleRate, blockSize);
-    const int latencyClassic = proc.getLatencySamples();
-
-    const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
-    juce::AudioBuffer<float> buffer(totalChannels, blockSize);
-    juce::MidiBuffer midi;
-    const int n = static_cast<int>(signals.mic.size());
-    std::vector<float> output(static_cast<size_t>(n), 0.0f);
-    double worstBlockMs = 0.0;
-    int latencyKalman = -1;
-    bool allFinite = true;
-    for (int pos = 0; pos + blockSize <= n; pos += blockSize) {
-        if (pos == 3 * sampleRate / blockSize * blockSize)
-            engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(PAEchoCancellerAudioProcessor::engineKalman)));
-        if (pos == 6 * sampleRate / blockSize * blockSize) {
-            juce::MessageManager::getInstance()->runDispatchLoopUntil(20); // the async latency report
-            latencyKalman = proc.getLatencySamples();
-            engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(PAEchoCancellerAudioProcessor::engineClassic)));
-        }
-        buffer.clear();
-        auto mainIn = proc.getBusBuffer(buffer, true, 0);
-        auto refIn = proc.getBusBuffer(buffer, true, 1);
-        for (int ch = 0; ch < mainIn.getNumChannels(); ++ch)
-            mainIn.copyFrom(ch, 0, signals.mic.data() + pos, blockSize);
-        for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
-            refIn.copyFrom(ch, 0, signals.reference.data() + pos, blockSize);
-        const auto t0 = juce::Time::getHighResolutionTicks();
-        proc.processBlock(buffer, midi);
-        worstBlockMs = std::max(worstBlockMs, juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t0) * 1000.0);
-        auto mainOut = proc.getBusBuffer(buffer, false, 0);
-        for (int s = 0; s < blockSize; ++s) {
-            output[static_cast<size_t>(pos + s)] = mainOut.getSample(0, s);
-            allFinite = allFinite && std::isfinite(mainOut.getSample(0, s));
-        }
-    }
-    juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
-    const int latencyBack = proc.getLatencySamples();
-
-    // Output is alive on each engine (the brief zero-padded restart at a
-    // switch is expected; a stuck-silent engine is not).
-    const double rmsKalman = rmsDbfs(output, sampleRate, 4.0, 6.0);
-    const double rmsClassicAgain = rmsDbfs(output, sampleRate, 7.0, 9.0);
-    const int expectedKalman = KalmanEchoCanceller::blockSizeForRate(sampleRate) + KalmanEchoCanceller::suppressorDelaySamples;
-    printf("  Latency: Classic %d -> Kalman %d (expected %d) -> Classic %d samples\n",
-           latencyClassic, latencyKalman, expectedKalman, latencyBack);
-    printf("  Output RMS: Kalman 4-6 s %.1f dBFS, Classic again 7-9 s %.1f dBFS; worst block %.2f ms; finite: %s\n",
-           rmsKalman, rmsClassicAgain, worstBlockMs, allFinite ? "yes" : "NO");
-    const bool pass = latencyKalman == expectedKalman && latencyBack == latencyClassic && latencyClassic > expectedKalman
-                      && rmsKalman > -80.0 && rmsClassicAgain > -80.0 && allFinite && worstBlockMs < 80.0;
-    printf("  %s\n", pass ? "PASS -- engines switch live, each reporting its own latency"
-                          : "CHECK -- engine switch misbehaves");
-    return pass;
-}
-
 bool testStateSaveRestore() {
     printf("\n=== State save/restore round-trip test ===\n");
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
-    proc.getTailLengthParameter()->setValueNotifyingHost(
-        proc.getTailLengthParameter()->convertTo0to1(2.0f));                 // "400ms"
-    proc.getSuppressionStrengthParameter()->setValueNotifyingHost(0.0f);     // "Gentle"
-    proc.getHpfFrequencyParameter()->setValueNotifyingHost(
-        proc.getHpfFrequencyParameter()->convertTo0to1(150.0f));
-    proc.getDryWetMixParameter()->setValueNotifyingHost(
-        proc.getDryWetMixParameter()->convertTo0to1(37.0f));
-    proc.getLimitHfGainParameter()->setValueNotifyingHost(1.0f);             // on
-    proc.getNearendSensitivityParameter()->setValueNotifyingHost(
-        proc.getNearendSensitivityParameter()->convertTo0to1(42.0f));
-    proc.getProtectionHoldTimeParameter()->setValueNotifyingHost(
-        proc.getProtectionHoldTimeParameter()->convertTo0to1(333.0f));
-    proc.getNearendDetectorParameter()->setValueNotifyingHost(1.0f);         // "Subband (2-4kHz)" -- non-default, unlike bypass this IS saved
+    const auto setTo = [](juce::RangedAudioParameter* param, float value) {
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    };
+    setTo(proc.getTailLengthParameter(), 2.0f); // "400ms"
+    setTo(proc.getAmountParameter(), 63.0f);
+    setTo(proc.getMaxReductionParameter(), -7.5f);
+    setTo(proc.getResponseParameter(), 33.0f);
+    setTo(proc.getHpfFrequencyParameter(), 150.0f);
+    setTo(proc.getReferenceGainParameter(), -4.0f);
+    setTo(proc.getDryWetMixParameter(), 37.0f);
 
     juce::MemoryBlock state;
     proc.getStateInformation(state);
 
     PAEchoCancellerAudioProcessor restored;
-    applyTestEngine(restored);
     restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
 
     const bool pass =
         restored.getTailLengthParameter()->getIndex() == 2 &&
-        restored.getSuppressionStrengthParameter()->getIndex() == 0 &&
+        std::abs(restored.getAmountParameter()->get() - 63.0f) < 0.5f &&
+        std::abs(restored.getMaxReductionParameter()->get() + 7.5f) < 0.05f &&
+        std::abs(restored.getResponseParameter()->get() - 33.0f) < 0.5f &&
         std::abs(restored.getHpfFrequencyParameter()->get() - 150.0f) < 0.5f &&
-        std::abs(restored.getDryWetMixParameter()->get() - 37.0f) < 0.5f &&
-        restored.getLimitHfGainParameter()->get() == true &&
-        std::abs(restored.getNearendSensitivityParameter()->get() - 42.0f) < 0.5f &&
-        std::abs(restored.getProtectionHoldTimeParameter()->get() - 333.0f) < 0.5f &&
-        restored.getNearendDetectorParameter()->getIndex() == 1;
+        std::abs(restored.getReferenceGainParameter()->get() + 4.0f) < 0.05f &&
+        std::abs(restored.getDryWetMixParameter()->get() - 37.0f) < 0.5f;
 
-    printf("  Tail Length=%d Suppression=%d HPF=%.1fHz DryWet=%.1f%% LimitHfGain=%d "
-           "NearendSensitivity=%.1f%% ProtectionHoldTime=%.1fms NearendDetector=%d\n",
+    printf("  Tail Length=%d Amount=%.1f%% MaxReduction=%.1fdB Response=%.1fms HPF=%.1fHz Trim=%.1fdB DryWet=%.1f%%\n",
            restored.getTailLengthParameter()->getIndex(),
-           restored.getSuppressionStrengthParameter()->getIndex(),
+           static_cast<double>(restored.getAmountParameter()->get()),
+           static_cast<double>(restored.getMaxReductionParameter()->get()),
+           static_cast<double>(restored.getResponseParameter()->get()),
            static_cast<double>(restored.getHpfFrequencyParameter()->get()),
-           static_cast<double>(restored.getDryWetMixParameter()->get()),
-           static_cast<int>(restored.getLimitHfGainParameter()->get()),
-           static_cast<double>(restored.getNearendSensitivityParameter()->get()),
-           static_cast<double>(restored.getProtectionHoldTimeParameter()->get()),
-           restored.getNearendDetectorParameter()->getIndex());
+           static_cast<double>(restored.getReferenceGainParameter()->get()),
+           static_cast<double>(restored.getDryWetMixParameter()->get()));
     printf("  %s\n", pass ? "PASS -- all parameters round-tripped correctly" : "CHECK");
 
     // Bypass is deliberately absent from saved state (hosts own bypass via
@@ -2839,7 +1856,6 @@ bool testStateSaveRestore() {
         crafted.writeToStream(stream);
     }
     PAEchoCancellerAudioProcessor craftedTarget;
-    applyTestEngine(craftedTarget);
     craftedTarget.setStateInformation(craftedBlock.getData(), static_cast<int>(craftedBlock.getSize()));
     const bool bypassNotRestored = craftedTarget.getBypassParameter()->getValue() < 0.5f;
 
@@ -2849,6 +1865,157 @@ bool testStateSaveRestore() {
                           ? "PASS -- bypass stays out of saved state in both directions"
                           : "CHECK -- bypass leaked into state save/restore");
     return pass && bypassExcluded && bypassNotRestored;
+}
+
+// A session saved by 1.0.x: the controls that carried over (same IDs) come
+// back as saved, the new ones start at their defaults, and the values of
+// the removed Classic-engine controls are ignored without disturbing
+// anything else.
+bool testOldSessionRestore() {
+    printf("\n=== 1.0.x session restore test ===\n");
+
+    juce::ValueTree old("PAEchoCancellerState");
+    old.setProperty("tailLength", 1.0f / 3.0f, nullptr);  // index 1, "200ms"
+    old.setProperty("suppressionStrength", 1.0f, nullptr); // Hard
+    old.setProperty("hpfFrequency", 0.5f, nullptr);
+    old.setProperty("referenceGain", 0.75f, nullptr);     // +12 dB
+    old.setProperty("limitHfGain", 1.0f, nullptr);
+    old.setProperty("nearendSensitivity", 0.2f, nullptr);
+    old.setProperty("protectionHoldTime", 0.9f, nullptr);
+    old.setProperty("dryWetMix", 0.8f, nullptr);
+    old.setProperty("nearendDetector", 1.0f, nullptr);
+    old.setProperty("transitionSmoothing", 0.3f, nullptr);
+    old.setProperty("engine", 1.0f, nullptr);             // Classic
+    juce::MemoryBlock block;
+    {
+        juce::MemoryOutputStream stream(block, false);
+        old.writeToStream(stream);
+    }
+
+    PAEchoCancellerAudioProcessor fresh;
+    PAEchoCancellerAudioProcessor restored;
+    restored.setStateInformation(block.getData(), static_cast<int>(block.getSize()));
+
+    const auto same = [](juce::RangedAudioParameter* a, float normalised) {
+        return std::abs(a->getValue() - normalised) < 1e-4f;
+    };
+    const auto atDefault = [](juce::RangedAudioParameter* a) {
+        return std::abs(a->getValue() - a->getDefaultValue()) < 1e-4f;
+    };
+    const bool kept = restored.getTailLengthParameter()->getIndex() == 1
+                      && same(restored.getHpfFrequencyParameter(), 0.5f)
+                      && same(restored.getReferenceGainParameter(), 0.75f)
+                      && same(restored.getDryWetMixParameter(), 0.8f);
+    const bool newAtDefaults = atDefault(restored.getAmountParameter())
+                               && atDefault(restored.getMaxReductionParameter())
+                               && atDefault(restored.getResponseParameter());
+    const bool sameParameterCount = restored.getParameters().size() == fresh.getParameters().size();
+
+    printf("  Tail=%d HPF=%.1fHz Trim=%.1fdB Mix=%.1f%% | Amount=%.1f%% MaxReduction=%.1fdB Response=%.1fms\n",
+           restored.getTailLengthParameter()->getIndex(),
+           static_cast<double>(restored.getHpfFrequencyParameter()->get()),
+           static_cast<double>(restored.getReferenceGainParameter()->get()),
+           static_cast<double>(restored.getDryWetMixParameter()->get()),
+           static_cast<double>(restored.getAmountParameter()->get()),
+           static_cast<double>(restored.getMaxReductionParameter()->get()),
+           static_cast<double>(restored.getResponseParameter()->get()));
+    const bool pass = kept && newAtDefaults && sameParameterCount;
+    printf("  %s\n", pass ? "PASS -- carried-over controls restored, new ones at defaults, removed ones ignored"
+                          : "CHECK -- old session restore is wrong");
+    return pass;
+}
+
+// Amount, Max Reduction and Response are the suppressor's whole interface,
+// so pin down what each one means on the synthetic material:
+//  - Amount 0% is the adaptive filter alone, and so is Max Reduction 0 dB
+//    at any Amount (the suppressor may not cut anywhere): the two outputs
+//    must be identical.
+//  - More Amount removes more PA (25% < 100% in the PA-only window).
+//  - A deeper Max Reduction lets 100% go further than a shallow one.
+//  - Every setting applies live: changing all three mid-stream must not
+//    produce a spike or a dropout.
+bool testSuppressorControls(int sampleRate) {
+    printf("\n=== Amount / Max Reduction / Response test (%d Hz) ===\n", sampleRate);
+    const double durationS = 6.0;
+    auto signals = makeSignals(sampleRate, durationS);
+
+    auto runWith = [&](float amount, float maxReductionDb, float responseMs) {
+        PAEchoCancellerAudioProcessor proc;
+        setMonoLayout(proc);
+        proc.getAmountParameter()->setValueNotifyingHost(proc.getAmountParameter()->convertTo0to1(amount));
+        proc.getMaxReductionParameter()->setValueNotifyingHost(
+            proc.getMaxReductionParameter()->convertTo0to1(maxReductionDb));
+        proc.getResponseParameter()->setValueNotifyingHost(proc.getResponseParameter()->convertTo0to1(responseMs));
+        return runThroughProcessor(proc, sampleRate, signals.reference, signals.mic);
+    };
+
+    const auto filterOnly = runWith(0.0f, -12.0f, 20.0f);
+    const auto noFloor = runWith(80.0f, 0.0f, 20.0f);
+    const auto defaults = runWith(25.0f, -12.0f, 20.0f);
+    const auto full = runWith(100.0f, -12.0f, 20.0f);
+    const auto fullShallow = runWith(100.0f, -3.0f, 20.0f);
+    const auto fullDeep = runWith(100.0f, -24.0f, 20.0f);
+
+    double maxDiff = 0.0;
+    for (size_t i = 0; i < filterOnly.size(); ++i)
+        maxDiff = std::max(maxDiff, static_cast<double>(std::abs(filterOnly[i] - noFloor[i])));
+
+    const double picS0 = 0.5, picS1 = durationS * (2.0 / 6.0); // PA-only window, as testBasicCancellation
+    const double mic = rmsDbfs(signals.mic, sampleRate, picS0, picS1);
+    const auto red = [&](const std::vector<float>& out) { return mic - rmsDbfs(out, sampleRate, picS0, picS1); };
+    printf("  PA-only reduction: filter only %.1f dB, Amount 25%% %.1f dB, 100%% %.1f dB; "
+           "100%% at -3 dB %.1f dB, at -24 dB %.1f dB\n",
+           red(filterOnly), red(defaults), red(full), red(fullShallow), red(fullDeep));
+    printf("  Max difference, Amount 0%% vs Max Reduction 0 dB: %.3g\n", maxDiff);
+
+    // Live changes of all three, mid-stream.
+    PAEchoCancellerAudioProcessor live;
+    setMonoLayout(live);
+    const int blockSize = 256;
+    live.prepareToPlay(sampleRate, blockSize);
+    const int totalChannels = std::max(live.getTotalNumInputChannels(), live.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer(totalChannels, blockSize);
+    juce::MidiBuffer midi;
+    const int n = static_cast<int>(signals.mic.size());
+    float inputPeak = 0.0f, outputPeak = 0.0f;
+    for (float v : signals.mic) inputPeak = std::max(inputPeak, std::abs(v));
+    int zeroRun = 0, longestZeroRunAfterStart = 0;
+    for (int pos = 0; pos + blockSize <= n; pos += blockSize) {
+        const int step = pos / (sampleRate / 4); // a new setting every 250ms
+        live.getAmountParameter()->setValueNotifyingHost((step % 5) / 4.0f);
+        live.getMaxReductionParameter()->setValueNotifyingHost((step % 3) / 2.0f);
+        live.getResponseParameter()->setValueNotifyingHost((step % 4) / 3.0f);
+        buffer.clear();
+        auto mainIn = live.getBusBuffer(buffer, true, 0);
+        auto refIn = live.getBusBuffer(buffer, true, 1);
+        for (int ch = 0; ch < mainIn.getNumChannels(); ++ch)
+            mainIn.copyFrom(ch, 0, signals.mic.data() + pos, blockSize);
+        for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
+            refIn.copyFrom(ch, 0, signals.reference.data() + pos, blockSize);
+        live.processBlock(buffer, midi);
+        auto mainOut = live.getBusBuffer(buffer, false, 0);
+        for (int s = 0; s < blockSize; ++s) {
+            const float v = std::abs(mainOut.getSample(0, s));
+            outputPeak = std::max(outputPeak, v);
+            if (pos > sampleRate / 10) { // past the primed start
+                zeroRun = v < 1.0e-7f ? zeroRun + 1 : 0;
+                longestZeroRunAfterStart = std::max(longestZeroRunAfterStart, zeroRun);
+            }
+        }
+    }
+    live.releaseResources();
+    printf("  Live changes every 250ms: output peak %.3f vs input peak %.3f, longest zero run %d samples\n",
+           outputPeak, inputPeak, longestZeroRunAfterStart);
+
+    const bool zeroIsFilterOnly = maxDiff < 1e-7;
+    const bool amountWorks = red(full) > red(defaults) + 1.0 && red(defaults) > red(filterOnly);
+    const bool floorWorks = red(fullDeep) > red(fullShallow) + 1.0;
+    const bool liveClean = outputPeak < inputPeak * 1.5f && longestZeroRunAfterStart < sampleRate / 200;
+    const bool pass = zeroIsFilterOnly && amountWorks && floorWorks && liveClean;
+    printf("  %s%s%s%s%s\n", pass ? "PASS" : "CHECK", zeroIsFilterOnly ? "" : " -- 0 dB/0% DIFFER",
+           amountWorks ? "" : " -- AMOUNT NOT MONOTONIC", floorWorks ? "" : " -- MAX REDUCTION HAS NO EFFECT",
+           liveClean ? "" : " -- LIVE CHANGE GLITCHED");
+    return pass;
 }
 
 // Bypass check (a): with bypass engaged, the output must be the TRULY raw
@@ -2887,7 +2054,6 @@ bool testBypassRawPassthrough(int sampleRate) {
     }
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -3002,7 +2168,6 @@ bool testBypassToggleClickFree(int sampleRate) {
     const int n = static_cast<int>(signals.mic.size());
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -3148,7 +2313,6 @@ bool testHighPassFilterResponse() {
 
 static void printDefaultBusLayout() {
     PAEchoCancellerAudioProcessor proc; // freshly constructed, no layout negotiation yet
-    applyTestEngine(proc);
     printf("=== Default bus layout (as declared, before any host negotiation) ===\n");
     printf("  Input buses:  %d\n", proc.getBusCount(true));
     for (int i = 0; i < proc.getBusCount(true); ++i) {
@@ -3167,7 +2331,7 @@ static void printDefaultBusLayout() {
 
 // Informational only (not pass/fail): measures actual wall-clock processing
 // cost per Tail Length setting, since the adaptive filter's per-frame CPU
-// cost scales with filter length (length_blocks) -- this gives a concrete
+// cost scales with filter length (its partition count) -- this gives a concrete
 // relative-cost figure to go alongside the user's own live CPU-meter
 // readings when deciding how many simultaneous instances are affordable.
 static void benchmarkTailLengthCpuCost(int sampleRate) {
@@ -3180,7 +2344,6 @@ static void benchmarkTailLengthCpuCost(int sampleRate) {
 
     for (int tailIndex = 0; tailIndex < 4; ++tailIndex) {
         PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
         setMonoLayout(proc);
         auto* param = proc.getTailLengthParameter();
         param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(tailIndex)));
@@ -3205,18 +2368,18 @@ static void benchmarkTailLengthCpuCost(int sampleRate) {
 // divergence was only ever audible on actual concert recordings). This mode
 // runs a real audience-mic recording and its matching PA reference feed
 // through the actual processor across a matrix of settings and reports
-// objective per-config metrics, so tuning experiments (ERLE caps, comfort
-// noise, suppressor presets...) can be measured on the material that
+// objective per-config metrics, so tuning experiments (Amount, Max
+// Reduction, Response, Tail Length) can be measured on the material that
 // matters instead of judged by ear alone.
 //
-//   PAEchoCancellerVerify --real <mic.wav> <reference.wav> [--seconds N] [--write-outputs]
+//   PAEchoCancellerVerify --real <mic.wav> <reference.wav> [--seconds N] [--write-outputs] [--irregular]
 //
 // The two files must share one sample rate; channel 0 of each is used.
 // --seconds N trims the material to its first N seconds -- a 60-90s slice
 // of a real show is plenty to rank configs, and 6 configs over a full
 // half-hour recording is minutes of pointless waiting.
-// Metrics deliberately skip the first 5 seconds (AEC3's initial-state
-// bootstrap + convergence). "Reduction" here is mic-vs-output level over
+// Metrics deliberately skip the first 5 seconds (the canceller's start-up
+// and convergence). "Reduction" here is mic-vs-output level over
 // the whole measured span -- on real material that's bleed removal *plus*
 // any wanted-content suppression (there's no ground-truth separation), so
 // treat it as a comparative figure between configs, not an absolute
@@ -3309,10 +2472,9 @@ static void reportPeriodicity(const char* label, const std::vector<double>& trac
 }
 
 int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeconds, bool writeOutputs,
-                        bool irregularCadence, int engine) {
-    const bool kalmanEngine = engine == PAEchoCancellerAudioProcessor::engineKalman;
-    printf("=== Real-material regression harness (%s engine, %s cadence) ===\n",
-           kalmanEngine ? "Kalman" : "Classic", irregularCadence ? "IRREGULAR block-size" : "uniform 512-sample");
+                        bool irregularCadence) {
+    printf("=== Real-material regression harness (%s cadence) ===\n",
+           irregularCadence ? "IRREGULAR block-size" : "uniform 512-sample");
     std::vector<float> mic, ref;
     double micRate = 0.0, refRate = 0.0;
     if (!loadWavMono(juce::File(juce::String(micPath)), mic, micRate)) return 1;
@@ -3330,15 +2492,14 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     const double lengthS = static_cast<double>(n) / sampleRate;
     printf("Material: %.1fs at %d Hz (mic '%s', ref '%s')\n", lengthS, sampleRate, micPath, refPath);
 
-    const double skipS = 5.0; // AEC3 bootstrap + convergence
+    const double skipS = 5.0; // start-up + convergence
     if (lengthS < skipS + 5.0) {
         printf("ERROR: need at least ~10s of material (%.1fs given)\n", lengthS);
         return 1;
     }
 
     // >=2kHz band isolation for the HF metric -- the range where residual
-    // PA bleed (cymbals, vocal consonants, "hiss") is most audible and
-    // where AEC3's behavior has historically been the most contentious.
+    // PA bleed (cymbals, vocal consonants, "hiss") is most audible.
     auto highBandRms = [sampleRate](const std::vector<float>& x, double startS) {
         HighPassFilterChain hpf;
         hpf.setCutoff(sampleRate, 2000.0f);
@@ -3363,41 +2524,43 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     const double micFullRms = fullBandRms(mic, skipS);
     const double micHighRms = highBandRms(mic, skipS);
 
-    struct Config { int tailIndex; int suppressionIndex; const char* name; int detectorIndex = 0; };
-    // Tail sweep at the Moderate default, suppression sweep at the 400ms
-    // default -- 6 runs covering both axes through the daily-driver setting,
-    // plus the daily-driver again with the Subband near-end detector so the
-    // A/B's overall-reduction cost/benefit is measured on the same material
-    // (compare against tail400ms_moderate, its exact Classic counterpart).
+    struct Config { int tailIndex; float amount; float maxReductionDb; float responseMs; const char* name; };
+    // The defaults, then each suppressor control swept on its own (Max
+    // Reduction and Response at 50% Amount, where they have room to act),
+    // then the defaults at a shorter tail.
     const Config configs[] = {
-        { 0, 1, "tail50ms_moderate" },
-        { 1, 1, "tail200ms_moderate" },
-        { 2, 1, "tail400ms_moderate" },
-        { 3, 1, "tail800ms_moderate" },
-        { 2, 0, "tail400ms_gentle" },
-        { 2, 2, "tail400ms_hard" },
-        { 2, 1, "tail400ms_mod_subband", 1 },
+        { 3, 25.0f, -12.0f, 20.0f, "default" },
+        { 3, 0.0f, -12.0f, 20.0f, "amount0" },
+        { 3, 50.0f, -12.0f, 20.0f, "amount50" },
+        { 3, 100.0f, -12.0f, 20.0f, "amount100" },
+        { 3, 50.0f, -6.0f, 20.0f, "amount50_maxred6" },
+        { 3, 50.0f, -24.0f, 20.0f, "amount50_maxred24" },
+        { 3, 50.0f, -12.0f, 5.0f, "amount50_resp5" },
+        { 3, 50.0f, -12.0f, 50.0f, "amount50_resp50" },
+        { 1, 25.0f, -12.0f, 20.0f, "tail200_default" },
     };
 
     // The irregular run writes its aggregate report to a separate file so a
     // cadence comparison never clobbers the uniform baseline it's being
     // compared against.
     juce::File csvFile(juce::File::getCurrentWorkingDirectory().getChildFile(
-        juce::String(kalmanEngine ? "kalman_" : "") + (irregularCadence ? "real_material_report_irregular.csv" : "real_material_report.csv")));
-    juce::String csv("config,tail,suppression,fullband_reduction_db,highband_reduction_db,aec3_erle_db,aec3_delay_ms\n");
+        irregularCadence ? "real_material_report_irregular.csv" : "real_material_report.csv"));
+    juce::String csv("config,tail_ms,amount_pct,max_reduction_db,response_ms,fullband_reduction_db,highband_reduction_db,delay_ms\n");
 
-    printf("\n%-22s %14s %14s %10s %10s\n", "config", "full-band red.", ">=2kHz red.", "ERLE", "delay est.");
+    printf("\n%-22s %14s %14s %10s\n", "config", "full-band red.", ">=2kHz red.", "delay est.");
+    static constexpr int tailMs[] = { 50, 200, 400, 800 };
     bool allRan = true;
     for (const auto& cfg : configs) {
         PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
         if (!setMonoLayout(proc)) { printf("  FAILED to set mono layout\n"); return 1; }
         {
-            auto* tailParam = proc.getTailLengthParameter();
-            tailParam->setValueNotifyingHost(tailParam->convertTo0to1(static_cast<float>(cfg.tailIndex)));
-            proc.getSuppressionStrengthParameter()->setValueNotifyingHost(static_cast<float>(cfg.suppressionIndex) / 2.0f);
-            proc.getNearendDetectorParameter()->setValueNotifyingHost(static_cast<float>(cfg.detectorIndex));
-            proc.getEngineParameter()->setValueNotifyingHost(proc.getEngineParameter()->convertTo0to1(static_cast<float>(engine)));
+            const auto setTo = [](juce::RangedAudioParameter* param, float value) {
+                param->setValueNotifyingHost(param->convertTo0to1(value));
+            };
+            setTo(proc.getTailLengthParameter(), static_cast<float>(cfg.tailIndex));
+            setTo(proc.getAmountParameter(), cfg.amount);
+            setTo(proc.getMaxReductionParameter(), cfg.maxReductionDb);
+            setTo(proc.getResponseParameter(), cfg.responseMs);
         }
 
         // Irregular cadence: the same deliberately off-frame-boundary cycling
@@ -3417,13 +2580,11 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
         juce::MidiBuffer midi;
         std::vector<float> output(n, 0.0f);
 
-        // AEC3-internal state polled every ~100ms of material (GetStatistics
-        // takes a mutex, fine in this offline harness), on the same 100ms
-        // grid the RMS traces below use -- fine enough to resolve a ~1s
-        // periodicity (10 bins per cycle), coarse enough that the poll
-        // itself is negligible.
+        // The delay readout polled every ~100ms of material, on the same
+        // 100ms grid the RMS traces below use -- fine enough to resolve a
+        // ~1s periodicity (10 bins per cycle).
         const int binSize = sampleRate / 10;
-        struct StatSample { size_t pos; double erleDb; int delayMs; };
+        struct StatSample { size_t pos; int delayMs; };
         std::vector<StatSample> statSamples;
         size_t nextStatPoll = static_cast<size_t>(binSize);
 
@@ -3448,13 +2609,11 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
             pos += static_cast<size_t>(blockSize);
 
             if (pos >= nextStatPoll) {
-                statSamples.push_back({ pos, static_cast<double>(proc.getSuppressionDb()),
-                                        proc.getEstimatedEchoPathDelayMs() });
+                statSamples.push_back({ pos, proc.getEstimatedEchoPathDelayMs() });
                 while (nextStatPoll <= pos) nextStatPoll += static_cast<size_t>(binSize);
             }
         }
 
-        const double erleDb = proc.getSuppressionDb();
         const int delayMs = proc.getEstimatedEchoPathDelayMs();
         proc.releaseResources();
 
@@ -3462,10 +2621,9 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
         // grid, written per config for plotting and autocorrelated right here
         // for the periodicity verdict.
         const size_t numBins = n / static_cast<size_t>(binSize);
-        std::vector<double> outTraceDb(numBins), micTraceDb(numBins), erleTrace(numBins), delayTrace(numBins);
+        std::vector<double> outTraceDb(numBins), micTraceDb(numBins), delayTrace(numBins);
         {
             size_t statIdx = 0;
-            double lastErle = 0.0;
             int lastDelay = -1;
             for (size_t b = 0; b < numBins; ++b) {
                 const size_t binEnd = (b + 1) * static_cast<size_t>(binSize);
@@ -3477,20 +2635,18 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
                 outTraceDb[b] = 10.0 * std::log10(std::max(1e-12, outSumSq / binSize));
                 micTraceDb[b] = 10.0 * std::log10(std::max(1e-12, micSumSq / binSize));
                 while (statIdx < statSamples.size() && statSamples[statIdx].pos <= binEnd) {
-                    lastErle = statSamples[statIdx].erleDb;
                     lastDelay = statSamples[statIdx].delayMs;
                     ++statIdx;
                 }
-                erleTrace[b] = lastErle;
                 delayTrace[b] = lastDelay;
             }
         }
         {
-            juce::String trace("t_s,mic_rms_db,out_rms_db,erle_db,delay_ms\n");
+            juce::String trace("t_s,mic_rms_db,out_rms_db,delay_ms\n");
             for (size_t b = 0; b < numBins; ++b)
                 trace << juce::String(0.1 * static_cast<double>(b + 1), 1) << ","
                       << juce::String(micTraceDb[b], 2) << "," << juce::String(outTraceDb[b], 2) << ","
-                      << juce::String(erleTrace[b], 2) << "," << static_cast<int>(delayTrace[b]) << "\n";
+                      << static_cast<int>(delayTrace[b]) << "\n";
             juce::File::getCurrentWorkingDirectory()
                 .getChildFile(juce::String("real_trace_") + (irregularCadence ? "irregular_" : "uniform_")
                               + cfg.name + ".csv")
@@ -3507,7 +2663,6 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
             for (size_t b = 0; b < numBins; ++b) d[b] = outTraceDb[b] - micTraceDb[b];
             return d;
         }(), 10);
-        reportPeriodicity("ERLE dB", erleTrace, 10);
         reportPeriodicity("delay est ms", delayTrace, 10);
 
         const double outFullRms = fullBandRms(output, skipS);
@@ -3515,14 +2670,13 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
         const double fullRedDb = 20.0 * std::log10(std::max(1e-12, micFullRms) / std::max(1e-12, outFullRms));
         const double highRedDb = 20.0 * std::log10(std::max(1e-12, micHighRms) / std::max(1e-12, outHighRms));
 
-        printf("%-22s %11.1f dB %11.1f dB %7.1f dB %7d ms\n", cfg.name, fullRedDb, highRedDb, erleDb, delayMs);
-        csv << cfg.name << "," << (cfg.tailIndex == 0 ? 50 : cfg.tailIndex == 1 ? 200 : cfg.tailIndex == 2 ? 400 : 800)
-            << "," << (cfg.suppressionIndex == 0 ? "gentle" : cfg.suppressionIndex == 1 ? "moderate" : "hard")
-            << "," << juce::String(fullRedDb, 2) << "," << juce::String(highRedDb, 2)
-            << "," << juce::String(erleDb, 2) << "," << delayMs << "\n";
+        printf("%-22s %11.1f dB %11.1f dB %7d ms\n", cfg.name, fullRedDb, highRedDb, delayMs);
+        csv << cfg.name << "," << tailMs[cfg.tailIndex] << "," << cfg.amount << "," << cfg.maxReductionDb
+            << "," << cfg.responseMs << "," << juce::String(fullRedDb, 2) << "," << juce::String(highRedDb, 2)
+            << "," << delayMs << "\n";
 
         if (writeOutputs)
-            writeWav16("real_out_" + std::string(kalmanEngine ? "kalman_" : "") + cfg.name + ".wav", output, sampleRate);
+            writeWav16("real_out_" + std::string(cfg.name) + ".wav", output, sampleRate);
     }
 
     csvFile.replaceWithText(csv);
@@ -3533,784 +2687,17 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     return allRan ? 0 : 1;
 }
 
-// ---------------------------------------------------------------------------
-// --linear-probe: measure what AEC3's LINEAR filter alone achieves on real
-// material, separately from the nonlinear suppressor that runs after it.
-//
-//   PAEchoCancellerVerify --linear-probe <mic.wav> <reference.wav> [--seconds N] [--write-outputs]
-//
-// Motivation: on real concert material AEC3's reported ERLE reads ~0.2dB
-// while total reduction is 15-18dB. That ERLE is a measurement-gate
-// artifact (see the erle.min comment in TailLengthEchoControl.h), so it
-// says nothing about what the linear filter actually removes -- this mode
-// measures that directly, via AEC3's own linear-output export
-// (filter.export_linear_aec_output + the matching AudioProcessing::Config
-// flag; BOTH are required -- the APM flag allocates the exchange buffer,
-// the AEC3-config flag makes EchoCanceller3 fill it). The export costs an
-// extra buffer per frame, so it lives only here, never in the shipping
-// plugin path (makeConfiguredApm).
-//
-// The exported linear output is 16kHz only (160 samples/10ms frame --
-// AEC3's linear stage operates on the 0-8kHz band). For a like-for-like
-// comparison the mic and the normal fullband output are band-limited and
-// decimated to 16kHz too, so mic / linear-only / final are all measured in
-// the same domain. Mic and reference get the plugin's own front-end first
-// (150Hz HPF + reference trim) so AEC3 sees exactly what the plugin would
-// feed it; the FIFO block-bridging is irrelevant to this measurement, so
-// the raw 10ms-frame driver is used (same reasoning as runRawAec3).
-//
-// Also logs a per-second time series (ERLE, delay estimate, mic/linear/
-// final RMS) per config -- direct evidence for or against the still-open
-// ~1s periodic dropout lead (TailLengthEchoControl.h, the
-// excess_render_detection_interval_blocks note).
-// ---------------------------------------------------------------------------
-
-// Windowed-sinc FIR lowpass (cutoff safely under 8kHz) + pick-every-Nth
-// decimation to 16kHz. Not a production resampler -- just enough
-// anti-aliasing for RMS comparisons against AEC3's 16kHz linear output.
-static std::vector<float> decimateTo16k(const std::vector<float>& x, int sampleRate) {
-    const int factor = sampleRate / 16000;
-    if (factor * 16000 != sampleRate || factor < 1) {
-        printf("ERROR: %d Hz is not an integer multiple of 16kHz -- cannot decimate\n", sampleRate);
-        return {};
-    }
-    if (factor == 1) return x;
-
-    constexpr int taps = 129; // odd, so the group delay is an integer (64 samples)
-    const double cutoff = 7200.0 / sampleRate; // normalized; leaves margin below the 8kHz Nyquist of the target rate
-    std::vector<double> h(taps);
-    double sum = 0.0;
-    for (int i = 0; i < taps; ++i) {
-        const int m = i - taps / 2;
-        const double sinc = m == 0 ? 2.0 * cutoff
-                                   : std::sin(2.0 * juce::MathConstants<double>::pi * cutoff * m)
-                                         / (juce::MathConstants<double>::pi * m);
-        const double window = 0.54 - 0.46 * std::cos(2.0 * juce::MathConstants<double>::pi * i / (taps - 1)); // Hamming
-        h[static_cast<size_t>(i)] = sinc * window;
-        sum += h[static_cast<size_t>(i)];
-    }
-    for (auto& v : h) v /= sum; // unity DC gain
-
-    std::vector<float> out;
-    out.reserve(x.size() / static_cast<size_t>(factor) + 1);
-    const int n = static_cast<int>(x.size());
-    for (int center = 0; center < n; center += factor) {
-        double acc = 0.0;
-        for (int i = 0; i < taps; ++i) {
-            const int idx = center + i - taps / 2;
-            if (idx >= 0 && idx < n)
-                acc += h[static_cast<size_t>(i)] * x[static_cast<size_t>(idx)];
-        }
-        out.push_back(static_cast<float>(acc));
-    }
-    return out;
-}
-
-struct LinearProbeResult {
-    std::vector<float> final48;  // normal fullband APM output, input rate
-    std::vector<float> linear16; // exported linear-only output, 16kHz
-    std::vector<double> erlePerSecondDb;
-    std::vector<int> delayPerSecondMs;
-};
-
-// Raw-APM driver (same shape as runRawAec3) with the linear-output export
-// enabled on both required flags. `config` must already have
-// filter.export_linear_aec_output set -- the factory copies it verbatim.
-static LinearProbeResult runLinearProbe(const webrtc::EchoCanceller3Config& config, int sampleRate,
-                                  const std::vector<float>& reference, const std::vector<float>& mic) {
-    auto apm = webrtc::AudioProcessingBuilder()
-                   .SetEchoControlFactory(std::make_unique<TailLengthEchoControlFactory>(config))
-                   .Create();
-    webrtc::AudioProcessing::Config apmConfig;
-    apmConfig.echo_canceller.enabled = true;
-    apmConfig.echo_canceller.mobile_mode = false;
-    apmConfig.echo_canceller.export_linear_aec_output = true;
-    apmConfig.gain_controller1.enabled = false;
-    apmConfig.gain_controller2.enabled = false;
-    apmConfig.high_pass_filter.enabled = false;
-    apmConfig.noise_suppression.enabled = false;
-    apm->ApplyConfig(apmConfig);
-
-    const int frameSize = sampleRate / 100;
-    const int framesPerSecond = 100;
-    const int n = static_cast<int>(mic.size());
-    LinearProbeResult result;
-    result.final48.assign(static_cast<size_t>(n), 0.0f);
-    result.linear16.reserve(static_cast<size_t>(n / (sampleRate / 16000) + 160));
-    std::vector<float> refFrame(static_cast<size_t>(frameSize));
-    std::vector<float> micFrame(static_cast<size_t>(frameSize));
-    float* refPtr = refFrame.data();
-    float* micPtr = micFrame.data();
-    const webrtc::StreamConfig streamConfig(sampleRate, 1);
-    std::array<float, 160> linearFrame{};
-
-    int pos = 0;
-    int frameCount = 0;
-    while (pos + frameSize <= n) {
-        std::copy_n(reference.data() + pos, frameSize, refFrame.data());
-        std::copy_n(mic.data() + pos, frameSize, micFrame.data());
-        apm->ProcessReverseStream(&refPtr, streamConfig, streamConfig, &refPtr);
-        apm->ProcessStream(&micPtr, streamConfig, streamConfig, &micPtr);
-        std::copy_n(micFrame.data(), frameSize, result.final48.data() + pos);
-
-        if (apm->GetLinearAecOutput(rtc::ArrayView<std::array<float, 160>>(&linearFrame, 1)))
-            result.linear16.insert(result.linear16.end(), linearFrame.begin(), linearFrame.end());
-
-        ++frameCount;
-        if (frameCount % framesPerSecond == 0) {
-            const auto stats = apm->GetStatistics();
-            result.erlePerSecondDb.push_back(stats.echo_return_loss_enhancement.value_or(0.0));
-            result.delayPerSecondMs.push_back(static_cast<int>(stats.delay_ms.value_or(-1)));
-        }
-        pos += frameSize;
-    }
-    return result;
-}
-
-static int runLinearProbeMode(const char* micPath, const char* refPath, double maxSeconds, bool writeOutputs) {
-    printf("=== Linear-filter probe (mic->linear vs mic->final) ===\n");
-    std::vector<float> mic, ref;
-    double micRate = 0.0, refRate = 0.0;
-    if (!loadWavMono(juce::File(juce::String(micPath)), mic, micRate)) return 1;
-    if (!loadWavMono(juce::File(juce::String(refPath)), ref, refRate)) return 1;
-    if (!juce::exactlyEqual(micRate, refRate)) {
-        printf("ERROR: sample rates differ (mic %.0f Hz, reference %.0f Hz) -- resample one first\n", micRate, refRate);
-        return 1;
-    }
-    const int sampleRate = static_cast<int>(micRate);
-    if (sampleRate % 16000 != 0) {
-        printf("ERROR: %d Hz material cannot be compared against the 16kHz linear export\n", sampleRate);
-        return 1;
-    }
-    size_t n = std::min(mic.size(), ref.size());
-    if (maxSeconds > 0.0)
-        n = std::min(n, static_cast<size_t>(maxSeconds * sampleRate));
-    mic.resize(n);
-    ref.resize(n);
-    const double lengthS = static_cast<double>(n) / sampleRate;
-    printf("Material: %.1fs at %d Hz\n", lengthS, sampleRate);
-
-    const double skipS = 5.0; // AEC3 bootstrap + convergence, same span as --real
-
-    // Plugin front-end: per-stream 150Hz HPF (the hpfFrequency default) and
-    // reference trim (0dB default -- the multiply is kept so this mirrors
-    // the processBlock code shape, see PluginProcessor.cpp).
-    const float refGainLinear = juce::Decibels::decibelsToGain(0.0f);
-    {
-        HighPassFilterChain micHpf, refHpf;
-        micHpf.setCutoff(sampleRate, 150.0f);
-        refHpf.setCutoff(sampleRate, 150.0f);
-        for (size_t i = 0; i < n; ++i) {
-            mic[i] = micHpf.processSample(mic[i]);
-            ref[i] = refHpf.processSample(ref[i]) * refGainLinear;
-        }
-    }
-
-    const auto mic16 = decimateTo16k(mic, sampleRate);
-    if (mic16.empty()) return 1;
-    const double micRms16 = rmsDbfs(mic16, 16000, skipS, lengthS);
-
-    struct ProbeConfig {
-        int tailIndex;
-        float erleMin;
-        float comfortNoiseFloorDbfs;
-        const char* name;
-    };
-    // erle.min sweep at the real-material tail (400ms, Moderate) plus a
-    // comfort-noise A/B and tail-length context runs at stock erle.min.
-    // mic->linear MUST be identical across the erle.min sweep -- erle.min
-    // only feeds the residual-echo estimate driving the suppressor and
-    // cannot touch the linear filter. If it moves, the measurement is
-    // broken and its numbers are not to be trusted.
-    const ProbeConfig probeConfigs[] = {
-        { 2, 1.0f, -96.03406f, "tail400_erlemin1" },
-        { 2, 2.0f, -96.03406f, "tail400_erlemin2" },
-        { 2, 4.0f, -96.03406f, "tail400_erlemin4" },
-        { 2, 8.0f, -96.03406f, "tail400_erlemin8" },
-        { 2, 1.0f, -70.0f,     "tail400_erlemin1_cn70" },
-        { 0, 1.0f, -96.03406f, "tail50_erlemin1" },
-        { 1, 1.0f, -96.03406f, "tail200_erlemin1" },
-        { 3, 1.0f, -96.03406f, "tail800_erlemin1" },
-    };
-
-    printf("\n%-24s %14s %14s %12s %10s\n", "config", "mic->linear", "mic->final", "final(48k)", "delay est.");
-    for (const auto& cfg : probeConfigs) {
-        // Plugin-default sensitivity/hold (75%/100ms) and Moderate
-        // suppression, matching what the plugin would actually run.
-        auto config = makeEchoCanceller3Config(cfg.tailIndex, 1, false, 75.0f, 100.0f,
-                                               cfg.erleMin, cfg.comfortNoiseFloorDbfs);
-        config.filter.export_linear_aec_output = true;
-
-        const auto probe = runLinearProbe(config, sampleRate, ref, mic);
-        if (probe.linear16.empty()) {
-            printf("%-24s  ERROR: no linear output exported\n", cfg.name);
-            return 1;
-        }
-
-        const auto final16 = decimateTo16k(probe.final48, sampleRate);
-        const double linearRms16 = rmsDbfs(probe.linear16, 16000, skipS, lengthS);
-        const double finalRms16 = rmsDbfs(final16, 16000, skipS, lengthS);
-        const double finalRms48 = rmsDbfs(probe.final48, sampleRate, skipS, lengthS);
-        const double micRms48 = rmsDbfs(mic, sampleRate, skipS, lengthS);
-        const int lastDelay = probe.delayPerSecondMs.empty() ? -1 : probe.delayPerSecondMs.back();
-
-        printf("%-24s %11.1f dB %11.1f dB %9.1f dB %7d ms\n", cfg.name,
-               micRms16 - linearRms16, micRms16 - finalRms16, micRms48 - finalRms48, lastDelay);
-
-        // Per-second trace: the mic columns repeat across configs but keep
-        // each CSV self-contained for plotting.
-        juce::String csv("second,erle_db,delay_ms,mic16_rms_db,linear16_rms_db,final16_rms_db\n");
-        const size_t numSeconds = probe.erlePerSecondDb.size();
-        for (size_t sec = 0; sec < numSeconds; ++sec) {
-            const double t0 = static_cast<double>(sec);
-            const double t1 = t0 + 1.0;
-            csv << static_cast<int>(sec) << ","
-                << juce::String(probe.erlePerSecondDb[sec], 2) << ","
-                << probe.delayPerSecondMs[sec] << ","
-                << juce::String(rmsDbfs(mic16, 16000, t0, t1), 2) << ","
-                << juce::String(rmsDbfs(probe.linear16, 16000, t0, t1), 2) << ","
-                << juce::String(rmsDbfs(final16, 16000, t0, t1), 2) << "\n";
-        }
-        juce::File::getCurrentWorkingDirectory()
-            .getChildFile(juce::String("linear_probe_") + cfg.name + ".csv")
-            .replaceWithText(csv);
-
-        if (writeOutputs) {
-            writeWav16("linear_probe_" + std::string(cfg.name) + "_linear16k.wav", probe.linear16, 16000);
-            writeWav16("linear_probe_" + std::string(cfg.name) + "_final.wav", probe.final48, sampleRate);
-        }
-    }
-
-    printf("\nWrote linear_probe_<config>.csv per-second traces (ERLE, delay, RMS)%s.\n",
-           writeOutputs ? " and linear/final WAVs" : "");
-    printf("mic->linear is the linear filter's real contribution; mic->final adds the suppressor.\n"
-           "Both measured in the 16kHz domain (the export's native rate); final(48k) is the\n"
-           "fullband figure for cross-checking against --real. Span %.0fs..end.\n", skipS);
-    return 0;
-}
-
-// ---------------------------------------------------------------------------
-// --subband-probe: measure whether AEC3's SubbandNearendDetector, with
-// custom-chosen frequency bands, discriminates this venue's crowd from its
-// PA better than the shipping DominantNearendDetector (which is hardcoded
-// to bins 1-15 of 65, i.e. ~125-1875Hz -- see low_frequency_energy() in
-// dominant_nearend_detector.cc).
-//
-//   PAEchoCancellerVerify --subband-probe <mic.wav> <reference.wav> [--seconds N]
-//
-// PURELY DIAGNOSTIC: nothing here changes makeEchoCanceller3Config()'s
-// output for the plugin path. This probe's measurement round led to the
-// shipped Near-end Detector A/B toggle (applyNearendDetectorChoice in
-// TailLengthEchoControl.h). The parenthetical that used to live here --
-// that a hold mechanism would have to be "rebuilt in plugin code" -- was
-// wrong: the per-4ms decision is internal to AEC3's suppression path (the
-// plugin only sees 10ms frames), so the hold was instead patched into
-// SubbandNearendDetector itself, mirroring DominantNearendDetector's
-// trigger_counters_/hold_counters_ logic verbatim (see
-// subband_nearend_detector.cc in the vendored tree). The sweep candidates
-// below therefore now explicitly set trigger_threshold=1/hold_duration=2,
-// which reproduces the original unwrapped per-block behavior exactly
-// (set-then-decrement leaves the hold counter >0 for precisely the
-// triggering block) -- keeping this sweep's numbers comparable with the
-// committed measurement round from before the patch existed.
-//
-// How the decision is observed: neither AudioProcessingStats nor
-// EchoControl::Metrics exposes the detector's boolean, and ApmDataDumper
-// (which dumps exactly this flag as "aec3_dominant_nearend") cannot be
-// compiled into this distribution -- WEBRTC_APM_DEBUG_DUMP=1 hard-requires
-// common_audio/wav_file.h, which the vendored webrtc-audio-processing tree
-// prunes. So the vendored AEC3 carries a tiny measurement-only accessor
-// chain instead (EchoCanceller3::GetNearendStateCounters ->
-// BlockProcessor -> EchoRemover, tallied right after
-// SuppressionGain::GetGain in echo_remover.cc): cumulative per-4ms-block
-// counts of blocks seen / blocks in near-end state / state transitions.
-// Nothing in the processing path reads the counters, so behavior is
-// untouched; the plugin never calls the accessor. Polled here once per
-// 10ms frame, so per-100ms bins are exact 25-block tallies.
-//
-// SubbandNearendDetector trigger condition (subband_nearend_detector.cc):
-//   avg_power(subband1) < nearend_threshold * avg_power(subband2)
-//     AND avg_power(subband1) > snr_threshold * avg_noise_power(subband1)
-// i.e. "the low band is quiet RELATIVE to the high band, and the low band
-// is genuinely above the noise floor". With subband1 = today's <2kHz band
-// and subband2 in the 2-8kHz range, that is exactly the "crowd loudness
-// skews mid/high, PA skews bass" hypothesis. Note the detector sees the
-// POST-linear-filter error spectrum (E2, once the linear estimate is
-// usable -- echo_remover.cc), not the raw mic, and unlike the dominant
-// detector it never looks at the residual-echo estimate at all.
-//
-// Threshold choices (documented reasoning, since stock values are 1.0/1.0
-// single-bin placeholders that trigger never/degenerately):
-//   - nearend_threshold is swept 1/2/4/8 per band pair: audio spectra roll
-//     off with frequency, so how much quieter than subband2 the low band
-//     must be to count as "crowd" is exactly the unknown this probe exists
-//     to measure. 1.0 means "high band must outpower the low band" (very
-//     strict on music); 8.0 tolerates the low band being up to 9dB louder.
-//   - snr_threshold is fixed at 1.0: the shipping dominant detector at the
-//     75% Near-end Sensitivity default runs snr = 30*(1/60)^0.75 ~= 1.4
-//     (applyNearendSensitivity in TailLengthEchoControl.h), so ~1 keeps
-//     the noise gate comparably permissive and leaves the band-ratio test
-//     as the variable under study.
-//   - nearend_average_blocks = 4 (16ms smoothing): the subband detector
-//     has no trigger/hold counters, so a little smoothing stands in for
-//     the dominant detector's 12-block trigger_threshold; more would blur
-//     the timing pattern this probe wants to see.
-// A control candidate with subband2 == subband1 and nearend_threshold 1.0
-// can never trigger (a value is never < 1.0 * itself) -- it sanity-checks
-// the harness plumbing against known behavior.
-//
-// Config context: 400ms tail / Moderate / defaults 75% & 100ms -- the
-// confirmed real-world setting for the venue this material comes from
-// (and --linear-probe's precedent), not the shipped 800ms default; only
-// the detector selection and its bands differ between runs.
-// ---------------------------------------------------------------------------
-
-struct SubbandProbeCandidate {
-    const char* name;
-    bool useSubband;
-    size_t sb1Lo, sb1Hi, sb2Lo, sb2Hi; // bin indices, ~125Hz per bin (65 bins over 0-8kHz)
-    float nearendThreshold;
-    float snrThreshold;
-    size_t averageBlocks;
-    // Defaults reproduce the pre-hold-patch unwrapped detector exactly (see
-    // the block comment above), so the sweep entries that omit them keep
-    // their original raw semantics; hold candidates override explicitly.
-    int holdDuration = 2;
-    int triggerThreshold = 1;
-};
-
-struct SubbandProbeRunResult {
-    std::vector<double> binFraction; // per-100ms near-end fraction (exact 25-block tallies)
-    double overallFraction = 0.0;    // skipS..end
-    double transitionsPerSecond = 0.0; // skipS..end, exact (counted per block in echo_remover.cc)
-    uint64_t measuredBlocks = 0;
-};
-
-// Same raw fixed-10ms-frame driver as runRawAec3 (the FrameFifo bridging is
-// irrelevant to detector behavior), plus the per-frame counter poll.
-static SubbandProbeRunResult runSubbandProbeRun(const webrtc::EchoCanceller3Config& config, int sampleRate,
-                                                const std::vector<float>& reference, const std::vector<float>& mic,
-                                                double skipS) {
-    auto factory = std::make_unique<TailLengthEchoControlFactory>(config);
-    auto* factoryPtr = factory.get(); // stays valid: the APM owns the factory for its own lifetime
-    auto apm = webrtc::AudioProcessingBuilder()
-                   .SetEchoControlFactory(std::move(factory))
-                   .Create();
-    webrtc::AudioProcessing::Config apmConfig;
-    apmConfig.echo_canceller.enabled = true;
-    apmConfig.echo_canceller.mobile_mode = false;
-    apmConfig.gain_controller1.enabled = false;
-    apmConfig.gain_controller2.enabled = false;
-    apmConfig.high_pass_filter.enabled = false;
-    apmConfig.noise_suppression.enabled = false;
-    apm->ApplyConfig(apmConfig);
-
-    const int frameSize = sampleRate / 100;
-    const int n = static_cast<int>(mic.size());
-    std::vector<float> refFrame(static_cast<size_t>(frameSize));
-    std::vector<float> micFrame(static_cast<size_t>(frameSize));
-    float* refPtr = refFrame.data();
-    float* micPtr = micFrame.data();
-    const webrtc::StreamConfig streamConfig(sampleRate, 1);
-
-    using Counters = webrtc::EchoRemover::NearendStateCounters;
-    std::vector<Counters> perFrame; // cumulative counters after each 10ms frame
-    perFrame.reserve(static_cast<size_t>(n / frameSize + 1));
-
-    int pos = 0;
-    while (pos + frameSize <= n) {
-        std::copy_n(reference.data() + pos, frameSize, refFrame.data());
-        std::copy_n(mic.data() + pos, frameSize, micFrame.data());
-        apm->ProcessReverseStream(&refPtr, streamConfig, streamConfig, &refPtr);
-        apm->ProcessStream(&micPtr, streamConfig, streamConfig, &micPtr);
-        auto* aec3 = factoryPtr->getActiveInstance();
-        perFrame.push_back(aec3 != nullptr ? aec3->GetNearendStateCounters() : Counters{});
-        pos += frameSize;
-    }
-
-    SubbandProbeRunResult result;
-    if (perFrame.empty()) return result;
-
-    // Exact per-100ms bins from cumulative counter deltas (10 frames = 25
-    // 4ms blocks per bin).
-    const size_t framesPerBin = 10;
-    const size_t numBins = perFrame.size() / framesPerBin;
-    result.binFraction.resize(numBins, 0.0);
-    Counters prev{};
-    for (size_t b = 0; b < numBins; ++b) {
-        const Counters& cur = perFrame[(b + 1) * framesPerBin - 1];
-        const uint64_t db = cur.blocks - prev.blocks;
-        const uint64_t dn = cur.nearend_blocks - prev.nearend_blocks;
-        result.binFraction[b] = db > 0 ? static_cast<double>(dn) / static_cast<double>(db) : 0.0;
-        prev = cur;
-    }
-
-    // Aggregates over skipS..end from the cumulative counters directly.
-    const size_t skipFrame = std::min(perFrame.size() - 1, static_cast<size_t>(skipS * 100.0));
-    const Counters& atSkip = perFrame[skipFrame];
-    const Counters& last = perFrame.back();
-    const uint64_t blocks = last.blocks - atSkip.blocks;
-    result.measuredBlocks = blocks;
-    if (blocks > 0) {
-        result.overallFraction =
-            static_cast<double>(last.nearend_blocks - atSkip.nearend_blocks) / static_cast<double>(blocks);
-        result.transitionsPerSecond =
-            static_cast<double>(last.transitions - atSkip.transitions) / (static_cast<double>(blocks) / 250.0);
-    }
-    return result;
-}
-
-// Pearson correlation between two equal-grid traces, skipping the first
-// skipBins bins of both.
-static double pearsonCorrelation(const std::vector<double>& a, const std::vector<double>& b, size_t skipBins) {
-    const size_t n = std::min(a.size(), b.size());
-    if (n <= skipBins + 2) return 0.0;
-    double meanA = 0.0, meanB = 0.0;
-    const size_t count = n - skipBins;
-    for (size_t i = skipBins; i < n; ++i) { meanA += a[i]; meanB += b[i]; }
-    meanA /= static_cast<double>(count);
-    meanB /= static_cast<double>(count);
-    double num = 0.0, denA = 0.0, denB = 0.0;
-    for (size_t i = skipBins; i < n; ++i) {
-        const double da = a[i] - meanA, db = b[i] - meanB;
-        num += da * db;
-        denA += da * da;
-        denB += db * db;
-    }
-    return (denA > 0.0 && denB > 0.0) ? num / std::sqrt(denA * denB) : 0.0;
-}
-
-static int runSubbandProbeMode(const char* micPath, const char* refPath, double maxSeconds) {
-    printf("=== Subband near-end detector probe (band-pair sweep vs dominant baseline) ===\n");
-    std::vector<float> mic, ref;
-    double micRate = 0.0, refRate = 0.0;
-    if (!loadWavMono(juce::File(juce::String(micPath)), mic, micRate)) return 1;
-    if (!loadWavMono(juce::File(juce::String(refPath)), ref, refRate)) return 1;
-    if (!juce::exactlyEqual(micRate, refRate)) {
-        printf("ERROR: sample rates differ (mic %.0f Hz, reference %.0f Hz) -- resample one first\n", micRate, refRate);
-        return 1;
-    }
-    const int sampleRate = static_cast<int>(micRate);
-    size_t n = std::min(mic.size(), ref.size());
-    if (maxSeconds > 0.0)
-        n = std::min(n, static_cast<size_t>(maxSeconds * sampleRate));
-    mic.resize(n);
-    ref.resize(n);
-    const double lengthS = static_cast<double>(n) / sampleRate;
-    printf("Material: %.1fs at %d Hz\n", lengthS, sampleRate);
-    const double skipS = 5.0; // AEC3 bootstrap + convergence, same span as the other real-material modes
-
-    // Plugin front-end, same as --linear-probe: 150Hz HPF on both streams,
-    // reference trim 0dB.
-    {
-        HighPassFilterChain micHpf, refHpf;
-        micHpf.setCutoff(sampleRate, 150.0f);
-        refHpf.setCutoff(sampleRate, 150.0f);
-        const float refGainLinear = juce::Decibels::decibelsToGain(0.0f);
-        for (size_t i = 0; i < n; ++i) {
-            mic[i] = micHpf.processSample(mic[i]);
-            ref[i] = refHpf.processSample(ref[i]) * refGainLinear;
-        }
-    }
-
-    // Per-100ms mic/ref level traces (post-preprocessing) on the same grid
-    // as the detector bins -- the external validation signal: seconds where
-    // the mic runs hot relative to the reference are the best available
-    // proxy for crowd-dominant moments (the subband detector never sees the
-    // reference at all, so correlation with mic-ref level is not circular).
-    const size_t binSize = static_cast<size_t>(sampleRate / 10);
-    const size_t numBins = n / binSize;
-    std::vector<double> micDb(numBins), refDb(numBins), micMinusRefDb(numBins);
-    for (size_t b = 0; b < numBins; ++b) {
-        double micSumSq = 0.0, refSumSq = 0.0;
-        for (size_t i = b * binSize; i < (b + 1) * binSize; ++i) {
-            micSumSq += static_cast<double>(mic[i]) * mic[i];
-            refSumSq += static_cast<double>(ref[i]) * ref[i];
-        }
-        micDb[b] = 10.0 * std::log10(std::max(1e-12, micSumSq / static_cast<double>(binSize)));
-        refDb[b] = 10.0 * std::log10(std::max(1e-12, refSumSq / static_cast<double>(binSize)));
-        micMinusRefDb[b] = micDb[b] - refDb[b];
-    }
-    const size_t skipBins = static_cast<size_t>(skipS * 10.0);
-
-    // Band pairs under test (bin ~= 125Hz): subband1 is always today's
-    // detector band, subband2 sweeps the mid/high ranges where crowd energy
-    // should sit. Threshold sweep rationale in the block comment above.
-    // Threshold sweep 2..128 (i.e. the low band may be up to ~3..21dB louder
-    // than subband2 and still count as near-end): a 12s pilot with thr 1..8
-    // showed ~0% triggers everywhere -- on this material the post-filter low
-    // band powers far exceed the mid/high band averages, so the usable
-    // operating range sits at higher ratios. The top of the sweep is
-    // expected to degenerate (ratio test ~always true, trigger dominated by
-    // the SNR gate); the informative zone is wherever the discrimination
-    // metrics peak between the two extremes.
-    const SubbandProbeCandidate candidates[] = {
-        { "ctrl_sb2eq_sb1",  true, 1, 15, 1, 15,  1.0f, 1.0f, 4 }, // must stay ~0%: p1 < 1.0*p1 is impossible
-        { "sb_2k4k_thr2",    true, 1, 15, 16, 32, 2.0f,   1.0f, 4 },
-        { "sb_2k4k_thr8",    true, 1, 15, 16, 32, 8.0f,   1.0f, 4 },
-        { "sb_2k4k_thr16",   true, 1, 15, 16, 32, 16.0f,  1.0f, 4 },
-        { "sb_2k4k_thr32",   true, 1, 15, 16, 32, 32.0f,  1.0f, 4 },
-        { "sb_2k4k_thr64",   true, 1, 15, 16, 32, 64.0f,  1.0f, 4 },
-        { "sb_2k4k_thr128",  true, 1, 15, 16, 32, 128.0f, 1.0f, 4 },
-        { "sb_2k6k_thr2",    true, 1, 15, 16, 48, 2.0f,   1.0f, 4 },
-        { "sb_2k6k_thr8",    true, 1, 15, 16, 48, 8.0f,   1.0f, 4 },
-        { "sb_2k6k_thr16",   true, 1, 15, 16, 48, 16.0f,  1.0f, 4 },
-        { "sb_2k6k_thr32",   true, 1, 15, 16, 48, 32.0f,  1.0f, 4 },
-        { "sb_2k6k_thr64",   true, 1, 15, 16, 48, 64.0f,  1.0f, 4 },
-        { "sb_2k6k_thr128",  true, 1, 15, 16, 48, 128.0f, 1.0f, 4 },
-        { "sb_4k8k_thr2",    true, 1, 15, 32, 64, 2.0f,   1.0f, 4 },
-        { "sb_4k8k_thr8",    true, 1, 15, 32, 64, 8.0f,   1.0f, 4 },
-        { "sb_4k8k_thr16",   true, 1, 15, 32, 64, 16.0f,  1.0f, 4 },
-        { "sb_4k8k_thr32",   true, 1, 15, 32, 64, 32.0f,  1.0f, 4 },
-        { "sb_4k8k_thr64",   true, 1, 15, 32, 64, 64.0f,  1.0f, 4 },
-        { "sb_4k8k_thr128",  true, 1, 15, 32, 64, 128.0f, 1.0f, 4 },
-        // Refinement around the first full run's sweet spot (2-4kHz showed
-        // by far the sharpest quiet-PA selectivity; 4-8kHz was dead, 2-6kHz
-        // just behaved like a diluted 2-4kHz): finer threshold steps, plus
-        // an nearend_average_blocks 1/16 A/B at the anchor threshold to see
-        // how much of the raw per-block flappiness (no hold mechanism
-        // exists in this detector) in-config smoothing alone can absorb.
-        { "sb_2k4k_thr48",   true, 1, 15, 16, 32, 48.0f,  1.0f, 4 },
-        { "sb_2k4k_thr96",   true, 1, 15, 16, 32, 96.0f,  1.0f, 4 },
-        { "sb_2k4k_t64avg1", true, 1, 15, 16, 32, 64.0f,  1.0f, 1 },
-        { "sb_2k4k_t64avg16",true, 1, 15, 16, 32, 64.0f,  1.0f, 16 },
-        // With the vendored hold patch: the exact shipped subband config at
-        // the plugin defaults (Sensitivity 75% -> thr 64, avg 16; Hold 100ms
-        // -> 25 blocks; trigger 12 matching the dominant detector's). This
-        // is the row whose flips/s must approach dom_baseline's 0.82/s
-        // rather than the unwrapped detector's ~14/s. The h400 variant
-        // shows what a user raising Protection Hold Time to 400ms buys.
-        { "sb_ship75_h100",  true, 1, 15, 16, 32, 64.0f,  1.0f, 16, 25, 12 },
-        { "sb_ship75_h400",  true, 1, 15, 16, 32, 64.0f,  1.0f, 16, 100, 12 },
-    };
-
-    // Baseline first: the shipping dominant detector at this venue's
-    // confirmed settings (400ms tail, Moderate, sensitivity 75%, hold
-    // 100ms) -- identical config to every candidate except the detector.
-    const auto baseConfig = makeEchoCanceller3Config(2 /*400ms*/, 1 /*Moderate*/, false, 75.0f, 100.0f);
-
-    printf("\n%-16s %10s %12s %8s %8s %8s %10s %10s\n",
-           "run", "nearend%", "flips/s", "r(mic)", "r(ref)", "r(m-r)", "loRefQ%", "hiRefQ%");
-
-    struct RunRecord { std::string name; SubbandProbeRunResult res; };
-    std::vector<RunRecord> runs;
-
-    auto analyzeAndPrint = [&](const std::string& name, const SubbandProbeRunResult& res,
-                               const SubbandProbeRunResult* baseline) {
-        const double rMic = pearsonCorrelation(res.binFraction, micDb, skipBins);
-        const double rRef = pearsonCorrelation(res.binFraction, refDb, skipBins);
-        const double rDiff = pearsonCorrelation(res.binFraction, micMinusRefDb, skipBins);
-
-        // Conditional trigger rate by reference-level quartile: a detector
-        // that protects crowd (not PA) should trigger MORE in the quietest-
-        // reference quarter of bins and LESS in the loudest.
-        double loQ = 0.0, hiQ = 0.0;
-        {
-            std::vector<size_t> idx;
-            for (size_t b = skipBins; b < std::min(res.binFraction.size(), refDb.size()); ++b) idx.push_back(b);
-            std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b2) { return refDb[a] < refDb[b2]; });
-            const size_t q = idx.size() / 4;
-            if (q > 0) {
-                for (size_t i = 0; i < q; ++i) loQ += res.binFraction[idx[i]];
-                for (size_t i = idx.size() - q; i < idx.size(); ++i) hiQ += res.binFraction[idx[i]];
-                loQ = 100.0 * loQ / static_cast<double>(q);
-                hiQ = 100.0 * hiQ / static_cast<double>(q);
-            }
-        }
-
-        printf("%-16s %9.1f%% %12.2f %8.2f %8.2f %8.2f %9.1f%% %9.1f%%\n",
-               name.c_str(), 100.0 * res.overallFraction, res.transitionsPerSecond,
-               rMic, rRef, rDiff, loQ, hiQ);
-        if (baseline != nullptr) {
-            const double rBase = pearsonCorrelation(res.binFraction, baseline->binFraction, skipBins);
-            printf("%-16s   vs baseline: r=%.2f\n", "", rBase);
-        }
-        // Clustering/pattern check via the shared autocorrelation helper.
-        reportPeriodicity((name + " frac").c_str(), res.binFraction, 10);
-    };
-
-    printf("\n-- baseline (DominantNearendDetector, shipping <2kHz-only band) --\n");
-    RunRecord baselineRun{ "dom_baseline", runSubbandProbeRun(baseConfig, sampleRate, ref, mic, skipS) };
-    analyzeAndPrint(baselineRun.name, baselineRun.res, nullptr);
-    runs.push_back(baselineRun);
-
-    printf("\n-- subband candidates --\n");
-    for (const auto& cand : candidates) {
-        auto config = baseConfig;
-        config.suppressor.use_subband_nearend_detection = true;
-        auto& sd = config.suppressor.subband_nearend_detection;
-        sd.nearend_average_blocks = cand.averageBlocks;
-        sd.subband1 = { cand.sb1Lo, cand.sb1Hi };
-        sd.subband2 = { cand.sb2Lo, cand.sb2Hi };
-        sd.nearend_threshold = cand.nearendThreshold;
-        sd.snr_threshold = cand.snrThreshold;
-        sd.hold_duration = cand.holdDuration;       // 2/1 = unwrapped raw semantics; see the struct comment
-        sd.trigger_threshold = cand.triggerThreshold;
-
-        RunRecord rec{ cand.name, runSubbandProbeRun(config, sampleRate, ref, mic, skipS) };
-        analyzeAndPrint(rec.name, rec.res, &baselineRun.res);
-        runs.push_back(rec);
-    }
-
-    // Combined per-100ms trace CSV: level context + one trigger-fraction
-    // column per run, for plotting the time pattern.
-    {
-        juce::String csv("t_s,mic_db,ref_db");
-        for (const auto& r : runs) csv << "," << r.name.c_str();
-        csv << "\n";
-        size_t rows = numBins;
-        for (const auto& r : runs) rows = std::min(rows, r.res.binFraction.size());
-        for (size_t b = 0; b < rows; ++b) {
-            csv << juce::String(0.1 * static_cast<double>(b + 1), 1) << ","
-                << juce::String(micDb[b], 2) << "," << juce::String(refDb[b], 2);
-            for (const auto& r : runs) csv << "," << juce::String(r.res.binFraction[b], 3);
-            csv << "\n";
-        }
-        juce::File::getCurrentWorkingDirectory().getChildFile("subband_probe_trace.csv").replaceWithText(csv);
-    }
-    // Summary CSV.
-    {
-        juce::String csv("run,sb1,sb2,nearend_threshold,snr_threshold,nearend_pct,flips_per_s,r_mic,r_ref,r_mic_minus_ref\n");
-        size_t candIdx = 0;
-        for (const auto& r : runs) {
-            const bool isBaseline = (&r == &runs.front());
-            const SubbandProbeCandidate* c = isBaseline ? nullptr : &candidates[candIdx++];
-            csv << r.name.c_str() << ","
-                << (c ? (juce::String(static_cast<int>(c->sb1Lo * 125)) + "-" + juce::String(static_cast<int>(c->sb1Hi * 125)) + "Hz") : juce::String("125-1875Hz(fixed)")) << ","
-                << (c ? (juce::String(static_cast<int>(c->sb2Lo * 125)) + "-" + juce::String(static_cast<int>(c->sb2Hi * 125)) + "Hz") : juce::String("n/a")) << ","
-                << (c ? juce::String(c->nearendThreshold, 2) : juce::String("n/a")) << ","
-                << (c ? juce::String(c->snrThreshold, 2) : juce::String("n/a")) << ","
-                << juce::String(100.0 * r.res.overallFraction, 2) << ","
-                << juce::String(r.res.transitionsPerSecond, 2) << ","
-                << juce::String(pearsonCorrelation(r.res.binFraction, micDb, skipBins), 3) << ","
-                << juce::String(pearsonCorrelation(r.res.binFraction, refDb, skipBins), 3) << ","
-                << juce::String(pearsonCorrelation(r.res.binFraction, micMinusRefDb, skipBins), 3) << "\n";
-        }
-        juce::File::getCurrentWorkingDirectory().getChildFile("subband_probe_report.csv").replaceWithText(csv);
-    }
-
-    printf("\nWrote subband_probe_report.csv and subband_probe_trace.csv (per-100ms trigger fractions).\n");
-    printf("Columns: nearend%% = fraction of 4ms blocks in near-end state (%.0fs..end); flips/s = exact\n"
-           "state transitions; r(...) = Pearson vs per-100ms mic/ref/mic-minus-ref level; loRefQ/hiRefQ =\n"
-           "mean trigger rate in the quietest/loudest reference-level quartile of bins. A detector that\n"
-           "protects crowd rather than PA wants r(m-r) positive, r(ref) negative, loRefQ >> hiRefQ.\n", skipS);
-    return 0;
-}
-
-// Regression test for the vendored SubbandNearendDetector hold patch: the
-// stock detector recomputes its state from scratch every 4ms block, and on
-// real material flipped ~14/s vs the dominant detector's 0.82/s. Drives raw
-// AEC3 (via runSubbandProbeRun's counter polling) with material designed to
-// make the raw per-block condition chatter -- broadband noise where the two
-// subbands' powers are statistically equal, so p1 < 1.0 * p2 is a per-block
-// coin flip -- plus a mid-run HF-dominant stretch where the condition holds
-// solidly. The snr gate is disabled (snr_threshold = 0) to isolate the
-// ratio chatter this test needs. Asserts the hold (trigger 12 / hold 50,
-// the dominant detector's defaults) cuts the flip rate by a large factor
-// versus the unwrapped configuration (trigger 1 / hold 2 -- exactly
-// equivalent to the pre-patch per-block behavior), while the sustained
-// HF-dominant stretch still gets protected -- i.e. the hold debounces
-// chatter without deafening the detector to genuine sustained triggers.
-bool testSubbandHoldReducesFlipRate(int sampleRate) {
-    printf("\n=== Subband detector hold (flip-rate) test (%d Hz) ===\n", sampleRate);
-    const double durationS = 12.0;
-    const int n = static_cast<int>(sampleRate * durationS);
-
-    std::mt19937 refRng(51), micRng(52);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-    // Quiet LF leak keeps AEC3 operating realistically; the mic bed is what
-    // the detector actually chews on (E2 ~= bed once the filter converges).
-    std::vector<float> reference(static_cast<size_t>(n));
-    for (auto& v : reference) v = dist(refRng);
-    reference = onePoleLowpass(reference, 0.9f);
-    float refPeak = 1e-9f;
-    for (float v : reference) refPeak = std::max(refPeak, std::abs(v));
-    for (auto& v : reference) v = 0.4f * v / refPeak;
-
-    // Broadband (flat) bed everywhere; 6s-9s swaps in HF-heavy content so
-    // the subband condition (LF quiet relative to 2-4kHz) holds solidly.
-    std::vector<float> flatBed(static_cast<size_t>(n)), hfBed(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        const float v = dist(micRng);
-        flatBed[static_cast<size_t>(i)] = v;
-        hfBed[static_cast<size_t>(i)] = v;
-    }
-    HighPassFilterChain hfShaper;
-    hfShaper.setCutoff(sampleRate, 2500.0f);
-    for (auto& v : hfBed) v = hfShaper.processSample(v);
-
-    const int hfStart = 6 * sampleRate, hfEnd = 9 * sampleRate;
-    const int delaySamples = static_cast<int>(sampleRate * 5.0 / 1000.0);
-    std::vector<float> mic(static_cast<size_t>(n), 0.0f);
-    for (int s = 0; s < n; ++s) {
-        const bool hf = (s >= hfStart && s < hfEnd);
-        float v = 0.4f * (hf ? hfBed[static_cast<size_t>(s)] : flatBed[static_cast<size_t>(s)]);
-        if (s - delaySamples >= 0) v += 0.2f * reference[static_cast<size_t>(s - delaySamples)];
-        mic[static_cast<size_t>(s)] = v;
-    }
-
-    auto makeSubbandConfig = [](int triggerThreshold, int holdDuration) {
-        auto config = makeEchoCanceller3Config(2, 1, false, 75.0f, 100.0f);
-        config.suppressor.use_subband_nearend_detection = true;
-        auto& sd = config.suppressor.subband_nearend_detection;
-        sd.subband1 = { 1, 15 };
-        sd.subband2 = { 16, 32 };
-        sd.nearend_average_blocks = 1; // no input smoothing: maximize raw chatter, isolating the hold
-        sd.nearend_threshold = 1.0f;   // flat bed -> p1 ~= p2 -> per-block coin flip
-        sd.snr_threshold = 0.0f;       // disable the noise gate; only the ratio test runs
-        sd.trigger_threshold = triggerThreshold;
-        sd.hold_duration = holdDuration;
-        return config;
-    };
-
-    const double skipS = 3.0;
-    const auto raw = runSubbandProbeRun(makeSubbandConfig(1, 2), sampleRate, reference, mic, skipS);
-    const auto held = runSubbandProbeRun(makeSubbandConfig(12, 50), sampleRate, reference, mic, skipS);
-
-    // Mean per-100ms nearend fraction inside the HF-dominant stretch (with a
-    // 0.3s margin for the trigger debounce to engage).
-    auto windowFraction = [](const SubbandProbeRunResult& res, double startS, double endS) {
-        const size_t b0 = static_cast<size_t>(startS * 10.0), b1 = static_cast<size_t>(endS * 10.0);
-        double sum = 0.0;
-        size_t count = 0;
-        for (size_t b = b0; b < b1 && b < res.binFraction.size(); ++b) { sum += res.binFraction[b]; ++count; }
-        return count > 0 ? sum / static_cast<double>(count) : 0.0;
-    };
-    const double rawHf = windowFraction(raw, 6.3, 9.0);
-    const double heldHf = windowFraction(held, 6.3, 9.0);
-
-    printf("  Unwrapped (trigger 1 / hold 2):  %.2f flips/s, nearend %.1f%% overall, %.1f%% in HF stretch\n",
-           raw.transitionsPerSecond, 100.0 * raw.overallFraction, 100.0 * rawHf);
-    printf("  With hold (trigger 12 / hold 50): %.2f flips/s, nearend %.1f%% overall, %.1f%% in HF stretch\n",
-           held.transitionsPerSecond, 100.0 * held.overallFraction, 100.0 * heldHf);
-
-    const bool rawChatters = raw.transitionsPerSecond > 5.0;        // the premise: without the hold this material flutters
-    const bool holdCalms = held.transitionsPerSecond < 0.25 * raw.transitionsPerSecond;
-    const bool holdStillHears = heldHf > 0.5;                        // sustained genuine triggering still protected
-    const bool pass = rawChatters && holdCalms && holdStillHears;
-    printf("  %s%s%s%s\n", pass ? "PASS -- hold cuts flip rate by >4x without deafening sustained triggers" : "CHECK",
-           rawChatters ? "" : " -- RAW CONFIG DIDN'T CHATTER (test premise broken)",
-           holdCalms ? "" : " -- HOLD DIDN'T REDUCE FLIPS MATERIALLY",
-           holdStillHears ? "" : " -- HOLD SUPPRESSED GENUINE SUSTAINED TRIGGERING");
-    return pass;
-}
-
-// --screenshot <out.png> [--fine-tuning] [--classic]: renders the editor to a PNG after
+// --screenshot <out.png> [--fine-tuning]: renders the editor to a PNG after
 // a few seconds of the synthetic test signals have run through the
 // processor, so the meters and status line show a realistic mid-show state.
 // For reviewing panel changes without a host; needs a display (or xvfb-run).
-// Shows the default engine (Kalman) unless --classic is given.
-int runScreenshotMode(const char* outPath, bool showFineTuning, bool classic) {
+int runScreenshotMode(const char* outPath, bool showFineTuning) {
     juce::ScopedJuceInitialiser_GUI gui;
-    gTestEngine = classic ? PAEchoCancellerAudioProcessor::engineClassic
-                          : PAEchoCancellerAudioProcessor::engineKalman;
     const int sampleRate = 48000;
     const int blockSize = 512;
     auto signals = makeSignals(sampleRate, 6.0);
 
     PAEchoCancellerAudioProcessor proc;
-    applyTestEngine(proc);
     setMonoLayout(proc);
     proc.prepareToPlay(sampleRate, blockSize);
     std::unique_ptr<juce::AudioProcessorEditor> editor(proc.createEditor());
@@ -4336,8 +2723,8 @@ int runScreenshotMode(const char* outPath, bool showFineTuning, bool classic) {
     // An adjusted overlay is the interesting state to review: the main
     // button says "adjusted" and Reset to defaults is enabled.
     if (showFineTuning)
-        proc.getProtectionHoldTimeParameter()->setValueNotifyingHost(
-            proc.getProtectionHoldTimeParameter()->convertTo0to1(250.0f));
+        proc.getResponseParameter()->setValueNotifyingHost(
+            proc.getResponseParameter()->convertTo0to1(35.0f));
     juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
 
     if (showFineTuning)
@@ -4360,13 +2747,11 @@ int runScreenshotMode(const char* outPath, bool showFineTuning, bool classic) {
 
 bool testBasicCancellation(int rate, double durationS) {
     {
-        printf("\n=== Sample rate: %d Hz (%s engine) ===\n", rate,
-               gTestEngine == PAEchoCancellerAudioProcessor::engineKalman ? "Kalman" : "Classic");
+        printf("\n=== Sample rate: %d Hz ===\n", rate);
 
         auto signals = makeSignals(rate, durationS);
 
         PAEchoCancellerAudioProcessor proc;
-        applyTestEngine(proc);
         PAEchoCancellerAudioProcessor::BusesLayout layout;
         layout.inputBuses.add(juce::AudioChannelSet::mono());
         layout.inputBuses.add(juce::AudioChannelSet::mono());
@@ -4395,11 +2780,15 @@ bool testBasicCancellation(int rate, double durationS) {
         printf("  PA-only window: mic=%.1f dBFS cleaned=%.1f dBFS reduction=%.1f dB\n", mic_pa, cleaned_pa, reductionDb);
         printf("  Voice window:   ground_truth=%.1f dBFS cleaned=%.1f dBFS error=%.1f dB\n", voice_gt, cleaned_voice, voiceErrDb);
 
-        bool pass = reductionDb > 10.0 && std::abs(voiceErrDb) < 6.0;
+        // 8 dB rather than the 10 dB the 1.0.x engine was held to: the
+        // default Amount (25%) is deliberately gentler than 1.0.x's Moderate,
+        // and this window (0-2 s) includes the canceller's start-up.
+        // testSuppressorControls covers what the stronger settings reach.
+        bool pass = reductionDb > 8.0 && std::abs(voiceErrDb) < 6.0;
         printf("  %s\n", pass ? "PASS" : "CHECK");
 
-        writeWav16("plugin_verify_" + std::string(gTestEngine == PAEchoCancellerAudioProcessor::engineKalman ? "kalman_" : "") + std::to_string(rate) + "_mic.wav", signals.mic, rate);
-        writeWav16("plugin_verify_" + std::string(gTestEngine == PAEchoCancellerAudioProcessor::engineKalman ? "kalman_" : "") + std::to_string(rate) + "_cleaned.wav", output, rate);
+        writeWav16("plugin_verify_" + std::to_string(rate) + "_mic.wav", signals.mic, rate);
+        writeWav16("plugin_verify_" + std::to_string(rate) + "_cleaned.wav", output, rate);
         return pass;
     }
 }
@@ -4436,62 +2825,22 @@ int main(int argc, char* argv[]) {
     if (argc >= 2 && std::string(argv[1]) == "--bench-kalman")
         return runKalmanBench();
     if (argc >= 3 && std::string(argv[1]) == "--screenshot") {
-        bool fineTuning = false, classic = false;
-        for (int i = 3; i < argc; ++i) {
+        bool fineTuning = false;
+        for (int i = 3; i < argc; ++i)
             fineTuning |= std::string(argv[i]) == "--fine-tuning";
-            classic |= std::string(argv[i]) == "--classic";
-        }
-        return runScreenshotMode(argv[2], fineTuning, classic);
-    }
-
-    // --subband-probe <mic.wav> <ref.wav>: SubbandNearendDetector band-pair
-    // sweep vs the dominant-detector baseline on real material (see the
-    // block comment above runSubbandProbeMode).
-    if (argc >= 2 && std::string(argv[1]) == "--subband-probe") {
-        if (argc < 4) {
-            printf("Usage: %s --subband-probe <mic.wav> <reference.wav> [--seconds N]\n", argv[0]);
-            return 1;
-        }
-        double maxSeconds = 0.0;
-        for (int i = 4; i < argc; ++i) {
-            const std::string arg(argv[i]);
-            if (arg == "--seconds" && i + 1 < argc)
-                maxSeconds = std::atof(argv[++i]);
-        }
-        return runSubbandProbeMode(argv[2], argv[3], maxSeconds);
-    }
-
-    // --linear-probe <mic.wav> <ref.wav>: linear-filter contribution
-    // measurement on real material (see the block comment above
-    // runLinearProbeMode).
-    if (argc >= 2 && std::string(argv[1]) == "--linear-probe") {
-        if (argc < 4) {
-            printf("Usage: %s --linear-probe <mic.wav> <reference.wav> [--seconds N] [--write-outputs]\n", argv[0]);
-            return 1;
-        }
-        double maxSeconds = 0.0;
-        bool writeOutputs = false;
-        for (int i = 4; i < argc; ++i) {
-            const std::string arg(argv[i]);
-            if (arg == "--seconds" && i + 1 < argc)
-                maxSeconds = std::atof(argv[++i]);
-            else if (arg == "--write-outputs")
-                writeOutputs = true;
-        }
-        return runLinearProbeMode(argv[2], argv[3], maxSeconds, writeOutputs);
+        return runScreenshotMode(argv[2], fineTuning);
     }
 
     // --real <mic.wav> <ref.wav>: run the real-material harness instead of
     // the synthetic suite (see the block comment above runRealMaterialMode).
     if (argc >= 2 && std::string(argv[1]) == "--real") {
         if (argc < 4) {
-            printf("Usage: %s --real <mic.wav> <reference.wav> [--seconds N] [--write-outputs] [--irregular] [--engine kalman|classic]\n", argv[0]);
+            printf("Usage: %s --real <mic.wav> <reference.wav> [--seconds N] [--write-outputs] [--irregular]\n", argv[0]);
             return 1;
         }
         double maxSeconds = 0.0; // 0 = whole file
         bool writeOutputs = false;
         bool irregularCadence = false; // --irregular: host-realistic varying block sizes (see runRealMaterialMode)
-        int engine = PAEchoCancellerAudioProcessor::engineClassic; // --engine kalman|classic
         for (int i = 4; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--seconds" && i + 1 < argc)
@@ -4500,11 +2849,8 @@ int main(int argc, char* argv[]) {
                 writeOutputs = true;
             else if (arg == "--irregular")
                 irregularCadence = true;
-            else if (arg == "--engine" && i + 1 < argc)
-                engine = std::string(argv[++i]) == "kalman" ? PAEchoCancellerAudioProcessor::engineKalman
-                                                            : PAEchoCancellerAudioProcessor::engineClassic;
         }
-        return runRealMaterialMode(argv[2], argv[3], maxSeconds, writeOutputs, irregularCadence, engine);
+        return runRealMaterialMode(argv[2], argv[3], maxSeconds, writeOutputs, irregularCadence);
     }
 
     // --bypass-only: just the bypass regression tests, for fast iteration on
@@ -4526,14 +2872,12 @@ int main(int argc, char* argv[]) {
 
     for (int rate : rates) allPass = testBasicCancellation(rate, durationS) && allPass;
 
+    allPass = testSuppressorControls(48000) && allPass;
     allPass = testClickFreeRoomChange(48000) && allPass;
-    allPass = testLiveSuppressorConfigUpdate(48000) && allPass;
     allPass = testLargeRoomBenefit(48000) && allPass;
-    allPass = testSuppressionStrengthPresets(48000) && allPass;
-    allPass = testSuppressionMeterUpdates(48000) && allPass;
-    allPass = testSuppressionMeterAfterReferenceMute(48000, 0, "Gentle") && allPass;
-    allPass = testSuppressionMeterAfterReferenceMute(48000, 1, "Moderate, default") && allPass;
-    allPass = testSuppressionMeterAfterReferenceMute(48000, 2, "Hard") && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 0.0f, "Amount 0%") && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 25.0f, "Amount 25%, default") && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 100.0f, "Amount 100%") && allPass;
     allPass = testSuppressionMeterTransientAlignment(48000) && allPass;
     allPass = testOfflineVsLiveDynamicHfContent(48000) && allPass;
     allPass = testOfflineVsLiveSpectralShiftAfterWarmup(48000) && allPass;
@@ -4542,16 +2886,9 @@ int main(int argc, char* argv[]) {
     for (int rate : rates) allPass = testDryWetAlignment(rate) && allPass;
     for (int rate : rates) allPass = testDryWetCombFiltering(rate) && allPass;
     allPass = testGetLatencySamplesAccuracyAllRates() && allPass;
-    diagnoseAec3InternalDelayAllRates();
-    allPass = testLimitHfGainToggle(48000) && allPass;
-    allPass = testDominantNearendDetectionFix(48000) && allPass;
-    allPass = testNearendSensitivityAndHoldTime() && allPass;
-    allPass = testNearendDetectorConfigMapping() && allPass;
     allPass = testReferenceMeterIncludesTrim() && allPass;
-    allPass = testAdaptationNoiseGateConfig() && allPass;
-    allPass = testLiveNearendDetectorToggle(48000) && allPass;
-    allPass = testSubbandHoldReducesFlipRate(48000) && allPass;
     allPass = testStateSaveRestore() && allPass;
+    allPass = testOldSessionRestore() && allPass;
     for (int rate : rates) allPass = testBypassRawPassthrough(rate) && allPass;
     allPass = testBypassToggleClickFree(48000) && allPass;
     allPass = testReferenceGainTrim() && allPass;
@@ -4562,37 +2899,9 @@ int main(int argc, char* argv[]) {
     allPass = testFastBounceTailLengthAppliedPromptly(48000) && allPass;
     allPass = testDelayStatsExposed(48000) && allPass;
 
-    // ---- Kalman engine: the engine-agnostic tests again, plus its own ----
-    printf("\n\n######## Kalman engine ########\n");
-    gTestEngine = PAEchoCancellerAudioProcessor::engineKalman;
-    for (int rate : rates) allPass = testBasicCancellation(rate, durationS) && allPass;
-    allPass = testSuppressionMeterAfterReferenceMute(48000, 1, "Moderate, default") && allPass;
-    allPass = testSuppressionMeterTransientAlignment(48000) && allPass;
-    allPass = testOfflineVsLiveDynamicHfContent(48000) && allPass;
-    allPass = testOfflineVsLiveSpectralShiftAfterWarmup(48000) && allPass;
-    for (int rate : rates) allPass = testDryWetAlignment(rate) && allPass;
-    for (int rate : rates) allPass = testDryWetCombFiltering(rate) && allPass;
-    allPass = testGetLatencySamplesAccuracyAllRates() && allPass;
-    allPass = testReferenceMeterIncludesTrim() && allPass;
-    allPass = testStateSaveRestore() && allPass;
-    for (int rate : rates) allPass = testBypassRawPassthrough(rate) && allPass;
-    allPass = testBypassToggleClickFree(48000) && allPass;
-    allPass = testReferenceGainTrim() && allPass;
-    for (int rate : rates) allPass = testOversizedHostBlock(rate) && allPass;
-    for (int rate : rates) allPass = testNonFiniteInputRecovery(rate) && allPass;
-    for (int rate : rates) allPass = testLiveTailLengthChangeNonBlocking(rate) && allPass;
-    allPass = testFastBounceTailLengthAppliedPromptly(48000) && allPass;
-    allPass = testDelayStatsExposed(48000) && allPass;
-    allPass = testEngineSwitch(48000) && allPass;
-    gTestEngine = PAEchoCancellerAudioProcessor::engineClassic;
-
     printf("\n%s\n", allPass ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
 
     benchmarkTailLengthCpuCost(48000);
-    printf("\n(Kalman engine)\n");
-    gTestEngine = PAEchoCancellerAudioProcessor::engineKalman;
-    benchmarkTailLengthCpuCost(48000);
-    gTestEngine = PAEchoCancellerAudioProcessor::engineClassic;
 
     return allPass ? 0 : 1;
 }

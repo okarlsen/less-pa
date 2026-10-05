@@ -33,7 +33,7 @@ public:
     // being poisoned; resetting on a non-finite *output* additionally
     // self-heals a filter whose state has somehow already gone bad (e.g.
     // from a coefficient update mid-blowup), rather than propagating it
-    // downstream into AEC3's adaptive filter, which would latch it too.
+    // downstream into the canceller's adaptive filter, which would latch it too.
     float processSample(float x) {
         if (!std::isfinite(x))
             x = 0.0f;

@@ -11,7 +11,8 @@
 #include <vector>
 
 // Full-band partitioned-block frequency-domain Kalman filter (PB-FDKF) echo
-// canceller with a low-latency Wiener suppressor -- the "Kalman" engine.
+// canceller with a low-latency Wiener suppressor -- Less PA's canceller
+// since 1.1.0, replacing the WebRTC AEC3 engine of 1.0.x.
 // Port of research/kalman/fdkf_x.py (the configuration tuned on the LS26 and
 // Oslo Spektrum recordings), after Enzner & Vary 2006 / Kuech et al. 2014.
 //
@@ -31,10 +32,19 @@
 class KalmanEchoCanceller {
 public:
     struct SuppressorSettings {
-        float beta = 0.3f;       // residual-echo share of the echo estimate (model mismatch, PA distortion)
-        float overSub = 2.0f;    // over-subtraction of the residual-echo estimate
-        float floorDb = -18.0f;  // deepest per-bin cut
+        float beta = 0.15f;        // residual-echo share of the echo estimate (model mismatch, PA distortion)
+        float overSub = 0.75f;     // over-subtraction of the residual-echo estimate; 0 = filter only
+        float floorDb = -12.0f;    // deepest per-bin cut
+        float responseMs = 20.0f;  // time constant of the suppressor's power and gain smoothing
     };
+
+    // The panel's Amount (0..1) as suppressor settings: 0 is the bare
+    // filter, 1 the strongest setting tried on the recordings.
+    static SuppressorSettings settingsForAmount(float amount, float maxReductionDb, float responseMs)
+    {
+        const float a = std::clamp(amount, 0.0f, 1.0f);
+        return { 0.6f * a, 3.0f * a, maxReductionDb, responseMs };
+    }
 
     static int blockSizeForRate(double sampleRate) { return sampleRate > 64000.0 ? 256 : 128; }
     static constexpr int firLength = 128;
@@ -99,6 +109,7 @@ public:
                     static_cast<float>(win * w * std::cos(2.0 * juce::MathConstants<double>::pi * j * m / L) / L);
             }
         }
+        setSuppressor(supp); // the smoothing depends on the block size and rate
         reset();
     }
 
@@ -147,7 +158,14 @@ public:
         activePartitions = p;
     }
 
-    void setSuppressor(const SuppressorSettings& s) { supp = s; }
+    // Live and allocation-free: takes effect from the next block.
+    void setSuppressor(const SuppressorSettings& s)
+    {
+        supp = s;
+        const double tau = std::max(1.0, static_cast<double>(s.responseMs)) * 1e-3;
+        suppSmooth = static_cast<float>(std::exp(-static_cast<double>(N) / (tau * fs)));
+        floorGain = std::pow(10.0f, std::min(0.0f, s.floorDb) / 20.0f);
+    }
 
     int getBlockSize() const noexcept { return N; }
 
@@ -198,7 +216,7 @@ private:
 
     // Level-relative start. A fixed starting uncertainty only suits one
     // mic/PA level ratio: too small and the filter learns for minutes (LS26
-    // 56-66 min: ~2 min behind Classic), too large and it can lose its lock
+    // 56-66 min: ~2 min behind the old AEC3 engine), too large and it can lose its lock
     // later (LS26 Pub 2). So once startSeconds of PA (ref blocks above
     // startRefPower) have been seen, the uncertainty restarts at
     // startScale * mic power / ref power -- the echo-path gain it may have to
@@ -234,7 +252,6 @@ private:
     static constexpr float psiFloor = 1e-10f;
     static constexpr float cPad = 0.5f;         // |X|^2 of a 2N frame vs |E|^2 of N samples zero-padded
     static constexpr float guardSmooth = 0.9f;
-    static constexpr float suppSmooth = 0.7f;
     static constexpr int constraintStride = 64; // gradient constraint on 1 partition in 64 per block
     static constexpr double startSeconds = 3.0;    // PA needed before the level-relative start
     static constexpr double startRefPower = 1e-5;  // a "PA-active" ref block: mean square above -50 dBFS
@@ -470,7 +487,7 @@ private:
         const float* e = timeScratch.data() + N;
 
         // --- suppressor: per-bin Wiener gain from the Kalman residual-echo estimate ---
-        const float gmin = std::pow(10.0f, supp.floorDb / 20.0f);
+        const float gmin = floorGain;
         for (int k = 0; k < K; ++k) {
             const size_t kk = static_cast<size_t>(k);
             const float mm = m[kk];
@@ -529,6 +546,8 @@ private:
     uint32_t recentCount = 0;
     std::unique_ptr<juce::dsp::FFT> fft;
     SuppressorSettings supp;
+    float suppSmooth = 0.875f; // exp(-N / (responseMs * fs)), set by setSuppressor
+    float floorGain = 0.25f;
     std::atomic<int> delayEstimateMs{ -1 };
 
     std::vector<float> xr, xi, x2, xbuf;
