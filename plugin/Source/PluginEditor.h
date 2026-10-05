@@ -25,9 +25,9 @@ private:
     //
     // Three columns, one panel each, reading left to right as the signal
     // flows: INPUT (what reaches the canceller, and its levels) ->
-    // CANCELLATION (stage 1, the canceller, then stage 2, the bleed
-    // suppressor) -> OUTPUT (what the canceller is
-    // doing, and the mix). Every control is on this one page.
+    // PA CANCELLER then BLEED SUPPRESSOR (the two stages) -> OUTPUT (what
+    // the canceller is doing, and the mix). Every control is on this one
+    // page.
     static constexpr int designWidth = 768;
     static constexpr int designHeight = 432;
 
@@ -75,9 +75,9 @@ private:
     static constexpr int labelledCombo = controlLabelRow + comboRow;
     static constexpr int meterPair = 2 * meterRowHeight + meterRowGap;
 
-    static constexpr int resetButtonWidth = 64; // sits in the BLEED SUPPRESSOR header row
+    static constexpr int resetButtonWidth = 64; // Defaults, in the BLEED SUPPRESSOR header row
 
-    // The CANCELLATION column holds two stages, so its second header and
+    // The middle column holds two stages, so its second header and
     // sliders sit closer than the other columns' controls to fit.
     static constexpr int stageGap = 14;       // Tail Length to the suppressor's header
     static constexpr int stageHeaderGap = 8;  // suppressor header to Strength
@@ -102,7 +102,7 @@ private:
     static_assert(sectionHeaderRow + headerGap + labelledCombo + stageGap + sectionHeaderRow
                           + stageHeaderGap + 3 * labelledSlider + 2 * stageControlGap
                       <= panelBodyHeight,
-                  "CANCELLATION rows must fit the panel");
+                  "PA CANCELLER and BLEED SUPPRESSOR rows must fit the panel");
     static_assert(sectionHeaderRow + headerGap + meterPair + meterBlockGap + labelledSlider
                           + controlGap + 2 * statusRow
                       <= panelBodyHeight,
@@ -138,7 +138,7 @@ private:
     void resetSuppressorToDefaults();
 
     // The bleed suppressor's controls (Strength, Range, Time) -- the one list
-    // both the Reset button's enabled state and the reset itself work from.
+    // both the Defaults button's enabled state and the reset itself work from.
     // Tail Length is left out on purpose: it is a venue choice, not a
     // sound-shaping setting someone would want undone with it.
     std::array<juce::RangedAudioParameter*, 3> getSuppressorParameters() const;
@@ -177,10 +177,9 @@ private:
     juce::Label suppressorSectionLabel{ "suppressorSectionLabel", "BLEED SUPPRESSOR" };
     juce::Label outputSectionLabel{ "outputSectionLabel", "OUTPUT" };
 
-    // Puts Strength, Range and Time back to their defaults; the canceller's
-    // learned filter is untouched ("Reset" read as relearning). Greyed
-    // out when they already are, so it also answers "have I changed
-    // anything here?" at a glance.
+    // Defaults: puts Strength, Range and Time back to their defaults; the
+    // canceller's learned filter is untouched. Greyed out when they already
+    // are, so it also answers "have I changed anything here?" at a glance.
     juce::TextButton resetButton{ "Defaults" };
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };

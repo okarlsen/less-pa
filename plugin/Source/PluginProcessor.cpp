@@ -15,9 +15,9 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
     // it. Tail Length, HPF Frequency, PA Reference Trim, Mix and Bypass
     // keep the IDs they had in 1.0.x, so old sessions and automation carry
     // over. The bleed suppressor's Strength, Range and Time (IDs amount,
-    // maxReduction and response) are new: a 1.0.x session
-    // starts them at their defaults, and the removed Classic-engine
-    // controls' saved values are simply ignored (see setStateInformation).
+    // maxReduction and response) came in 1.1.0: a 1.0.x session starts them
+    // at their defaults, and saved values of controls that no longer exist
+    // are ignored (see setStateInformation).
     addParameter(tailLengthParam = new juce::AudioParameterChoice(
         "tailLength", "Tail Length",
         juce::StringArray{ "50 ms - small room", "200 ms - club / theatre", "400 ms - hall", "800 ms - arena / outdoor" }, 3));
@@ -258,10 +258,8 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     // from the next block. Cheap enough to just apply every block.
     updateKalmanSettings();
 
-    // HPF frequency changed: just swap the IIR
-    // coefficients in place. The filter's internal state persists across
-    // the change, which is the normal, click-free way to handle a live
-    // coefficient update (no rebuild/silence needed).
+    // HPF frequency changed: swap the IIR coefficients in place. The
+    // filter's state persists across the change, so it is click-free.
     const float desiredHpfFrequency = hpfFrequencyParam->get();
     if (std::abs(desiredHpfFrequency - appliedHpfFrequency) > 0.01f) {
         for (auto& chain : inputHpfChains)
@@ -498,11 +496,7 @@ void PAEchoCancellerAudioProcessor::getStateInformation(juce::MemoryBlock& destD
 {
     // Keyed by each parameter's own paramID (stable across releases) rather
     // than list position, so adding/reordering parameters later can't shift
-    // a saved project's values onto the wrong control -- exactly what
-    // silently happened here before this existed, since these two functions
-    // were no-ops: every parameter reset to its constructor default on
-    // every reload, discarding whatever Tail Length/HPF/Dry-Wet/Suppression
-    // Strength had actually been dialed in.
+    // a saved project's values onto the wrong control.
     juce::ValueTree state("PAEchoCancellerState");
     for (auto* param : getParameters())
         if (auto* withId = dynamic_cast<juce::AudioProcessorParameterWithID*>(param))

@@ -113,19 +113,18 @@ private:
     // from zero. The near part, where most of the echo is, is kept.
     juce::AudioParameterChoice* tailLengthParam = nullptr;
 
-    // Amount (0..100%): how hard the suppressor works on what the filter
-    // leaves behind. 0% is the adaptive filter alone. Max Reduction (dB) is
-    // the deepest cut the suppressor may make in any band, and Response
-    // (ms) how fast its gains follow the signal: short is tighter on the
-    // PA, long is smoother on the crowd. See
+    // The bleed suppressor. Strength (ID amount, 0..100%): how hard it
+    // ducks what the filter leaves behind; 0% is the adaptive filter alone.
+    // Range (ID maxReduction, dB): the deepest cut it may make in any band.
+    // Time (ID response, ms): how fast its gains follow the signal; short is
+    // tighter on the PA, long is smoother on the crowd. See
     // KalmanEchoCanceller::settingsForAmount for the mapping.
     juce::AudioParameterFloat* amountParam = nullptr;
     juce::AudioParameterFloat* maxReductionParam = nullptr;
     juce::AudioParameterFloat* responseParam = nullptr;
 
-    // Dry/Wet: blends back a delay-matched copy of the post-HPF (pre-
-    // canceller) dry signal, so how much of the room survives can be
-    // dialed back by ear.
+    // Mix: blends back a delay-matched copy of the post-HPF (pre-canceller)
+    // dry signal, so how much of the room survives can be dialed back by ear.
     //
     // Getting the dry path sample-aligned with wet needs two separate
     // fixes, addressing two separate sources of delay:
@@ -152,11 +151,11 @@ private:
     void resyncDryDelay();
 
     // Bypass path: a delay-matched copy of the TRULY raw input -- captured
-    // before inputHpfChains runs, unlike the Dry/Wet dry tap
-    // (dryFrameScratch), which is post-HPF and therefore can't double as a
-    // bypass (a bypassed plugin must pass the input through completely
-    // unmodified, HPF included). Same three-FIFO delay-matching mechanism
-    // as Dry/Wet, one stage per source of delay:
+    // before inputHpfChains runs, unlike the Mix dry tap (dryFrameScratch),
+    // which is post-HPF and therefore can't double as a bypass (a bypassed
+    // plugin must pass the input through completely unmodified, HPF
+    // included). Same delay-matching mechanism as Mix, one stage per source
+    // of delay:
     //   bypassInFifos      mirrors micInFifos' frame-accumulation wait (raw
     //                      samples only leave when a full frame leaves
     //                      micInFifos -- identical counts at identical
@@ -180,7 +179,7 @@ private:
     std::vector<std::vector<float>> bypassFrameScratch;  // [channel][sample], sized to frameSize
     std::vector<std::vector<float>> bypassOutputScratch; // [channel][sample], sized to samplesPerBlock
     // Toggling crossfades over ~5ms rather than switching per-sample like
-    // the wetMix blend does. wetMix gets away with an instant switch
+    // the Mix blend does. Mix gets away with an instant switch
     // because a human dragging a slider is its own ramp; bypass is clicked
     // or automated by the host as a step, which must not click. The two
     // streams being crossfaded are latency-matched, so the short overlap
@@ -210,15 +209,13 @@ private:
     // buffer and FIFO above is sized against it. JUCE documents that figure
     // as the *expected* block size, not a hard guarantee, and hosts do exceed
     // it in practice (notably when switching between playback and offline
-    // render, which is exactly this plugin's workflow). Exceeding it used to
-    // walk straight off the end of the scratch buffers -- a confirmed
-    // segfault, not a theoretical one. processBlock now splits any oversized
-    // block into chunks of at most this many samples, which keeps every
-    // buffer within its allocation without allocating on the audio thread.
+    // render). processBlock splits any oversized block into chunks of at
+    // most this many samples, which keeps every buffer within its
+    // allocation without allocating on the audio thread.
     int preparedBlockSize = 0;
 
     // The canceller processes fixed frames of one Kalman block (128 samples
-    // at 44.1/48 kHz, 256 at 96 kHz). These FIFOs bridge the host's
+    // at 44.1/48 kHz, 256 at 88.2 kHz and above). These FIFOs bridge the host's
     // arbitrary block sizes to that frame size.
     int frameSize = 0;
 

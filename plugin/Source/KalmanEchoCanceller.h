@@ -11,16 +11,15 @@
 #include <vector>
 
 // Full-band partitioned-block frequency-domain Kalman filter (PB-FDKF) echo
-// canceller with a low-latency Wiener suppressor -- Less PA's canceller
-// since 1.1.0, replacing the WebRTC AEC3 engine of 1.0.x.
-// Port of research/kalman/fdkf_x.py (the configuration tuned on the LS26 and
-// Oslo Spektrum recordings), after Enzner & Vary 2006 / Kuech et al. 2014.
+// canceller with a low-latency Wiener suppressor, after Enzner & Vary 2006 /
+// Kuech et al. 2014. The constants were tuned on the LS26 and Oslo Spektrum
+// recordings.
 //
-// Unlike AEC3, the adaptive filter covers the whole band (0-24 kHz at
-// 48 kHz), and every bin's step size comes from the Kalman gain: how unsure
-// that bin's filter is versus how loud the crowd is in it. So it keeps
-// adapting under a permanently present crowd instead of freezing, and there
-// is no near-end/double-talk detector to switch.
+// The adaptive filter covers the whole band (0-24 kHz at 48 kHz), and every
+// bin's step size comes from the Kalman gain: how unsure that bin's filter
+// is versus how loud the crowd is in it. So it keeps adapting under a
+// permanently present crowd instead of freezing, and needs no
+// double-talk detector.
 //
 // Latency is fixed and small: one block (blockSize samples, the caller's
 // frame) plus the suppressor's linear-phase FIR (suppressorDelaySamples).
@@ -38,7 +37,7 @@ public:
         float responseMs = 30.0f;  // time constant of the suppressor's power and gain smoothing
     };
 
-    // The panel's Amount (0..1) as suppressor settings: 0 is the bare
+    // The panel's Strength (0..1) as suppressor settings: 0 is the bare
     // filter, 1 the strongest setting tried on the recordings.
     static SuppressorSettings settingsForAmount(float amount, float maxReductionDb, float responseMs)
     {
@@ -148,13 +147,17 @@ public:
     void setTailSeconds(double seconds)
     {
         const int p = std::clamp(partitionsFor(seconds), 1, maxPartitions);
-        if (p > activePartitions)
+        if (p > activePartitions) {
             for (auto& c : channels)
                 for (int q = activePartitions; q < p; ++q) {
                     std::fill_n(c.wr.begin() + q * K, K, 0.0f);
                     std::fill_n(c.wi.begin() + q * K, K, 0.0f);
                     std::fill_n(c.psi.begin() + q * K, K, c.psiStart);
                 }
+            // The delay readout's per-partition peaks from before the tail
+            // was shortened describe taps that are now zero.
+            std::fill(irPeak.begin() + activePartitions, irPeak.begin() + p, 0.0f);
+        }
         activePartitions = p;
     }
 
@@ -216,9 +219,9 @@ private:
 
     // Level-relative start. A fixed starting uncertainty only suits one
     // mic/PA level ratio: too small and the filter learns for minutes (LS26
-    // 56-66 min: ~2 min behind the old AEC3 engine), too large and it can lose its lock
-    // later (LS26 Pub 2). So once startSeconds of PA (ref blocks above
-    // startRefPower) have been seen, the uncertainty restarts at
+    // 56-66 min), too large and it can lose its lock later (LS26 Pub 2). So
+    // once startSeconds of PA (ref blocks above startRefPower) have been
+    // seen, the uncertainty restarts at
     // startScale * mic power / ref power -- the echo-path gain it may have to
     // learn. Tested on five recordings with the ref trimmed -10/0/+10 dB.
     void updateStartUncertainty(float* const* mic, const float* ref, int numCh)
@@ -245,7 +248,7 @@ private:
         startDone = true;
     }
 
-    // fdkf_x.py defaults, tuned on the real recordings
+    // Tuned on the real recordings
     static constexpr float A2 = 0.99999f * 0.99999f;
     static constexpr float psi0 = 1e-3f;
     static constexpr float lam = 0.9f;          // crowd/noise PSD smoothing

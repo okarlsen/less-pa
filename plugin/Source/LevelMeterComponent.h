@@ -8,7 +8,7 @@
 // setLevel() should be called from a UI-thread timer -- this component owns
 // the ballistics, the caller just reports facts.
 //
-// Two styles share one implementation:
+// Three styles share one implementation:
 //   signalLevel  -- input is a linear amplitude (0..1+), e.g. an audio peak.
 //                   Range is -60..0 dB, red/yellow/green like a normal meter.
 //   suppression  -- input is already in dB (measured input-to-output level
@@ -26,12 +26,9 @@ class LevelMeterComponent : public juce::Component,
 public:
     enum class Style { signalLevel, suppression, reference };
 
-    // Which way the bar grows. Defaults to vertical -- that is the shape a
-    // channel-strip meter is expected to have, and defaulting to it keeps
-    // every existing use of this component unaffected by the addition. The
-    // editor's meter bank opts into horizontal because four labelled bars
-    // stacked as rows fit a narrow column, where four side-by-side vertical
-    // bars need the width of the whole window to stay legible.
+    // Which way the bar grows. Defaults to vertical, the shape a
+    // channel-strip meter is expected to have. The editor's meters opt into
+    // horizontal because labelled bars stacked as rows fit a narrow column.
     enum class Orientation { vertical, horizontal };
 
     explicit LevelMeterComponent(Style styleIn = Style::signalLevel) : style(styleIn) {

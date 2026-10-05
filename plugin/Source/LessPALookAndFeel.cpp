@@ -5,9 +5,8 @@
 namespace {
 
 // Tooltip metrics. The font size matches JUCE's stock tooltip; the wrap width
-// is the part that differs -- 240 design px sits comfortably inside the 340px
-// editor the TooltipWindow is parented to, so long text wraps onto a second
-// line instead of running past the window edge and being clipped.
+// is the part that differs -- at 240 px a long tip wraps onto a second line
+// rather than spreading across the controls next to it.
 constexpr float tooltipFontSize = 13.0f;
 constexpr int tooltipMaxWidth = 240;
 constexpr int tooltipPaddingX = 14;
@@ -85,10 +84,6 @@ LessPALookAndFeel::LessPALookAndFeel()
     setColour(juce::PopupMenu::headerTextColourId, LessPAColours::secondaryText);
     setColour(juce::PopupMenu::highlightedBackgroundColourId, LessPAColours::accent);
     setColour(juce::PopupMenu::highlightedTextColourId, LessPAColours::windowBackground);
-
-    setColour(juce::ToggleButton::textColourId, LessPAColours::primaryText);
-    setColour(juce::ToggleButton::tickColourId, LessPAColours::accent);
-    setColour(juce::ToggleButton::tickDisabledColourId, LessPAColours::border);
 
     setColour(juce::TextButton::buttonColourId, LessPAColours::controlSurface);
     setColour(juce::TextButton::buttonOnColourId, LessPAColours::accent);
@@ -201,9 +196,9 @@ void LessPALookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, b
 
 juce::Font LessPALookAndFeel::getTextButtonFont(juce::TextButton& button, int buttonHeight)
 {
-    // Same opt-in as drawToggleButton: a text button that sits among labelled
-    // controls (Reset) asks for the label size via the
-    // "fontHeight" property, so it doesn't shout over the controls around it.
+    // A text button that sits among labelled controls (Defaults) asks for
+    // the label size via the "fontHeight" property, so it doesn't shout over
+    // the controls around it.
     // Everything else (the "?" help button) keeps JUCE's stock sizing.
     const auto requestedFontHeight = button.getProperties()["fontHeight"];
     if (!requestedFontHeight.isVoid())
@@ -217,70 +212,6 @@ juce::Font LessPALookAndFeel::getComboBoxFont(juce::ComboBox& box)
     // editor's uniform window scale. LookAndFeel_V4's version clamps at 16pt,
     // which would stop scaling partway through the resize range.
     return juce::FontOptions(juce::jlimit(9.0f, 18.0f, static_cast<float>(box.getHeight()) * 0.46f));
-}
-
-void LessPALookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButton& button,
-                                         bool shouldDrawButtonAsHighlighted,
-                                         bool /*shouldDrawButtonAsDown*/)
-{
-    // A pill switch, not LookAndFeel_V4's tick box. Both toggles here are
-    // on/off switches over a running process rather than checkboxes in a list,
-    // and the switch metaphor makes the current state readable at a glance --
-    // which matters when the operator is checking it mid-show.
-    // Proportional to the button rather than a literal 18px, so the switch
-    // follows the editor's uniform window scale instead of staying pinned at
-    // the default size while the text around it grows. 0.75 lands on the
-    // designed 18px at the 24px row height resized() uses.
-    const float pillHeight = juce::jlimit(12.0f, 28.0f, static_cast<float>(button.getHeight()) * 0.75f);
-    const float pillWidth = pillHeight * (34.0f / 18.0f); // holds the designed 34x18 shape at any scale
-    const juce::Rectangle<float> pill(0.0f,
-                                      (static_cast<float>(button.getHeight()) - pillHeight) * 0.5f,
-                                      pillWidth, pillHeight);
-
-    const bool on = button.getToggleState();
-    const float radius = pillHeight * 0.5f;
-
-    // There is no stock colour ID meaning "switch track, off", so the palette
-    // is used directly here rather than inventing a misleading mapping onto
-    // tickDisabledColourId (which means *disabled*, not off).
-    auto trackColour = on ? button.findColour(juce::ToggleButton::tickColourId)
-                          : LessPAColours::controlSurface;
-    if (shouldDrawButtonAsHighlighted)
-        trackColour = on ? LessPAColours::accentHover : trackColour.brighter(0.12f);
-
-    g.setColour(button.isEnabled() ? trackColour : trackColour.withMultipliedAlpha(0.5f));
-    g.fillRoundedRectangle(pill, radius);
-
-    if (!on) {
-        // Off, the track is barely lighter than the panel behind it -- the
-        // edge is what keeps the control from disappearing entirely.
-        g.setColour(LessPAColours::border);
-        g.drawRoundedRectangle(pill.reduced(0.5f), radius, 1.0f);
-    }
-
-    constexpr float knobInset = 2.0f;
-    const float knobDiameter = pillHeight - knobInset * 2.0f;
-    const float knobX = on ? pill.getRight() - knobInset - knobDiameter : pill.getX() + knobInset;
-
-    g.setColour(on ? LessPAColours::windowBackground : LessPAColours::secondaryText);
-    g.fillEllipse(knobX, pill.getY() + knobInset, knobDiameter, knobDiameter);
-
-    auto textColour = button.findColour(juce::ToggleButton::textColourId);
-    g.setColour(button.isEnabled() ? textColour : textColour.withMultipliedAlpha(0.5f));
-    // Height-proportional by default, so a toggle's text scales with the
-    // window like everything else. juce::ToggleButton has no setFont(), so a
-    // caller needing a specific size asks for one via a component property.
-    // Absent the property, the default below applies.
-    const auto requestedFontHeight = button.getProperties()["fontHeight"];
-    g.setFont(juce::FontOptions(requestedFontHeight.isVoid()
-                                    ? juce::jlimit(9.0f, 18.0f,
-                                                   static_cast<float>(button.getHeight()) * 0.55f)
-                                    : static_cast<float>(requestedFontHeight)));
-    g.drawFittedText(button.getButtonText(),
-                     button.getLocalBounds()
-                         .withTrimmedLeft(juce::roundToInt(pillWidth) + 10)
-                         .withTrimmedRight(2),
-                     juce::Justification::centredLeft, 1);
 }
 
 void LessPALookAndFeel::drawLabel(juce::Graphics& g, juce::Label& label)

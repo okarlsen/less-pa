@@ -3,6 +3,21 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The PA delay readout could briefly show a stale delay after Tail Length was
+  shortened and then lengthened again.
+
+### Changed
+
+- The help and README describe the Bleed Suppressor's frequency resolution
+  correctly: it estimates per filter bin (about 170-190 Hz apart) and applies
+  its gains through a 128-tap linear-phase filter, so the ducking acts on
+  bands a few hundred hertz wide. The help's latency note now says 320
+  samples applies at 88.2 kHz and above.
+
 ## [1.1.0]
 
 ### Changed

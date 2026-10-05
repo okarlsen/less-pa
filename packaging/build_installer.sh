@@ -63,8 +63,7 @@ lesspa_check_no_stray_dylibs "$AU_BUNDLE" "$VST3_BUNDLE"
 lesspa_prepare_bundles "$AU_BUNDLE" "$VST3_BUNDLE"
 
 # Remove only this script's own outputs, not the whole build directory --
-# build_beta_zip.sh writes its zip here too, and blowing that away depending
-# on which script ran last is a needless footgun.
+# build_zip.sh writes its zip here too.
 rm -rf "$STAGE_DIR" "$BUILD_DIR/resources" "$BUILD_DIR/distribution.xml" \
     "$BUILD_DIR/LessPA-AU.pkg" "$BUILD_DIR/LessPA-VST3.pkg"
 mkdir -p "$STAGE_DIR/au" "$STAGE_DIR/vst3"

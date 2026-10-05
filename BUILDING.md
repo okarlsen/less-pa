@@ -29,9 +29,6 @@ If you already cloned without `--recurse-submodules`:
 git submodule update --init --recursive
 ```
 
-A checkout from before 1.1.0 also has a `webrtc-audio-processing/` directory
-from the old two-stage build. Nothing uses it any more; it can be deleted.
-
 ## Build the plugin
 
 ```sh
