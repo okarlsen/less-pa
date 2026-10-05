@@ -44,6 +44,9 @@ All notable changes to Less PA are documented here. Versions follow
   every host buffer size. Previously, buffer sizes that are a multiple of
   the internal frame could make the audio arrive earlier than reported, and
   the first frame after a reset could drop out briefly.
+- The installer shows the AU and VST3 choice on its Installation Type step,
+  as its welcome text says. (The .pkg first uploaded for 1.1.0 hid it behind
+  a Customize button; it was replaced the same day.)
 
 ## [1.0.4]
 

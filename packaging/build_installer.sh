@@ -107,13 +107,16 @@ if [[ -f "$LOGO" ]]; then
     BACKGROUND_XML='<background file="background.png" alignment="bottomleft" scaling="proportional"/>'
 fi
 
+# customize="always" opens the Installation Type step on the AU/VST3 choice
+# list itself. With "allow" the list hid behind a Customize button that
+# was easy to miss, so the welcome text's promise of a choice went unmet.
 cat > "$BUILD_DIR/distribution.xml" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
     <title>Less PA $VERSION</title>
     <welcome file="welcome.txt" mime-type="text/plain"/>
     $BACKGROUND_XML
-    <options customize="allow" require-scripts="false" hostArchitectures="arm64"/>
+    <options customize="always" require-scripts="false" hostArchitectures="arm64"/>
     <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false"/>
     <choices-outline>
         <line choice="au"/>
