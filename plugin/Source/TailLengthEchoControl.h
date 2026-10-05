@@ -215,6 +215,27 @@ inline webrtc::EchoCanceller3Config makeEchoCanceller3Config(int tailLengthIndex
     const size_t lengthBlocks = tailLengthToFilterLengthBlocks(tailLengthIndex);
     config.filter.refined.length_blocks = lengthBlocks;
     config.filter.coarse.length_blocks = lengthBlocks;
+
+    // AEC3's adaptive filters only update a frequency bin while that bin's
+    // reference power is above a fixed, absolute noise gate (the stock 2.0e7 is
+    // tuned for speech-level references; refined_filter_update_gain.cc and
+    // coarse_filter_update_gain.cc set the step size to 0 below it). A PA feed
+    // is typically ~-36dBFS RMS with little high-frequency energy, so most bins
+    // sat under the gate and barely adapted -- and flipped on and off as the
+    // level crossed it, which is why a 0.7dB Reference Trim change could swing
+    // high-frequency cancellation by >10dB. Lowering it 100x keeps the gate's
+    // job (ignore a near-silent reference) while letting a normal PA feed adapt
+    // across a wide level range. Measured on an 8-minute PA-heavy recording
+    // swept over reference peaks of -39..+6 dBFS: with the stock gate the >6kHz
+    // PA removal collapsed below about -27dBFS peaks (4dB at -36dBFS); with
+    // this gate it stays within ~1.6dB of the best level down to -36dBFS
+    // (12.6dB at -36dBFS). 2e5 and 2e4 measured the same. The PA-ref meter's
+    // target zone (PluginEditor.cpp) is set from that sweep.
+    constexpr float kAdaptationNoiseGate = 2.0e5f;
+    config.filter.refined.noise_gate = kAdaptationNoiseGate;
+    config.filter.coarse.noise_gate = kAdaptationNoiseGate;
+    config.filter.refined_initial.noise_gate = kAdaptationNoiseGate;
+    config.filter.coarse_initial.noise_gate = kAdaptationNoiseGate;
     // refined_initial/coarse_initial deliberately left at their defaults:
     // they're the short, fast-converging filter used for the first
     // initial_state_seconds before AEC3 switches to the (possibly much

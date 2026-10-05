@@ -714,15 +714,20 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     auto mainOut = getBusBuffer(buffer, false, 0);
     auto refIn = getBusBuffer(buffer, true, 1);
 
+    const float refGainLinear = juce::Decibels::decibelsToGain(referenceGainParam->get());
+
     inputPeakLevelPre.store(mainIn.getMagnitude(0, totalNumSamples), std::memory_order_relaxed);
+    // The PA-ref meter has a target zone (see PluginEditor), so even its
+    // "pre-HPF" reading must be the level after PA Reference Trim -- the level
+    // the canceller actually receives -- or turning the trim would not move
+    // the bar toward the zone.
     sidechainPeakLevelPre.store(
-        refIn.getNumChannels() > 0 ? refIn.getMagnitude(0, totalNumSamples) : 0.0f,
+        refIn.getNumChannels() > 0 ? refIn.getMagnitude(0, totalNumSamples) * refGainLinear : 0.0f,
         std::memory_order_relaxed);
 
     const webrtc::StreamConfig refStreamConfig(static_cast<int>(currentSampleRate), 1);
     const webrtc::StreamConfig micStreamConfig(static_cast<int>(currentSampleRate), static_cast<size_t>(numMicChannels));
 
-    const float refGainLinear = juce::Decibels::decibelsToGain(referenceGainParam->get());
     const float wetMix = juce::jlimit(0.0f, 1.0f, dryWetMixParam->get() / 100.0f);
 
     // Everything below works on at most preparedBlockSize samples at a time,

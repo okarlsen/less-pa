@@ -3,7 +3,7 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.4]
 
 ### Changed
 
@@ -20,7 +20,8 @@ All notable changes to Less PA are documented here. Versions follow
 - A status line under the output meters says whether the canceller has a PA
   signal, is locking on, or is cancelling.
 - The meters always show levels after the HPF and trim, which is what the
-  canceller is fed. The "Meters post HPF" parameter is gone; older sessions
+  canceller is fed. The PA ref meter, now in the Input column, keeps the
+  1.0.3 target zone. The "Meters post HPF" parameter is gone; older sessions
   that saved it ignore the stale value.
 
 ### Fixed
@@ -29,6 +30,23 @@ All notable changes to Less PA are documented here. Versions follow
   Length differs from the default. Previously, up to about a second at the
   start of a faster-than-realtime bounce ran on the default canceller, with
   around 11 dB less suppression.
+
+## [1.0.3]
+
+- The **PA-ref meter now has a wide target zone** (peaks of about −36 to −3
+  dBFS) and colours its bar amber below the zone, green inside it and red
+  above it. It always shows the level *after* PA Reference Trim, i.e. what the
+  canceller receives, so turning the trim moves the bar toward the zone.
+- **Adaptation now works across a much wider reference level range.** AEC3
+  only adapts a frequency bin while the reference is above a fixed absolute
+  gate, tuned for speech-level input; a PA feed recorded 10–15 dB low sat under
+  it and adapted slowly and unevenly, which made a bounce (which always starts
+  from a fresh state) differ from playback. The gate is now 100× lower. On a
+  real recording the >6 kHz PA removal at reference peaks of −36 dBFS rose from
+  4 dB to 12.6 dB, and it now stays within about 1.6 dB of the best level down
+  to that point.
+- Recommended bounce workflow: start about 10 seconds before the part you want.
+- Otherwise unchanged: same cancellation algorithm, parameters and defaults.
 
 ## [1.0.2]
 

@@ -274,6 +274,15 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
         addAndMakeVisible(meter);
     }
 
+    // Peaks of about -36..-3 dBFS. Swept over reference peaks of -39..+6 dBFS on
+    // a real PA-heavy recording: below about -36 dBFS the high frequencies stop
+    // adapting well even with the lowered adaptation gate (see
+    // kAdaptationNoiseGate); above the zone nothing gates -- PA removal keeps
+    // rising -- but audience loss grows steadily (~1-2dB near 0 dBFS) and a feed
+    // that hot risks clipping upstream. The zone is deliberately wide because a
+    // PA feed is very dynamic and cannot be held to a narrow band.
+    sidechainMeter.setTargetZone(-36.0f, -3.0f);
+
     // The canceller's state, in words, under the output meters.
     delayReadoutLabel.setJustificationType(juce::Justification::centredLeft);
     delayReadoutLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
@@ -320,7 +329,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     dryWetSlider.setTooltip("Blend cancelled vs original");
     fineTuningButton.setTooltip("Detector timing and HF clamp");
     inputMeter.setTooltip("Mic, after the HPF");
-    sidechainMeter.setTooltip("PA reference, after HPF and trim");
+    sidechainMeter.setTooltip("After HPF and trim; aim for the zone");
     suppressionMeter.setTooltip("Reduction, in vs out");
     outputMeter.setTooltip("After cancellation");
     delayReadoutLabel.setTooltip("Echo path delay estimate");
@@ -942,8 +951,14 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "=== INPUT ===\n"
         "\n"
         "PA REFERENCE TRIM\n"
-        "A gain trim on the reference only. Use it if the PA ref meter is "
-        "clipping or barely moving. Not a substitute for Suppression "
+        "A plain gain trim on the reference signal. The PA ref meter has a "
+        "wide marked zone (peaks of about -36 to -3dBFS) because a PA feed "
+        "is very dynamic: keep the loud parts inside it. A feed that sits "
+        "below the zone adapts slowly and unevenly, especially at high "
+        "frequencies, so raise the trim. Above the zone nothing breaks, but "
+        "a hotter reference also suppresses a little more of the audience "
+        "(about 1-2dB near 0dBFS) and risks clipping, so there is no "
+        "benefit in going further. Not a substitute for Suppression "
         "Strength.\n"
         "\n"
         "INPUT HPF\n"
@@ -953,7 +968,9 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "\n"
         "MIC / PA REF METERS\n"
         "Levels after the HPF (and, for the PA ref, after the trim) -- i.e. "
-        "exactly what the canceller is being fed.\n"
+        "exactly what the canceller is being fed. The PA ref meter has a "
+        "marked target zone: amber means too quiet, green means in the "
+        "zone, red means above it.\n"
         "\n"
         "\n"
         "=== CANCELLATION ===\n"
@@ -1035,7 +1052,7 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "sidechain. An offline bounce sounds the same as playing back from "
         "the same start point, including when the session's Tail Length "
         "differs from the default. The canceller learns the room from where "
-        "playback or the bounce starts, so start a few seconds before the "
+        "playback or the bounce starts, so start about 10 seconds before the "
         "part you need.\n"
         "\n"
         "\n"
