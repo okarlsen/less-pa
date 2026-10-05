@@ -25,12 +25,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../JUCE JUCE)
 
+# AAX is opt-in: JUCE ships the AAX SDK, but a Pro Tools build is only
+# useful once it can be PACE-signed, and copying it after the build writes
+# to /Library/Application Support/Avid, which needs admin rights.
+option(LESSPA_BUILD_AAX "Also build the AAX plugin (Pro Tools)" OFF)
+set(LESSPA_FORMATS AU VST3)
+if(LESSPA_BUILD_AAX)
+    list(APPEND LESSPA_FORMATS AAX)
+endif()
+
 juce_add_plugin(PAEchoCanceller
     COMPANY_NAME "SGTM"
     BUNDLE_ID com.sgtm.LessPA
     PLUGIN_MANUFACTURER_CODE Sgtm
     PLUGIN_CODE LesP
-    FORMATS AU VST3
+    FORMATS ${LESSPA_FORMATS}
+    AAX_CATEGORY NoiseReduction
     PRODUCT_NAME "Less PA"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
