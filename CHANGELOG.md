@@ -3,6 +3,14 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The installer now shows the AU and VST3 choice on its Installation Type
+  step, as its welcome text says. It used to hide it behind a Customize
+  button that was easy to miss.
+
 ## [1.1.0]
 
 ### Changed

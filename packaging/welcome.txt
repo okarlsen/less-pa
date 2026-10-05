@@ -9,8 +9,8 @@ This installer places two plugins in your personal plug-in folders:
   * VST3              ->  ~/Library/Audio/Plug-Ins/VST3/Less PA.vst3
 
 Both install into your own home folder, so no administrator password is
-needed and nothing is changed system-wide. You can deselect either format on
-the next screen if you only need one.
+needed and nothing is changed system-wide. The Installation Type step lists
+both formats, ticked; untick the one you don't need.
 
 Requirements: macOS 13 or newer on Apple Silicon, and a DAW that supports AU
 or VST3 plugins with a sidechain / second input bus.
