@@ -3,6 +3,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -79,6 +80,12 @@ public:
         mScratch.assign(static_cast<size_t>(K), 0.0f);
         egScratchR.assign(static_cast<size_t>(K), 0.0f);
         egScratchI.assign(static_cast<size_t>(K), 0.0f);
+        probeR.assign(static_cast<size_t>(K), 0.0f); probeI.assign(static_cast<size_t>(K), 0.0f);
+        irPeak.assign(static_cast<size_t>(maxPartitions), 0.0f);
+        irPeakIdx.assign(static_cast<size_t>(maxPartitions), 0);
+        const double binHz = fs / M;
+        probeLoBin = std::clamp(static_cast<int>(std::ceil(probeLoHz / binHz)), 1, K - 1);
+        probeHiBin = std::clamp(static_cast<int>(std::floor(probeHiHz / binHz)), probeLoBin, K - 1);
 
         // Zero-phase FIR from firLength/2+1 gains: h[n] = irfft(G)[n - L/2] * hann.
         const int L = firLength, H = L / 2 + 1;
@@ -111,6 +118,11 @@ public:
             c.accMic = 0.0;
             c.psiStart = psi0;
         }
+        std::fill(irPeak.begin(), irPeak.end(), 0.0f);
+        std::fill(irPeakIdx.begin(), irPeakIdx.end(), 0);
+        probeIndex = 0;
+        recentDelays.fill(-1);
+        recentCount = 0;
         accRef = 0.0;
         accBlocks = 0;
         startDone = false;
@@ -169,6 +181,8 @@ public:
         for (int ch = 0; ch < numCh; ++ch)
             processChannel(channels[static_cast<size_t>(ch)], mic[ch], P);
 
+        probeImpulseResponse(P);
+
         ++blockCount;
         if (blockCount % static_cast<uint64_t>(std::max(1.0, fs / N / 4.0)) == 0)
             updateDelayEstimate(P);
@@ -225,30 +239,84 @@ private:
     static constexpr double startSeconds = 3.0;    // PA needed before the level-relative start
     static constexpr double startRefPower = 1e-5;  // a "PA-active" ref block: mean square above -50 dBFS
     static constexpr double startScale = 1.0;
+    static constexpr double probeLoHz = 400.0;     // delay readout band
+    static constexpr double probeHiHz = 6000.0;
+    static constexpr double peakDominance = 4.0;   // peak^2 vs mean partition peak^2 to count as found
+    static constexpr float firstArrivalRatio = 0.5f;
 
     int partitionsFor(double seconds) const
     {
         return std::max(1, static_cast<int>(std::ceil(seconds * fs / N)));
     }
 
+    // PA delay readout. The filter needs no delay estimate itself (it covers
+    // the whole tail), so this is display only. Each block one partition of
+    // the (first) channel's filter is turned back into its N impulse-response
+    // taps, band-limited to probeLoHz-probeHiHz so the readout follows the
+    // direct sound rather than low-frequency room build-up, and its peak is
+    // kept. The readout is the overall peak's lag, at sample resolution,
+    // shown only when it clearly stands out, and as the median of the last
+    // few estimates so a single odd one never reaches the display.
+    void probeImpulseResponse(int P)
+    {
+        const int q = static_cast<int>(probeIndex++ % static_cast<uint64_t>(P));
+        const auto& ch = channels.front();
+        std::fill(probeR.begin(), probeR.end(), 0.0f);
+        std::fill(probeI.begin(), probeI.end(), 0.0f);
+        for (int k = probeLoBin; k <= probeHiBin; ++k) {
+            probeR[static_cast<size_t>(k)] = ch.wr[static_cast<size_t>(q * K + k)];
+            probeI[static_cast<size_t>(k)] = ch.wi[static_cast<size_t>(q * K + k)];
+        }
+        inverse(probeR.data(), probeI.data(), timeScratch2.data());
+        float peak = 0.0f;
+        int at = 0;
+        for (int n = 0; n < N; ++n) {
+            const float a = std::abs(timeScratch2[static_cast<size_t>(n)]);
+            if (a > peak) { peak = a; at = n; }
+        }
+        irPeak[static_cast<size_t>(q)] = peak;
+        irPeakIdx[static_cast<size_t>(q)] = at;
+    }
+
     void updateDelayEstimate(int P)
     {
-        const auto& ch = channels.front();
         int best = -1;
-        float bestEnergy = 0.0f, total = 0.0f;
-        for (int p = 0; p < P; ++p) {
-            float e = 0.0f;
-            for (int k = 0; k < K; ++k) {
-                const size_t i = static_cast<size_t>(p * K + k);
-                e += ch.wr[i] * ch.wr[i] + ch.wi[i] * ch.wi[i];
-            }
-            total += e;
-            if (e > bestEnergy) { bestEnergy = e; best = p; }
+        float bestPeak = 0.0f;
+        double meanSq = 0.0;
+        for (int q = 0; q < P; ++q) {
+            const float v = irPeak[static_cast<size_t>(q)];
+            meanSq += static_cast<double>(v) * v;
+            if (v > bestPeak) { bestPeak = v; best = q; }
         }
-        // "Found": one partition clearly stands out from an even spread
-        const bool found = best >= 0 && total > 1e-12f && bestEnergy > 3.0f * total / static_cast<float>(P);
-        delayEstimateMs.store(found ? static_cast<int>(std::lround(1000.0 * best * N / fs)) : -1,
-                              std::memory_order_relaxed);
+        meanSq /= P;
+        // "Found": the strongest tap clearly above the typical partition peak
+        const bool found = best >= 0 && bestPeak > 0.0f
+                        && static_cast<double>(bestPeak) * bestPeak > peakDominance * meanSq;
+        // Report the first arrival: the earliest peak within firstArrivalRatio
+        // of the strongest. Music that repeats on the beat lets the filter
+        // build echo-like taps a beat or two later (232-256 ms on LS26), and
+        // those must not win over the direct sound.
+        for (int q = 0; found && q < best; ++q)
+            if (irPeak[static_cast<size_t>(q)] >= firstArrivalRatio * bestPeak) {
+                best = q;
+                break;
+            }
+        const int estimate = found ? static_cast<int>(std::lround(
+                                         1000.0 * (best * N + irPeakIdx[static_cast<size_t>(best)]) / fs))
+                                   : -1;
+        recentDelays[static_cast<size_t>(recentCount++ % recentLen)] = estimate;
+
+        std::array<int, recentLen> sorted{};
+        int n = 0;
+        for (int d : recentDelays)
+            if (d >= 0)
+                sorted[static_cast<size_t>(n++)] = d;
+        int shown = -1;
+        if (n > recentLen / 2) { // a majority of recent estimates found one
+            std::sort(sorted.begin(), sorted.begin() + n);
+            shown = sorted[static_cast<size_t>(n / 2)];
+        }
+        delayEstimateMs.store(shown, std::memory_order_relaxed);
     }
 
     // The two per-partition inner loops, as free-standing kernels so the
@@ -452,6 +520,13 @@ private:
     double accRef = 0.0;
     int accBlocks = 0;
     bool startDone = false;
+    uint64_t probeIndex = 0;
+    int probeLoBin = 1, probeHiBin = 1;
+    std::vector<float> irPeak, probeR, probeI;
+    std::vector<int> irPeakIdx;
+    static constexpr int recentLen = 9; // ~2.25 s of readouts
+    std::array<int, recentLen> recentDelays{};
+    uint32_t recentCount = 0;
     std::unique_ptr<juce::dsp::FFT> fft;
     SuppressorSettings supp;
     std::atomic<int> delayEstimateMs{ -1 };
