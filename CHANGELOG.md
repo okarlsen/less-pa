@@ -12,10 +12,9 @@ Planned as 1.1.0.
 - **New canceller.** Less PA now uses a full-band Kalman adaptive filter
   with a light cleanup stage, in place of the WebRTC AEC3 engine of 1.0.x.
   Latency drops from about 19 ms to 192 samples (4.0 ms) at 44.1/48 kHz and
-  320 samples (3.3 ms) at 96 kHz. On three real venue recordings it removed
-  3-6 dB more PA bleed. It starts from the mic/PA level ratio, so it locks
-  on within a few seconds of PA, and every control applies live with no
-  dropout.
+  320 samples (3.3 ms) at 96 kHz. It starts from the mic/PA level ratio,
+  so it locks on within a few seconds of PA, and every control applies
+  live with no dropout.
 - **New cancellation controls.** Tail Length stays. Suppression Strength
   and Crowd Protection are replaced by **Amount** (0-100%, default 25%: how
   hard the PA left over after the filter is cleaned up; 0% is the filter
