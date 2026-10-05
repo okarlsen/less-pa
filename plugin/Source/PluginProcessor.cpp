@@ -129,28 +129,31 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
       juce::Thread("Less PA APM rebuild")
 {
     addParameter(tailLengthParam = new juce::AudioParameterChoice(
-        "tailLength", "Tail Length", juce::StringArray{ "50ms", "200ms", "400ms", "800ms" }, 3));
+        "tailLength", "Tail Length",
+        juce::StringArray{ "50 ms - small room", "200 ms - club / theatre", "400 ms - hall", "800 ms - arena / outdoor" }, 3));
     addParameter(suppressionStrengthParam = new juce::AudioParameterChoice(
         "suppressionStrength", "Suppression Strength", juce::StringArray{ "Gentle", "Moderate", "Hard" }, 1));
     auto hpfRange = juce::NormalisableRange<float>(80.0f, 300.0f, 0.1f);
     hpfRange.setSkewForCentre(150.0f);
     addParameter(hpfFrequencyParam = new juce::AudioParameterFloat(
         "hpfFrequency", "HPF Frequency", hpfRange, 150.0f));
-    addParameter(metersPostFilterParam = new juce::AudioParameterBool(
-        "metersPostFilter", "Meters Post Filter", true));
+    // "metersPostFilter" (a pre/post-HPF meter toggle) lived here until the
+    // panel redesign: the meters now always read post-HPF next to the
+    // controls that shape them, so a view setting no longer occupies a host
+    // automation slot. Sessions that saved it simply ignore the stale key.
     addParameter(referenceGainParam = new juce::AudioParameterFloat(
         "referenceGain", "PA Reference Trim",
         juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f));
     addParameter(limitHfGainParam = new juce::AudioParameterBool(
         "limitHfGain", "Limit HF Gain", false));
     addParameter(nearendSensitivityParam = new juce::AudioParameterFloat(
-        "nearendSensitivity", "Near-end Sensitivity",
+        "nearendSensitivity", "Crowd Protection",
         juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 75.0f));
     addParameter(protectionHoldTimeParam = new juce::AudioParameterFloat(
         "protectionHoldTime", "Protection Hold Time",
         juce::NormalisableRange<float>(40.0f, 800.0f, 1.0f), 100.0f)); // 75%/100ms confirmed as a good real-world setting
     addParameter(dryWetMixParam = new juce::AudioParameterFloat(
-        "dryWetMix", "Dry/Wet Mix",
+        "dryWetMix", "Mix",
         juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 100.0f)); // 100% wet: no change from AEC3's raw output by default
     // The parameters from here down were each appended strictly LAST at the
     // time they were added: verify_main.cpp addresses Tail Length and

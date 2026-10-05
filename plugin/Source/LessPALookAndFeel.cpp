@@ -199,6 +199,18 @@ void LessPALookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, b
                                                juce::PathStrokeType::rounded));
 }
 
+juce::Font LessPALookAndFeel::getTextButtonFont(juce::TextButton& button, int buttonHeight)
+{
+    // Same opt-in as drawToggleButton: a text button that sits among labelled
+    // controls (Fine tuning, Done) asks for the label size via the
+    // "fontHeight" property, so it doesn't shout over the controls around it.
+    // Everything else (the "?" help button) keeps JUCE's stock sizing.
+    const auto requestedFontHeight = button.getProperties()["fontHeight"];
+    if (!requestedFontHeight.isVoid())
+        return juce::FontOptions(static_cast<float>(requestedFontHeight));
+    return LookAndFeel_V4::getTextButtonFont(button, buttonHeight);
+}
+
 juce::Font LessPALookAndFeel::getComboBoxFont(juce::ComboBox& box)
 {
     // Proportional to the box rather than a fixed size, so it follows the
@@ -257,10 +269,8 @@ void LessPALookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButton& 
     g.setColour(button.isEnabled() ? textColour : textColour.withMultipliedAlpha(0.5f));
     // Height-proportional by default, so a toggle's text scales with the
     // window like everything else. juce::ToggleButton has no setFont(), so a
-    // caller needing a specific size -- the editor's "Meters post HPF", which
-    // has to match the meter labels it sits under rather than the controls
-    // around it -- asks for one via a component property. Absent the property
-    // (every other toggle), the default below is unchanged.
+    // caller needing a specific size asks for one via a component property.
+    // Absent the property, the default below applies.
     const auto requestedFontHeight = button.getProperties()["fontHeight"];
     g.setFont(juce::FontOptions(requestedFontHeight.isVoid()
                                     ? juce::jlimit(9.0f, 18.0f,

@@ -414,8 +414,8 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, int suppressionStren
         return false;
     }
     // Everything else stays at its plugin default (Tail Length 800ms,
-    // Near-end Sensitivity 75%, Protection Hold Time 100ms, Meters Post
-    // Filter on) -- exactly what a user hears out of the box.
+    // Near-end Sensitivity 75%, Protection Hold Time 100ms) -- exactly what
+    // a user hears out of the box.
     juce::AudioProcessorParameter* suppressionParam = proc.getSuppressionStrengthParameter();
     suppressionParam->setValueNotifyingHost(static_cast<float>(suppressionStrengthIndex) /
                                             static_cast<float>(suppressionParam->getNumSteps() - 1));
@@ -2614,7 +2614,6 @@ bool testStateSaveRestore() {
     proc.getSuppressionStrengthParameter()->setValueNotifyingHost(0.0f);     // "Gentle"
     proc.getHpfFrequencyParameter()->setValueNotifyingHost(
         proc.getHpfFrequencyParameter()->convertTo0to1(150.0f));
-    proc.getMetersPostFilterParameter()->setValueNotifyingHost(0.0f);        // off
     proc.getDryWetMixParameter()->setValueNotifyingHost(
         proc.getDryWetMixParameter()->convertTo0to1(37.0f));
     proc.getLimitHfGainParameter()->setValueNotifyingHost(1.0f);             // on
@@ -2634,19 +2633,17 @@ bool testStateSaveRestore() {
         restored.getTailLengthParameter()->getIndex() == 2 &&
         restored.getSuppressionStrengthParameter()->getIndex() == 0 &&
         std::abs(restored.getHpfFrequencyParameter()->get() - 150.0f) < 0.5f &&
-        restored.getMetersPostFilterParameter()->get() == false &&
         std::abs(restored.getDryWetMixParameter()->get() - 37.0f) < 0.5f &&
         restored.getLimitHfGainParameter()->get() == true &&
         std::abs(restored.getNearendSensitivityParameter()->get() - 42.0f) < 0.5f &&
         std::abs(restored.getProtectionHoldTimeParameter()->get() - 333.0f) < 0.5f &&
         restored.getNearendDetectorParameter()->getIndex() == 1;
 
-    printf("  Tail Length=%d Suppression=%d HPF=%.1fHz MetersPost=%d DryWet=%.1f%% LimitHfGain=%d "
+    printf("  Tail Length=%d Suppression=%d HPF=%.1fHz DryWet=%.1f%% LimitHfGain=%d "
            "NearendSensitivity=%.1f%% ProtectionHoldTime=%.1fms NearendDetector=%d\n",
            restored.getTailLengthParameter()->getIndex(),
            restored.getSuppressionStrengthParameter()->getIndex(),
            static_cast<double>(restored.getHpfFrequencyParameter()->get()),
-           static_cast<int>(restored.getMetersPostFilterParameter()->get()),
            static_cast<double>(restored.getDryWetMixParameter()->get()),
            static_cast<int>(restored.getLimitHfGainParameter()->get()),
            static_cast<double>(restored.getNearendSensitivityParameter()->get()),
@@ -4122,7 +4119,61 @@ bool testSubbandHoldReducesFlipRate(int sampleRate) {
     return pass;
 }
 
+// --screenshot <out.png> [--fine-tuning]: renders the editor to a PNG after
+// a few seconds of the synthetic test signals have run through the
+// processor, so the meters and status line show a realistic mid-show state.
+// For reviewing panel changes without a host; needs a display (or xvfb-run).
+int runScreenshotMode(const char* outPath, bool showFineTuning) {
+    juce::ScopedJuceInitialiser_GUI gui;
+    const int sampleRate = 48000;
+    const int blockSize = 512;
+    auto signals = makeSignals(sampleRate, 6.0);
+
+    PAEchoCancellerAudioProcessor proc;
+    setMonoLayout(proc);
+    proc.prepareToPlay(sampleRate, blockSize);
+    std::unique_ptr<juce::AudioProcessorEditor> editor(proc.createEditor());
+
+    const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer(totalChannels, blockSize);
+    juce::MidiBuffer midi;
+    const int n = static_cast<int>(signals.mic.size());
+    for (int pos = 0; pos + blockSize <= n; pos += blockSize) {
+        buffer.clear();
+        auto mainIn = proc.getBusBuffer(buffer, true, 0);
+        auto refIn = proc.getBusBuffer(buffer, true, 1);
+        for (int ch = 0; ch < mainIn.getNumChannels(); ++ch)
+            mainIn.copyFrom(ch, 0, signals.mic.data() + pos, blockSize);
+        for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
+            refIn.copyFrom(ch, 0, signals.reference.data() + pos, blockSize);
+        proc.processBlock(buffer, midi);
+        // Let the editor's 30Hz timer see the audio flowing near the end.
+        if (pos > n - 40 * blockSize)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(10);
+    }
+
+    if (showFineTuning)
+        for (auto* child : editor->getChildren())
+            if (auto* button = dynamic_cast<juce::TextButton*>(child))
+                if (button->getButtonText().startsWith("Fine tuning") && button->onClick)
+                    button->onClick();
+
+    const auto image = editor->createComponentSnapshot(editor->getLocalBounds(), true, 2.0f);
+    juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile(outPath);
+    out.deleteFile();
+    juce::FileOutputStream stream(out);
+    juce::PNGImageFormat png;
+    const bool ok = stream.openedOk() && png.writeImageToStream(image, stream);
+    printf("%s %s\n", ok ? "Wrote" : "FAILED to write", out.getFullPathName().toRawUTF8());
+    editor.reset();
+    proc.releaseResources();
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char* argv[]) {
+    if (argc >= 3 && std::string(argv[1]) == "--screenshot")
+        return runScreenshotMode(argv[2], argc >= 4 && std::string(argv[3]) == "--fine-tuning");
+
     // --subband-probe <mic.wav> <ref.wav>: SubbandNearendDetector band-pair
     // sweep vs the dominant-detector baseline on real material (see the
     // block comment above runSubbandProbeMode).

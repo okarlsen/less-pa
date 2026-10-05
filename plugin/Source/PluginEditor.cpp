@@ -145,14 +145,16 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     versionLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
     addAndMakeVisible(versionLabel);
 
-    for (auto* label : { &inputSectionLabel, &adaptiveSectionLabel,
-                         &residualSectionLabel, &doubleTalkSectionLabel }) {
+    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel,
+                         &outputSectionLabel, &fineTuningSectionLabel }) {
         label->setJustificationType(juce::Justification::centredLeft);
         // Secondary text: a group header names the region, it isn't a control,
         // so it should sit behind the labels it groups in the reading order.
         label->setColour(juce::Label::textColourId, LessPAColours::secondaryText);
-        addAndMakeVisible(label);
     }
+    addAndMakeVisible(inputSectionLabel);
+    addAndMakeVisible(cancellationSectionLabel);
+    addAndMakeVisible(outputSectionLabel);
 
     // Left-aligned, not centred: every control below is either full-width or
     // column-width and starts at its panel's left edge, so a centred label
@@ -165,10 +167,12 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     addAndMakeVisible(tailLengthLabel);
 
-    tailLengthCombo.addItem("50ms", 1);
-    tailLengthCombo.addItem("200ms", 2);
-    tailLengthCombo.addItem("400ms", 3);
-    tailLengthCombo.addItem("800ms", 4);
+    // The room a length suits is part of the item text: choosing by venue is
+    // the decision someone actually makes at a show.
+    tailLengthCombo.addItem("50 ms - small room", 1);
+    tailLengthCombo.addItem("200 ms - club / theatre", 2);
+    tailLengthCombo.addItem("400 ms - hall", 3);
+    tailLengthCombo.addItem("800 ms - arena / outdoor", 4);
     tailLengthCombo.onChange = [this] { tailLengthComboChanged(); };
     addAndMakeVisible(tailLengthCombo);
 
@@ -181,14 +185,11 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     addAndMakeVisible(suppressionStrengthCombo);
 
     limitHfGainToggle.onClick = [this] { limitHfGainToggleChanged(); };
-    addAndMakeVisible(limitHfGainToggle);
 
-    addAndMakeVisible(nearendDetectorLabel);
 
     nearendDetectorCombo.addItem("Classic", 1);
     nearendDetectorCombo.addItem("Subband (2-4kHz)", 2);
     nearendDetectorCombo.onChange = [this] { nearendDetectorComboChanged(); };
-    addAndMakeVisible(nearendDetectorCombo);
 
     addAndMakeVisible(nearendSensitivityLabel);
 
@@ -207,7 +208,6 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     };
     addAndMakeVisible(nearendSensitivitySlider);
 
-    addAndMakeVisible(protectionHoldTimeLabel);
 
     protectionHoldTimeSlider.setRange(40.0, 800.0);
     protectionHoldTimeSlider.setTextValueSuffix(" ms");
@@ -217,9 +217,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     protectionHoldTimeSlider.onValueChange = [this] {
         if (!protectionHoldTimeSlider.isMouseButtonDown()) protectionHoldTimeSliderChanged();
     };
-    addAndMakeVisible(protectionHoldTimeSlider);
 
-    addAndMakeVisible(transitionSmoothingLabel);
 
     transitionSmoothingSlider.setRange(0.0, 200.0);
     transitionSmoothingSlider.setTextValueSuffix(" ms");
@@ -229,7 +227,6 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     transitionSmoothingSlider.onValueChange = [this] {
         if (!transitionSmoothingSlider.isMouseButtonDown()) transitionSmoothingSliderChanged();
     };
-    addAndMakeVisible(transitionSmoothingSlider);
 
     addAndMakeVisible(hpfLabel);
 
@@ -277,16 +274,29 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
         addAndMakeVisible(meter);
     }
 
-    metersPostFilterToggle.onClick = [this] { metersPostFilterToggleChanged(); };
-    addAndMakeVisible(metersPostFilterToggle);
-
-    // Left-aligned rather than centred on the window: it shares the bottom
-    // strip with the corner wordmark (see computeLogoBounds()), so it is laid
-    // out in the space to the left of the mark and lines up with the control
-    // column above it instead of sitting visibly off-centre.
+    // The canceller's state, in words, under the output meters.
     delayReadoutLabel.setJustificationType(juce::Justification::centredLeft);
     delayReadoutLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
     addAndMakeVisible(delayReadoutLabel);
+    statusLabel.setJustificationType(juce::Justification::centredLeft);
+    statusLabel.setColour(juce::Label::textColourId, LessPAColours::primaryText);
+    addAndMakeVisible(statusLabel);
+
+    fineTuningButton.onClick = [this] { setFineTuningVisible(true); };
+    addAndMakeVisible(fineTuningButton);
+
+    // The detector's expert controls live on the overlay, which is added
+    // last so it covers columns 2 and 3 when shown.
+    fineTuningDoneButton.onClick = [this] { setFineTuningVisible(false); };
+    for (auto* component : std::initializer_list<juce::Component*>{
+             &fineTuningSectionLabel, &fineTuningDoneButton,
+             &nearendDetectorLabel, &nearendDetectorCombo, &limitHfGainToggle,
+             &protectionHoldTimeLabel, &protectionHoldTimeSlider,
+             &transitionSmoothingLabel, &transitionSmoothingSlider, &fineTuningHintLabel })
+        fineTuningOverlay.addAndMakeVisible(component);
+    fineTuningHintLabel.setJustificationType(juce::Justification::bottomLeft);
+    fineTuningHintLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
+    addChildComponent(fineTuningOverlay);
 
     // A few words each, deliberately much shorter than the corresponding
     // section of showHelpDialog(): a tooltip answers "what is this?" while the
@@ -298,22 +308,23 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // length is a readability choice here rather than a correctness one.)
     helpButton.setTooltip("Full control reference");
     versionLabel.setTooltip("Less PA v" JucePlugin_VersionString);
-    tailLengthCombo.setTooltip("Match to venue reverb tail");
+    tailLengthCombo.setTooltip("Match to the venue's reverb");
     suppressionStrengthCombo.setTooltip("Residual echo cleanup");
     limitHfGainToggle.setTooltip("Clamp HF while converging");
     nearendDetectorCombo.setTooltip("How audience is detected");
-    nearendSensitivitySlider.setTooltip("Bias toward keeping audience");
+    nearendSensitivitySlider.setTooltip("Higher keeps more crowd sound");
     protectionHoldTimeSlider.setTooltip("How long protection lasts");
     transitionSmoothingSlider.setTooltip("Anti-pump crossfade");
     hpfSlider.setTooltip("Cutoff on mic + reference");
     referenceGainSlider.setTooltip("Reference gain only");
     dryWetSlider.setTooltip("Blend cancelled vs original");
-    metersPostFilterToggle.setTooltip("Meter before or after HPF");
-    inputMeter.setTooltip("Mic input");
-    sidechainMeter.setTooltip("PA reference input");
+    fineTuningButton.setTooltip("Detector timing and HF clamp");
+    inputMeter.setTooltip("Mic, after the HPF");
+    sidechainMeter.setTooltip("PA reference, after HPF and trim");
     suppressionMeter.setTooltip("Reduction, in vs out");
     outputMeter.setTooltip("After cancellation");
     delayReadoutLabel.setTooltip("Echo path delay estimate");
+    statusLabel.setTooltip("What the canceller is doing");
 
     updateTailLengthCombo();
     updateSuppressionStrengthCombo();
@@ -324,8 +335,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     updateTransitionSmoothingSlider();
     updateHpfSlider();
     updateReferenceGainSlider();
-    updateMetersPostFilterToggle();
     updateDryWetSlider();
+    updateFineTuningButton();
     startTimerHz(30); // meter ballistics + keeps controls in sync with host automation
 }
 
@@ -360,25 +371,17 @@ PAEchoCancellerAudioProcessorEditor::computeSectionBounds() const
     bounds.footer = content.removeFromBottom(sc(footerStripHeight));
     content.removeFromBottom(sc(footerGap));
 
-    auto column1 = content.removeFromLeft(sc(columnWidth));
+    bounds.column1 = content.removeFromLeft(sc(columnWidth));
     content.removeFromLeft(sc(columnGap));
-    auto column2 = content.removeFromLeft(sc(columnWidth));
+    bounds.column2 = content.removeFromLeft(sc(columnWidth));
     content.removeFromLeft(sc(columnGap));
     // Column 3 takes what is left rather than another sc(columnWidth): five
     // independently rounded slices can be a pixel or two short of the content
-    // width, and that error would otherwise show up as a ragged right margin
-    // against the corner wordmark, which is aligned to the content edge.
-    auto column3 = content;
+    // width, which would otherwise show as a ragged right margin against the
+    // corner wordmark, aligned to the content edge.
+    bounds.column3 = content;
 
-    bounds.column1Input = column1.removeFromTop(sc(inputSectionHeight));
-    column1.removeFromTop(sc(column1BlockGap));
-    bounds.column1Output = column1.removeFromTop(sc(outputBlockHeight));
-
-    bounds.column2Adaptive = column2.removeFromTop(sc(adaptiveSectionHeight));
-    column2.removeFromTop(sc(column2PanelGap));
-    bounds.column2Residual = column2.removeFromTop(sc(residualSectionHeight));
-
-    bounds.column3DoubleTalk = column3.removeFromTop(sc(doubleTalkSectionHeight));
+    bounds.fineTuning = bounds.column2.getUnion(bounds.column3);
     return bounds;
 }
 
@@ -390,17 +393,22 @@ juce::Rectangle<int> PAEchoCancellerAudioProcessorEditor::computeLogoBounds() co
     const int height = juce::roundToInt(static_cast<float>(width) / logoAspect);
 
     // Hard against the right of the content area, vertically centred in the
-    // footer strip. Centred rather than bottom-pinned because the strip is now
-    // a slider tall and holds three things -- the readout, the inline Dry/Wet
-    // control and this mark all have to sit on one line.
-    //
-    // The delay readout and the Dry/Wet control are laid out around this
-    // rectangle in resized(), and the static_asserts in PluginEditor.h prove
-    // the three fit; the whole window scales by one factor, so proving it once
-    // proves it across the resize range.
+    // footer strip.
     auto content = getLocalBounds().reduced(sc(outerMargin));
     const auto footer = content.removeFromBottom(sc(footerStripHeight));
     return { footer.getRight() - width, footer.getCentreY() - height / 2, width, height };
+}
+
+void PAEchoCancellerAudioProcessorEditor::FineTuningOverlay::paint(juce::Graphics& g)
+{
+    // Opaque, in the panel colour with an accent outline: it has to fully
+    // hide the panels underneath, and the outline marks it as a temporary
+    // layer rather than a fourth section.
+    const auto area = getLocalBounds().toFloat();
+    g.setColour(LessPAColours::panel);
+    g.fillRoundedRectangle(area, 6.0f * scale);
+    g.setColour(LessPAColours::accent.withAlpha(0.6f));
+    g.drawRoundedRectangle(area.reduced(0.5f), 6.0f * scale, 1.0f);
 }
 
 void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
@@ -410,47 +418,12 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
 
     const auto sections = computeSectionBounds();
 
-    // Panels, no border: an outline on top of a fill would read as busier
-    // without adding any information the fill doesn't already carry, which
-    // works against the point of the style. The fill alone is enough contrast
-    // against #14161A to separate the four stages.
-    //
-    // sections.column1Output is deliberately absent: the output stage is left
-    // on the bare background so that "these four boxes are the processing
-    // chain" stays readable at a glance -- now left to right across the three
-    // columns rather than top to bottom down one.
+    // Panels, no border: the fill alone separates the three stages from the
+    // background. The meters sit inside their panels, where the lighter fill
+    // is what makes their darker idle trough read as a recessed slot.
     g.setColour(LessPAColours::panel);
-    for (const auto& panel : { sections.column1Input, sections.column2Adaptive,
-                               sections.column2Residual, sections.column3DoubleTalk })
+    for (const auto& panel : { sections.column1, sections.column2, sections.column3 })
         g.fillRoundedRectangle(panel.toFloat(), 6.0f * scale);
-
-    // A meter bridge, not a fifth section: LevelMeterComponent draws its idle
-    // trough in the *window* background (deliberately darker than a panel, so
-    // a large idle meter reads as a recessed slot rather than disappearing),
-    // which needs something lighter behind it -- and with the metering panel
-    // gone the meters would otherwise sit on that exact same colour and
-    // vanish. Sized to the bars themselves rather than the full strip width so
-    // it reads as an instrument rather than a headerless section panel.
-    //
-    // Taken from the meters' own bounds rather than re-deriving the row
-    // arithmetic here, so it cannot drift from where the Grid actually put
-    // them. Degenerate (and harmless) only before the first resized().
-    //
-    // Now that the meters are stacked rows rather than a side-by-side bank,
-    // the first meter's *label* is what sets the bridge's left edge -- the
-    // labels sit to the left of every bar, and leaving them outside the
-    // lighter rectangle would split one instrument across two backgrounds.
-    // The post-HPF toggle is the bank's last row and is unioned in for the
-    // same reason: it selects what the bars above it are showing.
-    const auto meterBars = inputMeterLabel.getBounds()
-                               .getUnion(inputMeter.getBounds())
-                               .getUnion(outputMeter.getBounds())
-                               .getUnion(metersPostFilterToggle.getBounds());
-    if (!meterBars.isEmpty())
-        g.fillRoundedRectangle(meterBars.expanded(juce::roundToInt(8.0f * scale),
-                                                  juce::roundToInt(6.0f * scale))
-                                   .toFloat(),
-                               6.0f * scale);
 
     // Left-aligned on the same x as every section header below it, and trimmed
     // clear of the version label and help button on the right.
@@ -471,9 +444,6 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawFittedText("PA bleed removal for audience mics", titleArea,
                      juce::Justification::centredLeft, 1);
 
-    // The company mark, small and last in the reading order. Placement::centred
-    // scales to fit while preserving aspect, so the ~4:1 wordmark fills the
-    // rectangle computeLogoBounds() already sized to that ratio.
     if (logoImage.isValid())
         g.drawImage(logoImage, computeLogoBounds().toFloat(), juce::RectanglePlacement::centred);
 }
@@ -497,8 +467,8 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     // stale text-box size would silently cap the value text at the default
     // size. Both are skipped when unchanged so the common
     // "same size, re-laid out" path doesn't rebuild the sliders' text boxes.
-    for (auto* label : { &inputSectionLabel, &adaptiveSectionLabel,
-                         &residualSectionLabel, &doubleTalkSectionLabel })
+    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel,
+                         &outputSectionLabel, &fineTuningSectionLabel })
         label->setFont(juce::FontOptions(scale * 11.0f).withStyle("Bold"));
 
     for (auto* label : { &tailLengthLabel, &suppressionStrengthLabel, &nearendDetectorLabel,
@@ -509,15 +479,12 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     for (auto* label : { &inputMeterLabel, &sidechainMeterLabel, &outputMeterLabel,
                          &suppressionMeterLabel, &delayReadoutLabel })
         label->setFont(juce::FontOptions(scale * 12.0f));
-
-    // The post-HPF toggle is the meter bank's last row, so its text is set to
-    // the meter-label size rather than the height-proportional size every
-    // other toggle gets -- it names part of the instrument, not a control.
-    // juce::ToggleButton has no setFont(), so it is requested by property and
-    // honoured in LessPALookAndFeel::drawToggleButton; the explicit repaint is
-    // because a property change alone does not invalidate the component.
-    metersPostFilterToggle.getProperties().set("fontHeight", scale * 12.0f);
-    metersPostFilterToggle.repaint();
+    statusLabel.setFont(juce::FontOptions(scale * 12.5f).withStyle("Bold"));
+    fineTuningHintLabel.setFont(juce::FontOptions(scale * 12.0f));
+    for (auto* button : { &fineTuningButton, &fineTuningDoneButton }) {
+        button->getProperties().set("fontHeight", scale * 12.5f);
+        button->repaint(); // a property change alone doesn't invalidate it
+    }
 
     juce::Slider* const sliders[] = { &nearendSensitivitySlider, &protectionHoldTimeSlider,
                                       &transitionSmoothingSlider, &hpfSlider,
@@ -528,143 +495,135 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         if (slider->getTextBoxWidth() != textBoxWidth || slider->getTextBoxHeight() != textBoxHeight)
             slider->setTextBoxStyle(juce::Slider::TextBoxRight, false, textBoxWidth, textBoxHeight);
 
-    // A labelled slider is always a 16px label sitting directly on top of its
-    // own 26px slider, with the separating air above the pair rather than
-    // between them -- that pairing is what makes a column of sliders readable.
-    // The leading gap is passed in rather than fixed: columns 2 and 3 use a
-    // deliberately larger one (see the constants in PluginEditor.h).
-    // The area a panel's rows are laid out in. The top inset is always
-    // panelPaddingY, whatever column the panel is in -- that is what puts the
-    // three top-row section headers on one line. Only the bottom inset varies,
-    // which is how columns 2 and 3 get their extra breathing room.
-    //
-    // Deliberately not Rectangle::reduced(x, y): that insets top and bottom by
-    // the same amount, so giving columns 2 and 3 more vertical padding also
-    // pushed their headers down relative to column 1's. That bug shipped to
-    // the user's host and was visible immediately as three misaligned headers.
-    const auto panelBody = [&sc](juce::Rectangle<int> panel, int bottomPaddingDesignPx) {
+    // The area a panel's rows are laid out in. Every panel uses the same
+    // insets, which is what puts the three section headers on one line.
+    const auto panelBody = [&sc](juce::Rectangle<int> panel) {
         return panel.reduced(sc(panelPaddingX), 0)
-            .withTrimmedTop(sc(panelPaddingY))
-            .withTrimmedBottom(sc(bottomPaddingDesignPx));
+            .withTrimmedTop(sc(panelPaddingTop))
+            .withTrimmedBottom(sc(panelPaddingBottom));
     };
 
-    struct LabelledSlider { juce::Label* label; juce::Slider* slider; };
-    const auto addSliderRows = [](SectionGrid& grid, int gapDesignPx,
-                                  std::initializer_list<LabelledSlider> rows) {
-        for (auto& labelled : rows) {
-            grid.gap(gapDesignPx); // separates this pair from whatever precedes it
-            grid.row(controlLabelRow, *labelled.label);
-            grid.row(sliderRow, *labelled.slider); // no gap: the label belongs to this slider
-        }
+    // A labelled control is always a 16px label sitting directly on top of
+    // its own control, with the separating air above the pair rather than
+    // between them -- that pairing is what makes a column readable.
+    const auto addLabelled = [](SectionGrid& grid, int gapDesignPx, juce::Label& label,
+                                juce::Component& control, int controlRowDesignPx) {
+        grid.gap(gapDesignPx);
+        grid.row(controlLabelRow, label);
+        grid.row(controlRowDesignPx, control);
     };
 
-    // COLUMN 1 -- INPUT CONDITIONING. No separate gap after the header here:
-    // the first pair's own leading column1ControlGap already provides it.
-    // (Every row list below is proved against its section-height constant by
-    // the static_asserts in PluginEditor.h.)
+    // Meters are laid out in their own two-column grid -- a fixed-width
+    // column for the names so they line up as a block, and the bars filling
+    // the rest -- placed in whatever area the panel's own grid left for them.
+    const auto layoutMeters = [&](juce::Rectangle<int> area, juce::Label& label1, LevelMeterComponent& meter1,
+                                  juce::Label& label2, LevelMeterComponent& meter2) {
+        SectionGrid grid(2, scale, meterLabelGap, meterLabelWidth);
+        grid.meterRow(meterRowHeight, label1, meter1, meterBarHeight);
+        grid.gap(meterRowGap);
+        grid.meterRow(meterRowHeight, label2, meter2, meterBarHeight);
+        grid.performLayout(area);
+    };
+
+    // COLUMN 1 -- INPUT: the two things that shape what the canceller hears,
+    // with the two meters they move directly underneath. Gain-staging the PA
+    // reference is a look-at-the-meter-while-turning-the-knob job.
     {
+        auto body = panelBody(sections.column1);
         SectionGrid grid(1, scale, 0);
         grid.row(sectionHeaderRow, inputSectionLabel);
-        addSliderRows(grid, column1ControlGap, { { &hpfLabel, &hpfSlider },
-                                                 { &referenceGainLabel, &referenceGainSlider } });
-        grid.performLayout(panelBody(sections.column1Input, panelPaddingY));
+        addLabelled(grid, controlGap, referenceGainLabel, referenceGainSlider, sliderRow);
+        addLabelled(grid, controlGap, hpfLabel, hpfSlider, sliderRow);
+        grid.performLayout(body);
+
+        const int used = sc(sectionHeaderRow + 2 * (controlGap + labelledSlider) + meterBlockGap);
+        layoutMeters(body.withTrimmedTop(used).withHeight(sc(meterPair)),
+                     inputMeterLabel, inputMeter, sidechainMeterLabel, sidechainMeter);
     }
 
-    // COLUMN 1 -- METER BANK, ungrouped. No panel and no header: a heading
-    // over a bank of meters is noise to the operator this is built for.
-    //
-    // Two grid columns: a fixed-width one for the meter names and a stretchy
-    // one for their bars. The "Meters post HPF" toggle is the bank's last row
-    // and simply spans both, so it lines up with the meter names rather than
-    // floating below the instrument it belongs to. The four meters are
-    // horizontal rows here rather than the old side-by-side vertical bank --
-    // see LevelMeterComponent::Orientation.
-    //
-    // The leading and trailing gaps are the room paint() needs to draw the
-    // meter bridge around the bank without overhanging the column.
-    {
-        SectionGrid grid(2, scale, meterLabelGap, meterLabelWidth);
-        grid.gap(meterBridgeClearance);
-        grid.meterRow(meterRowHeight, inputMeterLabel, inputMeter, meterBarHeight);
-        grid.gap(meterRowGap);
-        grid.meterRow(meterRowHeight, sidechainMeterLabel, sidechainMeter, meterBarHeight);
-        grid.gap(meterRowGap);
-        grid.meterRow(meterRowHeight, suppressionMeterLabel, suppressionMeter, meterBarHeight);
-        grid.gap(meterRowGap);
-        grid.meterRow(meterRowHeight, outputMeterLabel, outputMeter, meterBarHeight);
-        grid.gap(meterToggleGap);
-        grid.row(toggleRow, metersPostFilterToggle);
-        grid.gap(meterBridgeClearance);
-        grid.performLayout(sections.column1Output.reduced(sc(panelPaddingX), 0));
-    }
-
-    // COLUMN 2 -- ADAPTIVE FILTER.
-    //
-    // One control on purpose: Tail Length *is* the linear filter length. It is
-    // the only thing in the plugin that touches the adaptive filter, and the
-    // only one that interrupts audio when changed, so folding it into a
-    // neighbouring section would misrepresent two distinct DSP stages.
+    // COLUMN 2 -- CANCELLATION: the three decisions that matter for a show,
+    // then the door to the expert controls.
     {
         SectionGrid grid(1, scale, 0);
-        grid.row(sectionHeaderRow, adaptiveSectionLabel);
-        grid.gap(column2HeaderGap);
-        grid.row(controlLabelRow, tailLengthLabel);
-        grid.row(comboRow, tailLengthCombo);
-        grid.performLayout(panelBody(sections.column2Adaptive, widePanelPaddingBottom));
+        grid.row(sectionHeaderRow, cancellationSectionLabel);
+        addLabelled(grid, headerGap, tailLengthLabel, tailLengthCombo, comboRow);
+        addLabelled(grid, controlGap, suppressionStrengthLabel, suppressionStrengthCombo, comboRow);
+        addLabelled(grid, controlGap, nearendSensitivityLabel, nearendSensitivitySlider, sliderRow);
+        grid.gap(controlGap);
+        grid.row(buttonRow, fineTuningButton);
+        grid.performLayout(panelBody(sections.column2));
     }
 
-    // COLUMN 2 -- RESIDUAL SUPPRESSION.
+    // COLUMN 3 -- OUTPUT: what the canceller is doing, then the mix.
     {
+        auto body = panelBody(sections.column3);
         SectionGrid grid(1, scale, 0);
-        grid.row(sectionHeaderRow, residualSectionLabel);
-        grid.gap(column2HeaderGap);
-        grid.row(controlLabelRow, suppressionStrengthLabel);
-        grid.row(comboRow, suppressionStrengthCombo);
-        grid.gap(column2ControlGap);
-        grid.row(toggleRow, limitHfGainToggle);
-        grid.performLayout(panelBody(sections.column2Residual, widePanelPaddingBottom));
+        grid.row(sectionHeaderRow, outputSectionLabel);
+        grid.gap(headerGap + meterPair + meterBlockGap); // the meter block goes here
+        grid.row(controlLabelRow, dryWetLabel);
+        grid.row(sliderRow, dryWetSlider);
+        grid.gap(controlGap);
+        grid.row(statusRow, statusLabel);
+        grid.row(statusRow, delayReadoutLabel);
+        grid.performLayout(body);
+
+        layoutMeters(body.withTrimmedTop(sc(sectionHeaderRow + headerGap)).withHeight(sc(meterPair)),
+                     suppressionMeterLabel, suppressionMeter, outputMeterLabel, outputMeter);
     }
 
-    // COLUMN 3 -- DOUBLE-TALK PROTECTION, still stacked top to bottom.
+    // FINE TUNING overlay across columns 2 and 3: the detector's choice and
+    // HF clamp on the left, its two timing controls on the right.
     {
-        SectionGrid grid(1, scale, 0);
-        grid.row(sectionHeaderRow, doubleTalkSectionLabel);
-        grid.gap(column3HeaderGap);
-        grid.row(controlLabelRow, nearendDetectorLabel);
-        grid.row(comboRow, nearendDetectorCombo);
-        addSliderRows(grid, column3ControlGap,
-                      { { &nearendSensitivityLabel, &nearendSensitivitySlider },
-                        { &protectionHoldTimeLabel, &protectionHoldTimeSlider },
-                        { &transitionSmoothingLabel, &transitionSmoothingSlider } });
-        grid.performLayout(panelBody(sections.column3DoubleTalk, widePanelPaddingBottom));
+        fineTuningOverlay.scale = scale;
+        fineTuningOverlay.setBounds(sections.fineTuning);
+        auto body = panelBody(fineTuningOverlay.getLocalBounds());
+
+        auto header = body.removeFromTop(sc(sectionHeaderRow));
+        fineTuningDoneButton.setBounds(header.removeFromRight(sc(fineTuningDoneWidth))
+                                           .withSizeKeepingCentre(sc(fineTuningDoneWidth), sc(buttonRow)));
+        fineTuningSectionLabel.setBounds(header);
+
+        auto left = body.removeFromLeft((body.getWidth() - sc(columnGap)) / 2);
+        body.removeFromLeft(sc(columnGap));
+        auto right = body;
+
+        SectionGrid leftGrid(1, scale, 0);
+        addLabelled(leftGrid, headerGap, nearendDetectorLabel, nearendDetectorCombo, comboRow);
+        leftGrid.gap(controlGap);
+        leftGrid.row(toggleRow, limitHfGainToggle);
+        leftGrid.performLayout(left);
+
+        fineTuningHintLabel.setBounds(left.getUnion(right).removeFromBottom(sc(3 * statusRow)));
+
+        SectionGrid rightGrid(1, scale, 0);
+        addLabelled(rightGrid, headerGap, protectionHoldTimeLabel, protectionHoldTimeSlider, sliderRow);
+        addLabelled(rightGrid, controlGap, transitionSmoothingLabel, transitionSmoothingSlider, sliderRow);
+        rightGrid.performLayout(right);
     }
+}
 
-    // FOOTER -- full width under all three columns: delay readout, Dry/Wet
-    // Mix, wordmark, left to right on one line.
-    //
-    // Dry/Wet is centred on the window and the readout is then fitted into
-    // what is left to its *left*, rather than the two being placed
-    // independently -- that is what makes a collision impossible rather than
-    // merely unlikely, and it is the same trick the readout already used
-    // against the wordmark. The static_asserts in PluginEditor.h prove the
-    // remaining space clears both neighbours' worst cases.
-    {
-        const auto dryWetArea = sections.footer.withSizeKeepingCentre(sc(dryWetFooterWidth),
-                                                                     sections.footer.getHeight());
+void PAEchoCancellerAudioProcessorEditor::setFineTuningVisible(bool shouldShow)
+{
+    fineTuningOverlay.setVisible(shouldShow);
+    if (shouldShow)
+        fineTuningOverlay.toFront(false);
+}
 
-        // Label beside the slider rather than above it: the footer is one
-        // slider tall, so the label-above-slider pairing the panels use does
-        // not fit here.
-        SectionGrid grid(2, scale, dryWetLabelGap, dryWetLabelWidth);
-        grid.row(sliderRow, { &dryWetLabel, &dryWetSlider });
-        grid.performLayout(dryWetArea);
-
-        // Indented by panelPaddingX so it lines up with the section header
-        // text above it rather than with the panel edge.
-        delayReadoutLabel.setBounds(sections.footer
-                                        .withTrimmedLeft(sc(panelPaddingX))
-                                        .withRight(dryWetArea.getX() - sc(readoutLogoGap)));
-    }
+void PAEchoCancellerAudioProcessorEditor::updateFineTuningButton()
+{
+    // Says so on the main panel when anything behind it has been moved off
+    // its default, so a tweak made weeks ago in the overlay can't silently
+    // explain why one session sounds different from another.
+    const auto isDefault = [](juce::RangedAudioParameter* param) {
+        return std::abs(param->getValue() - param->getDefaultValue()) < 1.0e-4f;
+    };
+    const bool modified = !isDefault(processor.getNearendDetectorParameter())
+                          || !isDefault(processor.getProtectionHoldTimeParameter())
+                          || !isDefault(processor.getTransitionSmoothingParameter())
+                          || !isDefault(processor.getLimitHfGainParameter());
+    const juce::String text = modified ? "Fine tuning (adjusted)..." : "Fine tuning...";
+    if (fineTuningButton.getButtonText() != text)
+        fineTuningButton.setButtonText(text);
 }
 
 void PAEchoCancellerAudioProcessorEditor::tailLengthComboChanged()
@@ -826,21 +785,6 @@ void PAEchoCancellerAudioProcessorEditor::updateReferenceGainSlider()
         referenceGainSlider.setValue(currentDb, juce::dontSendNotification);
 }
 
-void PAEchoCancellerAudioProcessorEditor::metersPostFilterToggleChanged()
-{
-    auto* param = processor.getMetersPostFilterParameter();
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(metersPostFilterToggle.getToggleState() ? 1.0f : 0.0f);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateMetersPostFilterToggle()
-{
-    const bool current = processor.getMetersPostFilterParameter()->get();
-    if (metersPostFilterToggle.getToggleState() != current)
-        metersPostFilterToggle.setToggleState(current, juce::dontSendNotification);
-}
-
 void PAEchoCancellerAudioProcessorEditor::dryWetSliderChanged()
 {
     auto* param = processor.getDryWetMixParameter();
@@ -868,8 +812,8 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     updateTransitionSmoothingSlider();
     updateHpfSlider();
     updateReferenceGainSlider();
-    updateMetersPostFilterToggle();
     updateDryWetSlider();
+    updateFineTuningButton();
 
     // Two different ways "nothing is happening" can look, both of which
     // need catching:
@@ -900,6 +844,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
         outputMeter.setLevel(0.0f);
         suppressionMeter.setLevel(0.0f);
         delayReadoutLabel.setText("PA delay: --", juce::dontSendNotification);
+        statusLabel.setText("Waiting for audio", juce::dontSendNotification);
         return;
     }
 
@@ -922,12 +867,24 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
                 text << "  (median " << medianMs << ")";
         }
         delayReadoutLabel.setText(text, juce::dontSendNotification);
+
+        // The same facts, as the sentence an operator needs: is there a PA
+        // feed at all, and has the canceller found it in the mic yet?
+        juce::String status;
+        if (sidechainLevelPre <= silenceThreshold)
+            status = "No PA signal on Reference input";
+        else if (delayMs < 0)
+            status = "Locking on to the PA...";
+        else
+            status = "Cancelling PA bleed";
+        statusLabel.setText(status, juce::dontSendNotification);
     }
 
-    const bool postFilter = processor.getMetersPostFilterParameter()->get();
-    const float displayedInputLevel = postFilter ? processor.getInputPeakLevelPost() : inputLevelPre;
+    // Always post-HPF (and, for the PA ref, post-trim): the meters sit next
+    // to those two controls so their effect is what the meters should show.
+    const float displayedInputLevel = processor.getInputPeakLevelPost();
     const float displayedOutputLevel = processor.getOutputPeakLevel();
-    const float displayedSidechainLevel = postFilter ? processor.getSidechainPeakLevelPost() : sidechainLevelPre;
+    const float displayedSidechainLevel = processor.getSidechainPeakLevelPost();
     inputMeter.setLevel(displayedInputLevel);
     sidechainMeter.setLevel(displayedSidechainLevel);
     outputMeter.setLevel(displayedOutputLevel);
@@ -942,9 +899,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     // picking up any level change from Dry/Wet Mix or plain near-end
     // dynamics, not only echo removal.
     //
-    // The Input side always uses the post-HPF, delay-compensated reading
-    // (regardless of what "Meters post HPF" has the Input meter itself
-    // showing) -- Output always reflects Input from getLatencySamples()
+    // The Input side uses the post-HPF, delay-compensated reading -- Output always reflects Input from getLatencySamples()
     // earlier (the internal frame-buffering latency plus AEC3's own
     // internal processing delay -- getLatencySamples() reports the true
     // total, see that getter's comment), so comparing it against the
@@ -970,136 +925,118 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 
 void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
 {
-    // Mirrors the panel exactly -- same four stages, same order within each.
-    // The panel is laid out as the real signal chain rather than as a flat
-    // list, so the help reads as an explanation of that chain instead of an
-    // alphabetical glossary that would send you hunting. The dialog reads the
-    // stages top to bottom while the panel now reads them left to right across
-    // its three columns; the *order* is the thing that has to match, and does.
+    // Mirrors the panel exactly: the three columns left to right, then the
+    // Fine tuning overlay, then how to use it live and in post. The order is
+    // the thing that has to match the panel, and does.
     static const juce::String helpText =
-        "LESS PA cancels PA speaker leakage out of an audience microphone, "
-        "using the PA feed itself (not a room estimate of it) as a reference "
-        "-- wire the PA signal into the Reference sidechain input. It works "
-        "by applying acoustic echo cancellation (AEC) -- the same technique "
-        "phones and conferencing systems use to remove speaker bleed.\n"
+        "LESS PA removes PA speaker bleed from an audience microphone, using "
+        "the PA feed itself as a reference -- wire the PA signal into the "
+        "Reference sidechain input. It works by acoustic echo cancellation "
+        "(AEC), the same technique phones and conferencing systems use to "
+        "remove speaker bleed.\n"
         "\n"
-        "The panel follows the signal chain, left to right: what reaches the "
-        "canceller, then the linear filter that models the leakage and "
-        "subtracts it, then the suppressor that cleans up whatever the filter "
-        "missed, then the detector that decides when to ease that suppressor "
-        "off to protect real audience sound.\n"
+        "The panel follows the signal, left to right: what reaches the "
+        "canceller, how it cancels, and what comes out.\n"
         "\n"
         "\n"
-        "=== INPUT CONDITIONING ===\n"
-        "What the canceller sees, before it does anything else.\n"
+        "=== INPUT ===\n"
+        "\n"
+        "PA REFERENCE TRIM\n"
+        "A gain trim on the reference only. Use it if the PA ref meter is "
+        "clipping or barely moving. Not a substitute for Suppression "
+        "Strength.\n"
         "\n"
         "INPUT HPF\n"
         "A 24dB/octave high-pass filter (80-300Hz), applied identically to "
-        "the microphone input and the PA reference before cancellation, to "
-        "remove rumble/handling noise that could otherwise confuse the "
-        "canceller.\n"
+        "the mic and the PA reference before cancellation, to keep rumble "
+        "and handling noise from confusing the canceller.\n"
         "\n"
-        "PA REFERENCE TRIM\n"
-        "A plain gain trim on the reference signal -- use it if your PA "
-        "feed is clipping or too quiet for the canceller to get a good "
-        "read. Not a substitute for Suppression Strength.\n"
+        "MIC / PA REF METERS\n"
+        "Levels after the HPF (and, for the PA ref, after the trim) -- i.e. "
+        "exactly what the canceller is being fed.\n"
         "\n"
         "\n"
-        "=== ADAPTIVE FILTER ===\n"
-        "The linear filter that models the PA-to-microphone path and "
-        "subtracts it. This is the part that removes leakage cleanly, "
-        "without touching anything else in the mic.\n"
+        "=== CANCELLATION ===\n"
         "\n"
         "TAIL LENGTH\n"
-        "How long a reverb tail the canceller can model, matched to your "
-        "venue: 50ms (dry room) up to 800ms (very large hall). Longer "
-        "costs a little more CPU per instance. Tail Length is the only "
-        "control that briefly interrupts audio when changed. It rebuilds "
-        "the adaptive filter.\n"
-        "\n"
-        "\n"
-        "=== RESIDUAL SUPPRESSION ===\n"
-        "Cleans up whatever the filter above could not remove. This stage "
-        "works by reducing gain, so it is also where artifacts come from if "
-        "pushed too hard.\n"
+        "How long a reverb tail the canceller models. Pick by venue: 50 ms "
+        "for a small room, up to 800 ms for an arena or outdoor rig. Longer "
+        "costs a little more CPU. This is the one control that restarts the "
+        "canceller when changed, so set it before the show rather than "
+        "during it.\n"
         "\n"
         "SUPPRESSION STRENGTH\n"
-        "Gentle / Moderate / Hard. How aggressively residual echo gets "
-        "cleaned up after the main cancellation. Hard removes the most "
-        "leakage but can sound artifacty on ambient crowd noise that shares "
-        "energy with the PA signal; Gentle sounds more natural but lets a "
-        "bit more leakage through. Applies live -- no interruption when "
-        "changed.\n"
+        "Gentle / Moderate / Hard. How hard leftover bleed is cleaned up "
+        "after the main cancellation. Hard removes the most but can sound "
+        "processed on crowd noise; Gentle is the most natural but lets a "
+        "little more PA through. Applies live.\n"
         "\n"
-        "LIMIT HF GAIN\n"
-        "An extra safety clamp on high-frequency gain, for when the filter "
-        "hasn't fully converged yet. Usually leave off; try it if you hear "
-        "excess high-end leakage. Applies live.\n"
+        "CROWD PROTECTION\n"
+        "How readily the plugin decides a moment is real audience sound to "
+        "keep rather than PA bleed to remove. Raise it if the crowd sounds "
+        "gated or pumpy; lower it if PA bleed comes through when the crowd "
+        "is loud. Applies live.\n"
         "\n"
         "\n"
-        "=== DOUBLE-TALK PROTECTION ===\n"
-        "Decides when a moment is genuine audience sound worth keeping, and "
-        "eases the suppressor off when it is. This is what stops the crowd "
-        "from being gated away along with the PA.\n"
+        "=== OUTPUT ===\n"
+        "\n"
+        "SUPPRESSION / OUTPUT METERS\n"
+        "Suppression is the dB difference between mic in and output, so it "
+        "always matches what you hear: near 0dB with no PA to remove, higher "
+        "when there is.\n"
+        "\n"
+        "MIX\n"
+        "Blends the cancelled output with the original mic. 100% is fully "
+        "cancelled; lower it to bring some of the original back.\n"
+        "\n"
+        "STATUS AND PA DELAY\n"
+        "\"No PA signal\" means nothing is arriving on the Reference input -- "
+        "check the sidechain routing in your host. \"Locking on\" means the "
+        "PA is there but the canceller hasn't found it in the mic yet. PA "
+        "delay is how far the PA reference leads the bleed in the mic; a "
+        "steady number means a solid lock, a jumping one means the reference "
+        "and mic timing is unstable.\n"
+        "\n"
+        "\n"
+        "=== FINE TUNING ===\n"
+        "Behind the Fine tuning button. The defaults suit most shows; the "
+        "button says \"adjusted\" when anything in here is off its default.\n"
         "\n"
         "NEAR-END DETECTOR\n"
-        "Which method decides that a moment is genuine audience content. "
-        "Classic watches the overall low-frequency balance and protects "
-        "most of the time -- the safe default. Subband (2-4kHz) compares "
-        "bass against the 2-4kHz range where crowd sound actually lives, "
-        "so it protects less often but much more specifically in the gaps "
-        "between PA content. They are different characters, not a "
-        "better/worse pair -- A/B them by ear on your material. Applies "
-        "live.\n"
-        "\n"
-        "NEAR-END SENSITIVITY\n"
-        "How readily the active detector decides a moment is genuine "
-        "audience content worth protecting, rather than echo to remove. "
-        "Higher lets more real audience sound through during simultaneous "
-        "PA + crowd moments. Works for both detector choices. Applies "
-        "live.\n"
+        "How audience sound is recognised. Classic watches the overall "
+        "low-frequency balance and protects most of the time. Subband "
+        "(2-4kHz) compares bass against the range where crowd sound lives, "
+        "so it protects less often but more precisely. Different "
+        "characters, not better/worse -- A/B them on your material.\n"
         "\n"
         "PROTECTION HOLD TIME\n"
-        "How long that protection lasts after it triggers before reverting "
-        "to normal suppression. Longer is smoother but can let a bit more "
-        "PA leakage through right after the crowd quiets down; shorter "
-        "reacts faster but can pulse if crowd noise is intermittent. "
-        "Applies live.\n"
+        "How long protection lasts once triggered. Longer is smoother but "
+        "can let some PA through just after the crowd quiets; shorter can "
+        "pulse on intermittent crowd noise.\n"
         "\n"
         "TRANSITION SMOOTHING\n"
-        "How gradually the plugin moves between protecting audience sound "
-        "and suppressing PA bleed, when it changes its mind about which one "
-        "it's hearing. At 0ms it switches instantly, which can be heard as "
-        "pumping; raising it rounds that transition off. The trade-off is "
-        "that protection also engages and releases more gradually, so very "
-        "long settings can let a little more bleed through right after the "
-        "crowd quiets down. Applies live.\n"
+        "How gradually the plugin moves between protecting the crowd and "
+        "suppressing the PA. 0 ms switches instantly, which can pump; higher "
+        "rounds the switch off.\n"
+        "\n"
+        "LIMIT HF GAIN\n"
+        "An extra clamp on high-frequency gain. Usually off; try it if you "
+        "hear excess high-end bleed.\n"
         "\n"
         "\n"
-        "=== OUTPUT AND METERING ===\n"
+        "=== LIVE AND IN POST ===\n"
         "\n"
-        "METERS\n"
-        "Input / PA-ref(sc) / Suppression / Output. Suppression is measured "
-        "directly as the dB difference between the Input and Output meters, "
-        "so it always matches what you actually hear: near 0dB when there's "
-        "no PA leakage to remove, higher when there is. \"Meters post HPF\" "
-        "switches Input and PA-ref between showing levels before or after "
-        "the high-pass filter.\n"
+        "Live (e.g. LiveProfessor, MainStage): the plugin adds about 20 ms "
+        "of latency and reports it to the host. Give it a few seconds of PA "
+        "signal to lock on before relying on it. Avoid changing Tail Length "
+        "mid-show; everything else applies without interruption.\n"
         "\n"
-        "PA DELAY\n"
-        "The canceller's own estimate of how far the PA reference leads the "
-        "leakage arriving in the mic. Use it as a wiring check and a health "
-        "check: a steady number means the reference is arriving and the "
-        "canceller has a solid lock; \"--\" with signal present usually "
-        "means no reference is reaching the plugin at all (check the "
-        "sidechain routing in your host); a value that keeps jumping around "
-        "means the reference and mic timing is unstable.\n"
-        "\n"
-        "DRY/WET MIX\n"
-        "Blends the cancelled (wet) output with the original, unprocessed "
-        "(dry) input. 100% is fully cancelled; lower it to let more of the "
-        "original signal (including any residual PA leakage) back in to "
-        "taste.\n"
+        "In post: insert it on the mic track with the PA feed on the "
+        "sidechain. An offline bounce sounds the same as playing back from "
+        "the same start point, including when the session's Tail Length "
+        "differs from the default. The canceller learns the room from where "
+        "playback or the bounce starts, so start a few seconds before the "
+        "part you need.\n"
         "\n"
         "\n"
         "Less PA is free to use, provided as-is with no warranty of any "

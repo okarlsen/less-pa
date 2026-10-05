@@ -56,6 +56,7 @@ public:
                       int buttonX, int buttonY, int buttonW, int buttonH,
                       juce::ComboBox&) override;
     juce::Font getComboBoxFont(juce::ComboBox&) override;
+    juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override;
 
     void drawToggleButton(juce::Graphics&, juce::ToggleButton&,
                           bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;

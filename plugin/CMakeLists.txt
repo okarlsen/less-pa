@@ -138,6 +138,8 @@ target_compile_definitions(PAEchoCancellerVerify
         JucePlugin_Name="Less PA"
         JucePlugin_VersionString="${PROJECT_VERSION}"
     PUBLIC
+        # --screenshot pumps the message loop so the editor's timer can run
+        JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         WEBRTC_APM_DEBUG_DUMP=0

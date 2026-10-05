@@ -19,259 +19,106 @@ private:
     // The window is resizable with a locked aspect ratio (see the
     // ComponentBoundsConstrainer setup in the constructor), so every layout
     // constant below is expressed in "design pixels" at the default size and
-    // multiplied by one uniform factor. Without that, resizing would just
-    // leave a growing empty strip at the bottom instead of scaling.
+    // multiplied by one uniform factor.
     //
-    // The panel is widescreen and three columns wide. The four AEC3
-    // signal-chain stages now read left to right rather than top to bottom
-    // (Input Conditioning -> Adaptive Filter -> Residual Suppression ->
-    // Double-Talk Protection), with the meter bank stacked under column 1 and
-    // a full-width footer under all three columns.
+    // Three columns, one panel each, reading left to right as the signal
+    // flows: INPUT (what reaches the canceller, and its levels) ->
+    // CANCELLATION (the three decisions that matter for a show) -> OUTPUT
+    // (what the canceller is doing, and the mix). The expert controls that
+    // tune the double-talk detector live behind "Fine tuning", an overlay
+    // across columns 2 and 3 -- they stay real, automatable parameters, they
+    // just no longer compete for attention on the main panel.
     static constexpr int designWidth = 768;
     static constexpr int designHeight = 432;
 
     static constexpr int outerMargin = 10;
 
-    // Hoisted out of paint()/resized() because both need it and they drifted
-    // apart in the previous hand-chained layout (paint() removed 40px, and a
-    // separate 40 in resized() had to be kept in sync by hand).
-    // Two lines of text: the product name plus a one-line subtitle.
     static constexpr int titleStripHeight = 62;
     static constexpr int titleGap = 10;
 
-    // The "?" help button and, to its left, a small version readout -- so
-    // whoever's looking at the plugin (or a screenshot of it) can tell which
-    // build they're running without opening the help dialog. Named and
-    // asserted like everything else here so a future title-strip change
-    // can't silently let the version text run under the subtitle.
     static constexpr int helpButtonSize = 24;
     static constexpr int versionHelpGap = 6;
     static constexpr int versionLabelWidth = 40;
 
-    // The three columns are equal width. Column 3 absorbs the sub-pixel
-    // remainder in computeSectionBounds() so the right-hand margin stays
-    // exactly outerMargin at every scale factor -- the corner wordmark is
-    // aligned to that same edge.
     static constexpr int columnWidth = 240;
     static constexpr int columnGap = 14;
     static constexpr int columnAreaHeight = 302;
 
-    // Full-width strip under all three columns: the PA delay readout on the
-    // left, Dry/Wet Mix centred, the corner wordmark on the right. Tall enough
-    // for a slider rather than the single text line it used to be -- Dry/Wet
-    // lives here rather than in column 1 because column 1's height is what
-    // sets columnAreaHeight, so every pixel taken out of it comes off all
-    // three columns and off the window.
     static constexpr int footerGap = 12;
     static constexpr int footerStripHeight = 26;
 
-    // Row heights, shared by every section. They live here rather than in
-    // PluginEditor.cpp's anonymous namespace specifically so the
-    // static_asserts below can prove the section heights against them instead
-    // of the old arrangement, where the row arithmetic was only a comment.
     static constexpr int sectionHeaderRow = 18;
     static constexpr int controlLabelRow = 16;
     static constexpr int comboRow = 28;
     static constexpr int sliderRow = 26;
     static constexpr int toggleRow = 24;
+    static constexpr int buttonRow = 26;
+    static constexpr int statusRow = 16;
 
+    // Every panel shares the same top inset (so the three headers sit on one
+    // line) and the same bottom inset.
     static constexpr int panelPaddingX = 12;
-    static constexpr int panelPaddingY = 14;
+    static constexpr int panelPaddingTop = 14;
+    static constexpr int panelPaddingBottom = 20;
+    static constexpr int panelBodyHeight = columnAreaHeight - panelPaddingTop - panelPaddingBottom;
 
-    // Horizontal clearance between the footer's three tenants.
-    static constexpr int readoutLogoGap = 10;
+    static constexpr int headerGap = 20;  // header to first control
+    static constexpr int controlGap = 20; // between consecutive controls
+    static constexpr int meterBlockGap = 24; // controls to a meter block
 
-    // The inline Dry/Wet control: label, slider and value box on one row
-    // rather than the label-above-slider pairing every panel uses. The footer
-    // is one slider tall, so the pairing does not fit -- and a single row is
-    // what makes it read as a footer readout rather than a fifth section.
-    static constexpr int dryWetLabelWidth = 78;
-    static constexpr int dryWetLabelGap = 8;
-    static constexpr int dryWetFooterWidth = 266;
-
-    // The worst-case delay readout ("PA delay: 1234 ms  (median 1234)")
-    // measures ~175 design px at the 12pt the label is set to in resized().
-    // Asserted below against the space the centred Dry/Wet control leaves it.
-    static constexpr int readoutMinWidth = 180;
-
-    // -- Column 1: INPUT CONDITIONING above the ungrouped meter bank ---------
-    //
-    // Column 1 is still the tallest of the three (a panel plus the meter
-    // bank), so its natural height is what sets columnAreaHeight; columns 2
-    // and 3 are spaced out to match it.
-    static constexpr int column1ControlGap = 12;
-    static constexpr int inputSectionHeight = 154;
-
-    static constexpr int column1BlockGap = 14;
-
-    // paint() draws the meter bridge from the meters' own bounds, expanded by
-    // this much vertically. Reserving it inside the block rather than letting
-    // the bridge overhang keeps column 1 exactly as tall as the other two --
-    // an overhang would make column 1 visibly deeper than columns 2 and 3.
-    static constexpr int meterBridgeClearance = 6;
-    static constexpr int outputBlockHeight = 134;
-
-    // Four stacked horizontal meters (label left, bar right) rather than the
-    // old row of four vertical bars: four side-by-side bars needed the whole
-    // window width to keep "PA-ref(sc)" and "Suppression" legible, which a
-    // 240px column no longer has. See LevelMeterComponent::Orientation.
-    //
-    // "Meters post HPF" is the last row *inside* the bank rather than a
-    // control below it: it changes what the four bars above it are showing,
-    // not what the plugin does to audio, so it belongs to the instrument. Its
-    // text is set to the meter-label size in resized() for the same reason.
     static constexpr int meterRowHeight = 18;
     static constexpr int meterRowGap = 6;
-    static constexpr int meterToggleGap = 8;
-    static constexpr int meterBankHeight = 122;
-    static constexpr int meterBarHeight = 11; // shorter than its row, so the four read as separate bars
+    static constexpr int meterBarHeight = 11; // shorter than its row, so stacked bars read as separate bars
     static constexpr int meterLabelWidth = 80;
     static constexpr int meterLabelGap = 8;
 
-    // -- Columns 2 and 3: deliberately roomier ------------------------------
-    //
-    // These two hold much less than column 1 (three controls and four
-    // controls, against column 1's two plus the whole meter bank), so at
-    // column 1's spacing they would end well short of the shared column height
-    // and leave visible dead background below them. The fix is more generous
-    // fixed spacing -- extra bottom padding and bigger gaps between control
-    // pairs -- not a runtime stretch: every other number in this file is a
-    // fixed design constant proved by a static_assert, and a stretch would put
-    // these two outside that guarantee.
-    //
-    // They are re-tuned whenever column 1's height changes, which is the whole
-    // point of moving Dry/Wet into the footer and the toggle into the bank:
-    // 54px off column 1 came off all three columns and off the window.
-    //
-    // The extra room is BOTTOM padding, never top. Every panel in every column
-    // is inset by exactly panelPaddingY at the top (see the panelBody() lambda
-    // in resized()), so the three top-row section headers land on one line.
-    // Splitting it evenly with a symmetric Rectangle::reduced() is what put
-    // ADAPTIVE FILTER's and DOUBLE-TALK PROTECTION's headers 6 scaled px below
-    // INPUT CONDITIONING's, which read as a broken layout in a real host.
-    static constexpr int widePanelPaddingBottom = 20;
+    static constexpr int labelledSlider = controlLabelRow + sliderRow;
+    static constexpr int labelledCombo = controlLabelRow + comboRow;
+    static constexpr int meterPair = 2 * meterRowHeight + meterRowGap;
 
-    static constexpr int column2HeaderGap = 24;
-    static constexpr int column2ControlGap = 24;
-    static constexpr int column2PanelGap = 14;
-    static constexpr int adaptiveSectionHeight = 120;
-    static constexpr int residualSectionHeight = 168;
+    static constexpr int fineTuningDoneWidth = 70;
 
-    static constexpr int column3HeaderGap = 20;
-    static constexpr int column3ControlGap = 20;
-    static constexpr int doubleTalkSectionHeight = 302;
+    static constexpr int logoWidth = 70;
+    static constexpr float logoAspect = 814.0f / 200.0f;
 
-    // The four named sections are the real AEC3 signal chain in signal order,
-    // not a cosmetic grouping: everything that touches the samples before AEC3
-    // sees them, then the linear adaptive filter, then the nonlinear residual
-    // suppressor, then the detector that gates that suppressor. ADAPTIVE
-    // FILTER holding a single control is correct rather than wasteful -- Tail
-    // Length *is* the linear filter length, and nothing else touches it.
-
-    // Makes "these all sum exactly" a compile error rather than a comment:
-    // computeSectionBounds() slices strictly top-down and left-to-right, so
-    // any drift here would silently push content off an edge.
     static_assert(2 * outerMargin + 3 * columnWidth + 2 * columnGap == designWidth,
                   "column widths, gaps and margins must fill designWidth exactly");
     static_assert(2 * outerMargin + titleStripHeight + titleGap + columnAreaHeight
                           + footerGap + footerStripHeight
                       == designHeight,
                   "title, columns, footer, gaps and margins must fill designHeight exactly");
-    static_assert(helpButtonSize + versionHelpGap + versionLabelWidth
-                      <= columnWidth,
-                  "the help button and version label must fit inside the title strip "
-                  "without crowding the product name/subtitle to their left");
+    static_assert(helpButtonSize + versionHelpGap + versionLabelWidth <= columnWidth,
+                  "the help button and version label must fit inside the title strip");
 
-    static_assert(inputSectionHeight + column1BlockGap + outputBlockHeight == columnAreaHeight,
-                  "column 1 must fill the shared column height exactly");
-    static_assert(adaptiveSectionHeight + column2PanelGap + residualSectionHeight == columnAreaHeight,
-                  "column 2 must fill the shared column height exactly");
-    static_assert(doubleTalkSectionHeight == columnAreaHeight,
-                  "column 3 is a single panel, so it is the shared column height");
-
-    // ...and each section's height against the row list resized() actually
-    // lays out inside it.
-    static_assert(sectionHeaderRow + 2 * (column1ControlGap + controlLabelRow + sliderRow)
-                          + 2 * panelPaddingY
-                      == inputSectionHeight,
-                  "INPUT CONDITIONING rows + padding must equal inputSectionHeight");
-    static_assert(2 * meterBridgeClearance + meterBankHeight == outputBlockHeight,
-                  "the meter bank plus its bridge clearance must equal outputBlockHeight");
-    static_assert(4 * meterRowHeight + 3 * meterRowGap + meterToggleGap + toggleRow
-                      == meterBankHeight,
-                  "four meter rows, their gaps and the post-HPF toggle must equal meterBankHeight");
-    // Columns 2 and 3 pad as panelPaddingY (top) + widePanelPaddingBottom
-    // (bottom), not 2 * one number -- the asymmetry is the point, so it is
-    // spelled out here rather than hidden behind a doubled constant.
-    static_assert(sectionHeaderRow + column2HeaderGap + controlLabelRow + comboRow
-                          + panelPaddingY + widePanelPaddingBottom
-                      == adaptiveSectionHeight,
-                  "ADAPTIVE FILTER rows + padding must equal adaptiveSectionHeight");
-    static_assert(sectionHeaderRow + column2HeaderGap + controlLabelRow + comboRow
-                          + column2ControlGap + toggleRow
-                          + panelPaddingY + widePanelPaddingBottom
-                      == residualSectionHeight,
-                  "RESIDUAL SUPPRESSION rows + padding must equal residualSectionHeight");
-    static_assert(sectionHeaderRow + column3HeaderGap + controlLabelRow + comboRow
-                          + 3 * (column3ControlGap + controlLabelRow + sliderRow)
-                          + panelPaddingY + widePanelPaddingBottom
-                      == doubleTalkSectionHeight,
-                  "DOUBLE-TALK PROTECTION rows + padding must equal doubleTalkSectionHeight");
-
-    // The invariant the top-row headers depend on: columns 2 and 3 may only
-    // ever be roomier than column 1 *below* their header, never above it.
-    static_assert(widePanelPaddingBottom >= panelPaddingY,
-                  "columns 2 and 3 take their extra breathing room as bottom padding");
-
-    // The corner wordmark. Width is the design-pixel size; the height follows
-    // from the asset's own 814x200 proportions so the mark can never be
-    // stretched by a change to one number.
-    static constexpr int logoWidth = 70;
-    static constexpr float logoAspect = 814.0f / 200.0f;
-
-    // The footer now has three tenants, so "they fit" is worth proving rather
-    // than eyeballing at one window size: the strip has to be tall enough for
-    // the inline slider and the wordmark, and the centred Dry/Wet control has
-    // to leave its two neighbours their worst-case widths. All three are
-    // fixed design constants scaled by one factor, so proving it here proves
-    // it at every point in the resize range.
-    static_assert(footerStripHeight >= sliderRow,
-                  "the footer strip must be tall enough for the inline Dry/Wet slider");
+    // Each panel's rows must fit its body; the remainder is bottom air.
+    static_assert(sectionHeaderRow + 2 * (controlGap + labelledSlider) + meterBlockGap + meterPair
+                      <= panelBodyHeight,
+                  "INPUT rows must fit the panel");
+    static_assert(sectionHeaderRow + headerGap + 2 * labelledCombo + 2 * controlGap + labelledSlider
+                          + controlGap + buttonRow
+                      <= panelBodyHeight,
+                  "CANCELLATION rows must fit the panel");
+    static_assert(sectionHeaderRow + headerGap + meterPair + meterBlockGap + labelledSlider
+                          + controlGap + 2 * statusRow
+                      <= panelBodyHeight,
+                  "OUTPUT rows must fit the panel");
+    static_assert(sectionHeaderRow + headerGap + labelledCombo + controlGap + toggleRow <= panelBodyHeight
+                      && sectionHeaderRow + headerGap + 2 * labelledSlider + controlGap <= panelBodyHeight,
+                  "FINE TUNING rows must fit the overlay");
     static_assert(logoWidth * 200 / 814 <= footerStripHeight,
                   "the wordmark must fit inside the footer strip");
-    static_assert(dryWetFooterWidth + 2 * (logoWidth + readoutLogoGap)
-                      <= designWidth - 2 * outerMargin,
-                  "the centred Dry/Wet control must clear the corner wordmark");
-    static_assert(dryWetFooterWidth + 2 * (panelPaddingX + readoutMinWidth + readoutLogoGap)
-                      <= designWidth - 2 * outerMargin,
-                  "the centred Dry/Wet control must leave the delay readout its worst case");
-    static_assert(dryWetLabelWidth + dryWetLabelGap < dryWetFooterWidth,
-                  "the inline Dry/Wet label and gap must leave room for the slider");
 
     struct SectionBounds {
         juce::Rectangle<int> title;
-        juce::Rectangle<int> column1Input, column1Output;
-        juce::Rectangle<int> column2Adaptive, column2Residual;
-        juce::Rectangle<int> column3DoubleTalk;
+        juce::Rectangle<int> column1, column2, column3;
+        juce::Rectangle<int> fineTuning; // spans columns 2 and 3
         juce::Rectangle<int> footer;
     };
 
-    // Single source of truth for the seven top-level rectangles: resized()
-    // feeds each one to a Grid, paint() fills the four section ones as
-    // panels. Deriving both from the same function is the point -- the panel
-    // backgrounds can't drift out of alignment with the controls in them.
-    //
-    // `column1Output` deliberately gets no panel and no header: the meters are
-    // the output stage, and a "METERING" header over a bank of meters tells a
-    // professional operator nothing they can't already see. paint() gives it
-    // the meter bridge instead, derived from the meters' own bounds.
+    // Single source of truth for the top-level rectangles: resized() lays
+    // controls out in them, paint() fills the panels behind them.
     SectionBounds computeSectionBounds() const;
 
-    // Needed by both paint() (to draw the mark) and resized() (to keep the
-    // delay readout out from under it), so it is derived from the window
-    // geometry rather than stored by whichever ran last. Vertically centred in
-    // the footer strip rather than pinned to its bottom, so it sits on the
-    // same line as the readout and the inline Dry/Wet control beside it.
     juce::Rectangle<int> computeLogoBounds() const;
     float getUiScale() const;
 
@@ -294,11 +141,11 @@ private:
     void updateHpfSlider();
     void referenceGainSliderChanged();
     void updateReferenceGainSlider();
-    void metersPostFilterToggleChanged();
-    void updateMetersPostFilterToggle();
     void dryWetSliderChanged();
     void updateDryWetSlider();
     void showHelpDialog();
+    void setFineTuningVisible(bool shouldShow);
+    void updateFineTuningButton();
 
     PAEchoCancellerAudioProcessor& processor;
 
@@ -329,10 +176,28 @@ private:
     // Uppercase group headers. They live inside their panel's top row rather
     // than floating above it, so the panel rectangle and the Grid area it is
     // laid out from are one and the same rectangle.
-    juce::Label inputSectionLabel{ "inputSectionLabel", "INPUT CONDITIONING" };
-    juce::Label adaptiveSectionLabel{ "adaptiveSectionLabel", "ADAPTIVE FILTER" };
-    juce::Label residualSectionLabel{ "residualSectionLabel", "RESIDUAL SUPPRESSION" };
-    juce::Label doubleTalkSectionLabel{ "doubleTalkSectionLabel", "DOUBLE-TALK PROTECTION" };
+    juce::Label inputSectionLabel{ "inputSectionLabel", "INPUT" };
+    juce::Label cancellationSectionLabel{ "cancellationSectionLabel", "CANCELLATION" };
+    juce::Label outputSectionLabel{ "outputSectionLabel", "OUTPUT" };
+    juce::Label fineTuningSectionLabel{ "fineTuningSectionLabel", "FINE TUNING" };
+
+    // Opens the overlay holding the detector's expert controls; its text
+    // says when any of them is away from its default, so nothing tuned in
+    // there is ever invisible from the main panel.
+    juce::TextButton fineTuningButton{ "Fine tuning..." };
+    juce::TextButton fineTuningDoneButton{ "Done" };
+    juce::Label fineTuningHintLabel{ "fineTuningHintLabel",
+                                     "These shape how the crowd detector switches on and off. "
+                                     "The defaults suit most shows; Crowd Protection on the main "
+                                     "panel is the control to reach for first." };
+
+    // Paints the overlay's panel and hosts its controls. Added after every
+    // main-panel component, so it sits on top of columns 2 and 3 when shown.
+    struct FineTuningOverlay : public juce::Component {
+        void paint(juce::Graphics& g) override;
+        float scale = 1.0f;
+    };
+    FineTuningOverlay fineTuningOverlay;
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };
     juce::ComboBox tailLengthCombo;
@@ -357,7 +222,7 @@ private:
     // wiring in the constructor): applying live avoids a rebuild, but
     // reconstructing SuppressionGain on every pixel of a drag would still
     // be wasteful and pointless.
-    juce::Label nearendSensitivityLabel{ "nearendSensitivityLabel", "Near-end Sensitivity" };
+    juce::Label nearendSensitivityLabel{ "nearendSensitivityLabel", "Crowd Protection" };
     juce::Slider nearendSensitivitySlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     juce::Label protectionHoldTimeLabel{ "protectionHoldTimeLabel", "Protection Hold Time" };
@@ -377,17 +242,15 @@ private:
     juce::Label referenceGainLabel{ "referenceGainLabel", "PA Reference Trim" };
     juce::Slider referenceGainSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
-    juce::Label dryWetLabel{ "dryWetLabel", "Dry/Wet Mix" };
+    juce::Label dryWetLabel{ "dryWetLabel", "Mix" };
     juce::Slider dryWetSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     LevelMeterComponent inputMeter, sidechainMeter, outputMeter;
     LevelMeterComponent suppressionMeter{ LevelMeterComponent::Style::suppression };
-    juce::Label inputMeterLabel{ "inputMeterLabel", "Input" };
-    juce::Label sidechainMeterLabel{ "sidechainMeterLabel", "PA-ref(sc)" };
+    juce::Label inputMeterLabel{ "inputMeterLabel", "Mic" };
+    juce::Label sidechainMeterLabel{ "sidechainMeterLabel", "PA ref" };
     juce::Label outputMeterLabel{ "outputMeterLabel", "Output" };
     juce::Label suppressionMeterLabel{ "suppressionMeterLabel", "Suppression" };
-
-    juce::ToggleButton metersPostFilterToggle{ "Meters post HPF" };
 
     // AEC3's live echo-path delay estimate (see
     // getEstimatedEchoPathDelayMs() in PluginProcessor.h) -- the quickest
@@ -396,6 +259,11 @@ private:
     // meters. Shows "--" when no estimate is available (no reference
     // routed, or transport stopped).
     juce::Label delayReadoutLabel{ "delayReadoutLabel", "PA delay: --" };
+
+    // One line under the delay readout saying, in words, what state the
+    // canceller is in (no PA signal / locking on / cancelling) -- the
+    // question an operator actually has when glancing at the plugin.
+    juce::Label statusLabel{ "statusLabel", "" };
 
     // Detects the host having stopped calling processBlock entirely (e.g.
     // transport stopped), as opposed to just a quiet tick -- otherwise the

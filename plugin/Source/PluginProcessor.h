@@ -49,7 +49,6 @@ public:
     juce::AudioParameterChoice* getSuppressionStrengthParameter() const noexcept { return suppressionStrengthParam; }
     juce::AudioParameterFloat* getHpfFrequencyParameter() const noexcept { return hpfFrequencyParam; }
     juce::AudioParameterFloat* getReferenceGainParameter() const noexcept { return referenceGainParam; }
-    juce::AudioParameterBool* getMetersPostFilterParameter() const noexcept { return metersPostFilterParam; }
     juce::AudioParameterFloat* getDryWetMixParameter() const noexcept { return dryWetMixParam; }
     juce::AudioParameterBool* getLimitHfGainParameter() const noexcept { return limitHfGainParam; }
     juce::AudioParameterFloat* getNearendSensitivityParameter() const noexcept { return nearendSensitivityParam; }
@@ -69,9 +68,10 @@ public:
 
     // Linear peak level (0..1+) of the most recent block, for the editor's
     // meters. Updated on the audio thread, read on the message thread.
-    // Input/PA-ref track both pre- and post-HPF levels so the editor's
-    // pre/post checkbox can switch instantly either way; Output is never
-    // touched by the HPF, so it only has one reading.
+    // Input/PA-ref track both pre- and post-HPF levels: the meters show
+    // post-HPF, while the editor's silence detection uses pre-HPF so an
+    // aggressive cutoff can't make real signal look like nothing. Output is
+    // never touched by the HPF, so it only has one reading.
     float getInputPeakLevelPre() const noexcept { return inputPeakLevelPre.load(std::memory_order_relaxed); }
     float getInputPeakLevelPost() const noexcept { return inputPeakLevelPost.load(std::memory_order_relaxed); }
     float getSidechainPeakLevelPre() const noexcept { return sidechainPeakLevelPre.load(std::memory_order_relaxed); }
@@ -412,7 +412,6 @@ private:
     // swapping an IIR filter's coefficients while its state persists is a
     // normal, click-free way to handle live parameter changes.
     juce::AudioParameterFloat* hpfFrequencyParam = nullptr;
-    juce::AudioParameterBool* metersPostFilterParam = nullptr;
 
     // Plain gain-staging utility for the reference feed: for a reference
     // that's clipping, or too quiet to give AEC3 a usable signal, this

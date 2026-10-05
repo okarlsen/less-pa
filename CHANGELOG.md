@@ -3,6 +3,33 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Simpler panel.** Three columns that follow the signal: Input (PA
+  Reference Trim, Input HPF, Mic and PA ref meters), Cancellation (Tail
+  Length, Suppression Strength, Crowd Protection), and Output (Suppression
+  and Output meters, Mix, status). Near-end Detector, Protection Hold Time,
+  Transition Smoothing and Limit HF Gain moved behind a **Fine tuning**
+  button. They are still automatable parameters, and the button reads
+  "adjusted" when any of them is off its default.
+- Near-end Sensitivity is now called **Crowd Protection**, and Dry/Wet Mix is
+  now called **Mix**. Tail Length choices name the venue they suit (for
+  example "800 ms - arena / outdoor"). Saved sessions load unchanged.
+- A status line under the output meters says whether the canceller has a PA
+  signal, is locking on, or is cancelling.
+- The meters always show levels after the HPF and trim, which is what the
+  canceller is fed. The "Meters post HPF" parameter is gone; older sessions
+  that saved it ignore the stale value.
+
+### Fixed
+
+- An offline bounce now sounds the same as playback when the session's Tail
+  Length differs from the default. Previously, up to about a second at the
+  start of a faster-than-realtime bounce ran on the default canceller, with
+  around 11 dB less suppression.
+
 ## [1.0.2]
 
 The first fully signed and notarized release. No DSP or parameter changes
