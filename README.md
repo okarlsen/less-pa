@@ -44,6 +44,23 @@ Wire your PA's feed (a send, a matrix output, whatever your desk can give
 you) into the plugin's Reference input, and the audience mic into its main
 input. Click the **?** button in the plugin for the full control reference.
 
+### Level the PA feed
+
+The canceller adapts best when the PA feed is not recorded very quietly. The
+**PA-ref** meter has a wide marked target zone — peaks of about −36 to −3 dBFS —
+and its bar is amber below the zone, green inside it and red above it. A PA
+feed is very dynamic, so the zone is wide: keep the loud parts inside it. If
+the feed sits below the zone, raise **PA Reference Trim**; a quiet feed makes
+the canceller adapt slowly and unevenly, especially at high frequencies, so a
+bounce can end up with noticeably less PA removed than the same audio played
+back after the plugin has settled. Above the zone nothing breaks, but a hotter
+reference also suppresses a little more of the audience (about 1–2 dB near
+0 dBFS), so there is no benefit in going further.
+
+It also helps to start a bounce a few seconds early. The plugin keeps
+adapting for as long as it runs, and a lead-in of about 10 seconds before the
+part you want gets a bounce close to what you hear on playback.
+
 ## Building from source
 
 See [BUILDING.md](BUILDING.md).

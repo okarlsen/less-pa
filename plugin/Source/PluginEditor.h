@@ -380,7 +380,8 @@ private:
     juce::Label dryWetLabel{ "dryWetLabel", "Dry/Wet Mix" };
     juce::Slider dryWetSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
-    LevelMeterComponent inputMeter, sidechainMeter, outputMeter;
+    LevelMeterComponent inputMeter, outputMeter;
+    LevelMeterComponent sidechainMeter{ LevelMeterComponent::Style::reference };
     LevelMeterComponent suppressionMeter{ LevelMeterComponent::Style::suppression };
     juce::Label inputMeterLabel{ "inputMeterLabel", "Input" };
     juce::Label sidechainMeterLabel{ "sidechainMeterLabel", "PA-ref(sc)" };

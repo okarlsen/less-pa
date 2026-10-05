@@ -2076,6 +2076,66 @@ bool testNearendSensitivityAndHoldTime() {
     return pass;
 }
 
+// The PA-ref meter has a target zone, so both of its readings (before and
+// after the HPF) must include PA Reference Trim -- otherwise turning the trim
+// would not move the bar toward the zone. A 0.1-amplitude 1kHz reference
+// (-20dBFS peak) at -12/0/+12dB trim must read ~0.025/0.1/0.4.
+bool testReferenceMeterIncludesTrim() {
+    printf("\n=== PA-ref meter includes Reference Trim test ===\n");
+    const int sampleRate = 48000;
+    const int blockSize = 4800;
+    bool ok = true;
+    for (float trimDb : { -12.0f, 0.0f, 12.0f }) {
+        PAEchoCancellerAudioProcessor proc;
+        setMonoLayout(proc);
+        auto* trim = proc.getReferenceGainParameter();
+        trim->setValueNotifyingHost(trim->convertTo0to1(trimDb));
+        proc.prepareToPlay(sampleRate, blockSize);
+        const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+        juce::AudioBuffer<float> buffer(totalChannels, blockSize);
+        juce::MidiBuffer midi;
+        for (int block = 0; block < 3; ++block) { // let the HPF settle
+            buffer.clear();
+            auto refIn = proc.getBusBuffer(buffer, true, 1);
+            for (int s = 0; s < blockSize; ++s)
+                for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
+                    refIn.setSample(ch, s, 0.1f * std::sin(2.0f * juce::MathConstants<float>::pi * 1000.0f
+                                                           * static_cast<float>(block * blockSize + s) / sampleRate));
+            proc.processBlock(buffer, midi);
+        }
+        const float expected = 0.1f * juce::Decibels::decibelsToGain(trimDb);
+        const float pre = proc.getSidechainPeakLevelPre(), post = proc.getSidechainPeakLevelPost();
+        const bool preOk = std::abs(pre - expected) < 0.03f * expected;
+        const bool postOk = std::abs(post - expected) < 0.05f * expected;
+        printf("  trim %+5.1f dB: expected peak %.4f  pre-HPF %.4f (%s)  post-HPF %.4f (%s)\n", trimDb, expected, pre,
+               preOk ? "ok" : "WRONG", post, postOk ? "ok" : "WRONG");
+        ok = ok && preOk && postOk;
+        proc.releaseResources();
+    }
+    printf("  %s\n", ok ? "PASS -- both PA-ref meter readings follow the trim" : "CHECK -- the PA-ref meter ignores the trim");
+    return ok;
+}
+
+// Pins the adaptation noise gate (see kAdaptationNoiseGate in
+// TailLengthEchoControl.h): the stock 2.0e7 starves a typical PA reference of
+// adaptation, so it must be well below stock on all four filters at every
+// Tail Length.
+bool testAdaptationNoiseGateConfig() {
+    printf("\n=== Adaptation noise gate config test ===\n");
+    bool ok = true;
+    for (int tail = 0; tail < 4; ++tail) {
+        const auto c = makeEchoCanceller3Config(tail, 1, false, 75.0f, 100.0f);
+        const float gates[] = { c.filter.refined.noise_gate, c.filter.coarse.noise_gate,
+                                c.filter.refined_initial.noise_gate, c.filter.coarse_initial.noise_gate };
+        for (float g : gates) ok = ok && g > 0.0f && g <= 2.0e6f;
+        printf("  tail %d: gates refined=%.1e coarse=%.1e refined_initial=%.1e coarse_initial=%.1e\n", tail,
+               gates[0], gates[1], gates[2], gates[3]);
+    }
+    printf("  %s\n", ok ? "PASS -- all adaptation gates are at least 10x below AEC3's stock 2.0e7"
+                         : "CHECK -- an adaptation gate is back at (or near) the speech-level stock value");
+    return ok;
+}
+
 // Confirms the Near-end Detector choice reaches AEC3's config with the
 // venue-measured band pair hardcoded for the subband path, and that the two
 // existing knobs remap correctly onto it: Near-end Sensitivity onto
@@ -4255,6 +4315,8 @@ int main(int argc, char* argv[]) {
     allPass = testDominantNearendDetectionFix(48000) && allPass;
     allPass = testNearendSensitivityAndHoldTime() && allPass;
     allPass = testNearendDetectorConfigMapping() && allPass;
+    allPass = testReferenceMeterIncludesTrim() && allPass;
+    allPass = testAdaptationNoiseGateConfig() && allPass;
     allPass = testLiveNearendDetectorToggle(48000) && allPass;
     allPass = testSubbandHoldReducesFlipRate(48000) && allPass;
     allPass = testStateSaveRestore() && allPass;

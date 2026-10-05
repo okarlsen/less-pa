@@ -277,6 +277,15 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
         addAndMakeVisible(meter);
     }
 
+    // Peaks of about -36..-3 dBFS. Swept over reference peaks of -39..+6 dBFS on
+    // a real PA-heavy recording: below about -36 dBFS the high frequencies stop
+    // adapting well even with the lowered adaptation gate (see
+    // kAdaptationNoiseGate); above the zone nothing gates -- PA removal keeps
+    // rising -- but audience loss grows steadily (~1-2dB near 0 dBFS) and a feed
+    // that hot risks clipping upstream. The zone is deliberately wide because a
+    // PA feed is very dynamic and cannot be held to a narrow band.
+    sidechainMeter.setTargetZone(-36.0f, -3.0f);
+
     metersPostFilterToggle.onClick = [this] { metersPostFilterToggleChanged(); };
     addAndMakeVisible(metersPostFilterToggle);
 
@@ -310,7 +319,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     dryWetSlider.setTooltip("Blend cancelled vs original");
     metersPostFilterToggle.setTooltip("Meter before or after HPF");
     inputMeter.setTooltip("Mic input");
-    sidechainMeter.setTooltip("PA reference input");
+    sidechainMeter.setTooltip("Aim for the marked zone");
     suppressionMeter.setTooltip("Reduction, in vs out");
     outputMeter.setTooltip("After cancellation");
     delayReadoutLabel.setTooltip("Echo path delay estimate");
@@ -1000,9 +1009,15 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "canceller.\n"
         "\n"
         "PA REFERENCE TRIM\n"
-        "A plain gain trim on the reference signal -- use it if your PA "
-        "feed is clipping or too quiet for the canceller to get a good "
-        "read. Not a substitute for Suppression Strength.\n"
+        "A plain gain trim on the reference signal. The PA-ref meter has a "
+        "wide marked zone (peaks of about -36 to -3dBFS) because a PA feed "
+        "is very dynamic: keep the loud parts inside it. A feed that sits "
+        "below the zone adapts slowly and unevenly, especially at high "
+        "frequencies, so raise the trim. Above the zone nothing breaks, but "
+        "a hotter reference also suppresses a little more of the audience "
+        "(about 1-2dB near 0dBFS) and risks clipping, so there is no "
+        "benefit in going further. Not a substitute for Suppression "
+        "Strength.\n"
         "\n"
         "\n"
         "=== ADAPTIVE FILTER ===\n"
@@ -1084,7 +1099,9 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "so it always matches what you actually hear: near 0dB when there's "
         "no PA leakage to remove, higher when there is. \"Meters post HPF\" "
         "switches Input and PA-ref between showing levels before or after "
-        "the high-pass filter.\n"
+        "the high-pass filter. The PA-ref bar always includes the PA "
+        "Reference Trim and has a marked target zone: amber means too "
+        "quiet, green means in the zone, red means above it.\n"
         "\n"
         "PA DELAY\n"
         "The canceller's own estimate of how far the PA reference leads the "

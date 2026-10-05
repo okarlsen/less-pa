@@ -15,12 +15,16 @@
 //                   reduction), range 0..40 dB. A single colour: more
 //                   suppression isn't "dangerous", so the red/yellow/green
 //                   level-meter semantics don't apply.
+//   reference    -- like signalLevel, but for a signal with a *target* level
+//                   (the PA feed: the canceller adapts slowly if it is too
+//                   quiet). Colour says where it is relative to the zone set
+//                   with setTargetZone(): amber below, green inside, red above.
 // SettableTooltipClient so the bar itself carries the hint -- hovering the
 // meter is the natural gesture, and juce::Component alone has no setTooltip().
 class LevelMeterComponent : public juce::Component,
                             public juce::SettableTooltipClient {
 public:
-    enum class Style { signalLevel, suppression };
+    enum class Style { signalLevel, suppression, reference };
 
     // Which way the bar grows. Defaults to vertical -- that is the shape a
     // channel-strip meter is expected to have, and defaulting to it keeps
@@ -45,8 +49,17 @@ public:
         repaint();
     }
 
+    // The level range (dBFS) worth aiming for. Drawn as a faint band with a
+    // tick at each end, and what a Style::reference meter colours against.
+    void setTargetZone(float lowDb, float highDb) {
+        zoneLowDb = lowDb;
+        zoneHighDb = highDb;
+        hasZone = true;
+        repaint();
+    }
+
     void setLevel(float newValue) {
-        const float db = (style == Style::signalLevel)
+        const float db = (style != Style::suppression)
                               ? juce::Decibels::gainToDecibels(newValue, rangeMinDb)
                               : newValue;
         if (db > displayedDb)
@@ -76,6 +89,25 @@ public:
         g.setColour(LessPAColours::windowBackground);
         g.fillRoundedRectangle(bounds, corner);
 
+        // The target zone sits under the fill so the bar passes over it; its
+        // edge ticks are drawn after the fill so they stay visible on a full bar.
+        const auto fullBounds = bounds;
+        const auto positionOf = [this](float db) {
+            return juce::jlimit(0.0f, 1.0f, (db - rangeMinDb) / (rangeMaxDb - rangeMinDb));
+        };
+        float zoneStart = 0.0f, zoneEnd = 0.0f;
+        if (hasZone) {
+            zoneStart = positionOf(zoneLowDb);
+            zoneEnd = positionOf(zoneHighDb);
+            g.setColour(juce::Colours::white.withAlpha(0.12f));
+            if (orientation == Orientation::vertical)
+                g.fillRect(fullBounds.getX(), fullBounds.getBottom() - fullBounds.getHeight() * zoneEnd,
+                           fullBounds.getWidth(), fullBounds.getHeight() * (zoneEnd - zoneStart));
+            else
+                g.fillRect(fullBounds.getX() + fullBounds.getWidth() * zoneStart, fullBounds.getY(),
+                           fullBounds.getWidth() * (zoneEnd - zoneStart), fullBounds.getHeight());
+        }
+
         const float proportion = juce::jlimit(0.0f, 1.0f, (displayedDb - rangeMinDb) / (rangeMaxDb - rangeMinDb));
         if (proportion > 0.0f) {
             // Vertical grows from the bottom, horizontal from the left --
@@ -83,13 +115,32 @@ public:
             auto filled = orientation == Orientation::vertical
                               ? bounds.removeFromBottom(bounds.getHeight() * proportion)
                               : bounds.removeFromLeft(bounds.getWidth() * proportion);
-            const juce::Colour colour = style == Style::suppression
-                                             ? LessPAColours::meterSuppression
-                                             : (displayedDb > -3.0f    ? LessPAColours::meterDanger
-                                                : displayedDb > -12.0f ? LessPAColours::meterCaution
-                                                                       : LessPAColours::meterSafe);
+            juce::Colour colour;
+            if (style == Style::suppression)
+                colour = LessPAColours::meterSuppression;
+            else if (style == Style::reference && hasZone)
+                colour = displayedDb < zoneLowDb    ? LessPAColours::meterCaution  // too quiet
+                         : displayedDb <= zoneHighDb ? LessPAColours::meterSafe     // in the zone
+                                                     : LessPAColours::meterDanger;  // too hot
+            else
+                colour = displayedDb > -3.0f    ? LessPAColours::meterDanger
+                         : displayedDb > -12.0f ? LessPAColours::meterCaution
+                                                : LessPAColours::meterSafe;
             g.setColour(colour);
             g.fillRoundedRectangle(filled, corner);
+        }
+
+        if (hasZone) {
+            g.setColour(juce::Colours::white.withAlpha(0.55f));
+            for (const float edge : { zoneStart, zoneEnd }) {
+                if (orientation == Orientation::vertical) {
+                    const float y = fullBounds.getBottom() - fullBounds.getHeight() * edge;
+                    g.drawLine(fullBounds.getX(), y, fullBounds.getRight(), y, 1.0f);
+                } else {
+                    const float x = fullBounds.getX() + fullBounds.getWidth() * edge;
+                    g.drawLine(x, fullBounds.getY(), x, fullBounds.getBottom(), 1.0f);
+                }
+            }
         }
     }
 
@@ -99,5 +150,8 @@ private:
     float rangeMinDb = -60.0f;
     float rangeMaxDb = 0.0f;
     float displayedDb = -60.0f;
+    bool hasZone = false;
+    float zoneLowDb = 0.0f;
+    float zoneHighDb = 0.0f;
     static constexpr float decayDbPerTick = 1.2f; // ~36dB/s at the editor's 30Hz timer
 };
