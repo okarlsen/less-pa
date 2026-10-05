@@ -25,7 +25,8 @@ private:
     //
     // Three columns, one panel each, reading left to right as the signal
     // flows: INPUT (what reaches the canceller, and its levels) ->
-    // CANCELLATION (how much is removed) -> OUTPUT (what the canceller is
+    // CANCELLATION (stage 1, the canceller, then stage 2, the bleed
+    // suppressor) -> OUTPUT (what the canceller is
     // doing, and the mix). Every control is on this one page.
     static constexpr int designWidth = 768;
     static constexpr int designHeight = 432;
@@ -74,7 +75,13 @@ private:
     static constexpr int labelledCombo = controlLabelRow + comboRow;
     static constexpr int meterPair = 2 * meterRowHeight + meterRowGap;
 
-    static constexpr int resetButtonWidth = 64; // sits in the CANCELLATION header row
+    static constexpr int resetButtonWidth = 64; // sits in the BLEED SUPPRESSOR header row
+
+    // The CANCELLATION column holds two stages, so its second header and
+    // sliders sit closer than the other columns' controls to fit.
+    static constexpr int stageGap = 14;       // Tail Length to the suppressor's header
+    static constexpr int stageHeaderGap = 8;  // suppressor header to Strength
+    static constexpr int stageControlGap = 10; // between the suppressor's sliders
 
     static constexpr int logoWidth = 70;
     static constexpr float logoAspect = 814.0f / 200.0f;
@@ -92,7 +99,8 @@ private:
     static_assert(sectionHeaderRow + 2 * (controlGap + labelledSlider) + meterBlockGap + meterPair
                       <= panelBodyHeight,
                   "INPUT rows must fit the panel");
-    static_assert(sectionHeaderRow + headerGap + labelledCombo + 3 * (controlGap + labelledSlider)
+    static_assert(sectionHeaderRow + headerGap + labelledCombo + stageGap + sectionHeaderRow
+                          + stageHeaderGap + 3 * labelledSlider + 2 * stageControlGap
                       <= panelBodyHeight,
                   "CANCELLATION rows must fit the panel");
     static_assert(sectionHeaderRow + headerGap + meterPair + meterBlockGap + labelledSlider
@@ -127,13 +135,13 @@ private:
     void updateSliders();
     void showHelpDialog();
     void updateResetButton();
-    void resetCleanupToDefaults();
+    void resetSuppressorToDefaults();
 
-    // The cleanup controls (Amount, Max Reduction, Response) -- the one list
+    // The bleed suppressor's controls (Strength, Range, Time) -- the one list
     // both the Reset button's enabled state and the reset itself work from.
     // Tail Length is left out on purpose: it is a venue choice, not a
     // sound-shaping setting someone would want undone with it.
-    std::array<juce::RangedAudioParameter*, 3> getCleanupParameters() const;
+    std::array<juce::RangedAudioParameter*, 3> getSuppressorParameters() const;
 
     PAEchoCancellerAudioProcessor& processor;
 
@@ -165,28 +173,31 @@ private:
     // than floating above it, so the panel rectangle and the Grid area it is
     // laid out from are one and the same rectangle.
     juce::Label inputSectionLabel{ "inputSectionLabel", "INPUT" };
-    juce::Label cancellationSectionLabel{ "cancellationSectionLabel", "CANCELLATION" };
+    juce::Label cancellationSectionLabel{ "cancellationSectionLabel", "1  CANCELLER" };
+    juce::Label suppressorSectionLabel{ "suppressorSectionLabel", "2  BLEED SUPPRESSOR" };
     juce::Label outputSectionLabel{ "outputSectionLabel", "OUTPUT" };
 
-    // Puts Amount, Max Reduction and Response back to their defaults. Greyed
+    // Puts Strength, Range and Time back to their defaults; the canceller's
+    // learned filter is untouched ("Reset" read as relearning). Greyed
     // out when they already are, so it also answers "have I changed
     // anything here?" at a glance.
-    juce::TextButton resetButton{ "Reset" };
+    juce::TextButton resetButton{ "Defaults" };
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };
     juce::ComboBox tailLengthCombo;
 
-    // The cleanup stage's controls. All apply live and are cheap to change,
-    // so they commit on every value change like Mix. Max Reduction's slider
-    // runs 0..24 (more reduction to the right, like Amount) and shows the
-    // parameter's negative dB value.
-    juce::Label amountLabel{ "amountLabel", "Amount" };
+    // The bleed suppressor's controls (parameter IDs amount, maxReduction,
+    // response). All apply live and are cheap to change, so they commit on
+    // every value change like Mix. Range's slider runs 0..24 (more
+    // reduction to the right, like Strength) and shows the parameter's
+    // negative dB value.
+    juce::Label amountLabel{ "amountLabel", "Strength" };
     juce::Slider amountSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
-    juce::Label maxReductionLabel{ "maxReductionLabel", "Max Reduction" };
+    juce::Label maxReductionLabel{ "maxReductionLabel", "Range" };
     juce::Slider maxReductionSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
-    juce::Label responseLabel{ "responseLabel", "Response" };
+    juce::Label responseLabel{ "responseLabel", "Time" };
     juce::Slider responseSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     juce::Label hpfLabel{ "hpfLabel", "Input HPF" };
@@ -204,7 +215,7 @@ private:
     juce::Label inputMeterLabel{ "inputMeterLabel", "Mic" };
     juce::Label sidechainMeterLabel{ "sidechainMeterLabel", "PA ref" };
     juce::Label outputMeterLabel{ "outputMeterLabel", "Output" };
-    juce::Label suppressionMeterLabel{ "suppressionMeterLabel", "Suppression" };
+    juce::Label suppressionMeterLabel{ "suppressionMeterLabel", "Reduction" };
 
     // The canceller's echo-path delay estimate (see
     // getEstimatedEchoPathDelayMs() in PluginProcessor.h) -- the quickest

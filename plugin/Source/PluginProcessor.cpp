@@ -14,7 +14,8 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
     // automation by it, and get/setStateInformation key saved sessions by
     // it. Tail Length, HPF Frequency, PA Reference Trim, Mix and Bypass
     // keep the IDs they had in 1.0.x, so old sessions and automation carry
-    // over. Amount, Max Reduction and Response are new IDs: a 1.0.x session
+    // over. The bleed suppressor's Strength, Range and Time (IDs amount,
+    // maxReduction and response) are new: a 1.0.x session
     // starts them at their defaults, and the removed Classic-engine
     // controls' saved values are simply ignored (see setStateInformation).
     addParameter(tailLengthParam = new juce::AudioParameterChoice(
@@ -24,13 +25,13 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
     // bare filter and took ~1 dB less of the crowd than the earlier fixed
     // Moderate setting, which was judged too strong by ear.
     addParameter(amountParam = new juce::AudioParameterFloat(
-        "amount", "Amount",
+        "amount", "Suppressor Strength",
         juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 25.0f));
     addParameter(maxReductionParam = new juce::AudioParameterFloat(
-        "maxReduction", "Max Reduction",
+        "maxReduction", "Suppressor Range",
         juce::NormalisableRange<float>(-24.0f, 0.0f, 0.1f), -12.0f));
     addParameter(responseParam = new juce::AudioParameterFloat(
-        "response", "Response",
+        "response", "Suppressor Time",
         juce::NormalisableRange<float>(3.0f, 50.0f, 0.1f), 20.0f));
     auto hpfRange = juce::NormalisableRange<float>(80.0f, 300.0f, 0.1f);
     hpfRange.setSkewForCentre(150.0f);

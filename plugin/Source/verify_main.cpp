@@ -2720,7 +2720,7 @@ int runScreenshotMode(const char* outPath, bool adjusted) {
             juce::MessageManager::getInstance()->runDispatchLoopUntil(10);
     }
 
-    // --adjusted moves a cleanup control off its default, so the Reset
+    // --adjusted moves a suppressor control off its default, so the Defaults
     // button shows enabled.
     if (adjusted)
         proc.getResponseParameter()->setValueNotifyingHost(

@@ -145,7 +145,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     versionLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
     addAndMakeVisible(versionLabel);
 
-    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel, &outputSectionLabel }) {
+    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel, &suppressorSectionLabel, &outputSectionLabel }) {
         label->setJustificationType(juce::Justification::centredLeft);
         // Secondary text: a group header names the region, it isn't a control,
         // so it should sit behind the labels it groups in the reading order.
@@ -153,6 +153,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     }
     addAndMakeVisible(inputSectionLabel);
     addAndMakeVisible(cancellationSectionLabel);
+    addAndMakeVisible(suppressorSectionLabel);
     addAndMakeVisible(outputSectionLabel);
 
     // Left-aligned, not centred: every control below is either full-width or
@@ -242,7 +243,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     // Horizontal rather than the component's default vertical: four
     // side-by-side vertical bars needed the whole window width to keep
-    // "PA-ref(sc)" and "Suppression" legible, and column 1 is a third of it.
+    // "PA-ref(sc)" and the reduction meter's name legible, and column 1 is a third of it.
     for (auto* meter : { &inputMeter, &sidechainMeter, &outputMeter, &suppressionMeter }) {
         meter->setOrientation(LevelMeterComponent::Orientation::horizontal);
         addAndMakeVisible(meter);
@@ -264,7 +265,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     statusLabel.setColour(juce::Label::textColourId, LessPAColours::primaryText);
     addAndMakeVisible(statusLabel);
 
-    resetButton.onClick = [this] { resetCleanupToDefaults(); };
+    resetButton.onClick = [this] { resetSuppressorToDefaults(); };
     addAndMakeVisible(resetButton);
 
     // A few words each, deliberately much shorter than the corresponding
@@ -278,16 +279,16 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     helpButton.setTooltip("Full control reference");
     versionLabel.setTooltip("Less PA v" JucePlugin_VersionString);
     tailLengthCombo.setTooltip("Match to the venue's reverb");
-    amountSlider.setTooltip("Extra removal of the PA bleed that's left; 0% = none");
-    maxReductionSlider.setTooltip("How far the extra removal may turn down any frequency");
-    responseSlider.setTooltip("How fast the extra removal reacts; longer = smoother");
+    amountSlider.setTooltip("How hard the suppressor ducks leftover PA; 0% = bypassed");
+    maxReductionSlider.setTooltip("The deepest any frequency band can be ducked");
+    responseSlider.setTooltip("Attack and release time of the ducking");
     hpfSlider.setTooltip("Cutoff on mic + reference");
     referenceGainSlider.setTooltip("Reference gain only");
     dryWetSlider.setTooltip("Blend cancelled vs original");
-    resetButton.setTooltip("Amount, Max Reduction and Response back to defaults");
+    resetButton.setTooltip("Strength, Range and Time back to defaults; the canceller keeps what it learned");
     inputMeter.setTooltip("Mic, after the HPF");
     sidechainMeter.setTooltip("After HPF and trim; aim for the zone");
-    suppressionMeter.setTooltip("Reduction, in vs out");
+    suppressionMeter.setTooltip("Total reduction of both stages, in vs out");
     outputMeter.setTooltip("After cancellation");
     delayReadoutLabel.setTooltip("Echo path delay estimate");
     statusLabel.setTooltip("What the canceller is doing");
@@ -412,7 +413,7 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     // stale text-box size would silently cap the value text at the default
     // size. Both are skipped when unchanged so the common
     // "same size, re-laid out" path doesn't rebuild the sliders' text boxes.
-    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel, &outputSectionLabel })
+    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel, &suppressorSectionLabel, &outputSectionLabel })
         label->setFont(juce::FontOptions(scale * 11.0f).withStyle("Bold"));
 
     for (auto* label : { &tailLengthLabel, &amountLabel, &maxReductionLabel, &responseLabel,
@@ -480,22 +481,25 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                      inputMeterLabel, inputMeter, sidechainMeterLabel, sidechainMeter);
     }
 
-    // COLUMN 2 -- CANCELLATION: the venue's Tail Length, then the three
-    // controls for how much is removed, with their Reset in the header row.
+    // COLUMN 2 -- the two processing stages in signal order: the
+    // canceller with its Tail Length, then the bleed suppressor's three
+    // controls, with their Reset in the suppressor's header row.
     {
         auto body = panelBody(sections.column2);
-        auto header = body.withHeight(sc(sectionHeaderRow));
-        resetButton.setBounds(header.removeFromRight(sc(resetButtonWidth))
-                                  .withSizeKeepingCentre(sc(resetButtonWidth), sc(buttonRow - 4)));
-
         SectionGrid grid(1, scale, 0);
         grid.row(sectionHeaderRow, cancellationSectionLabel);
         addLabelled(grid, headerGap, tailLengthLabel, tailLengthCombo, comboRow);
-        addLabelled(grid, controlGap, amountLabel, amountSlider, sliderRow);
-        addLabelled(grid, controlGap, maxReductionLabel, maxReductionSlider, sliderRow);
-        addLabelled(grid, controlGap, responseLabel, responseSlider, sliderRow);
+        grid.gap(stageGap);
+        grid.row(sectionHeaderRow, suppressorSectionLabel);
+        addLabelled(grid, stageHeaderGap, amountLabel, amountSlider, sliderRow);
+        addLabelled(grid, stageControlGap, maxReductionLabel, maxReductionSlider, sliderRow);
+        addLabelled(grid, stageControlGap, responseLabel, responseSlider, sliderRow);
         grid.performLayout(body);
-        cancellationSectionLabel.setBounds(cancellationSectionLabel.getBounds().withRight(resetButton.getX()));
+
+        auto header = suppressorSectionLabel.getBounds();
+        resetButton.setBounds(header.removeFromRight(sc(resetButtonWidth))
+                                  .withSizeKeepingCentre(sc(resetButtonWidth), sc(buttonRow - 4)));
+        suppressorSectionLabel.setBounds(header);
     }
 
     // COLUMN 3 -- OUTPUT: what the canceller is doing, then the mix.
@@ -522,24 +526,24 @@ void PAEchoCancellerAudioProcessorEditor::updateResetButton()
     // Greyed out when there is nothing to reset, so the button also answers
     // "have I changed how much is removed?" at a glance.
     bool modified = false;
-    for (auto* param : getCleanupParameters())
+    for (auto* param : getSuppressorParameters())
         modified = modified || std::abs(param->getValue() - param->getDefaultValue()) >= 1.0e-4f;
     if (resetButton.isEnabled() != modified)
         resetButton.setEnabled(modified);
 }
 
-std::array<juce::RangedAudioParameter*, 3> PAEchoCancellerAudioProcessorEditor::getCleanupParameters() const
+std::array<juce::RangedAudioParameter*, 3> PAEchoCancellerAudioProcessorEditor::getSuppressorParameters() const
 {
     return { processor.getAmountParameter(), processor.getMaxReductionParameter(), processor.getResponseParameter() };
 }
 
-void PAEchoCancellerAudioProcessorEditor::resetCleanupToDefaults()
+void PAEchoCancellerAudioProcessorEditor::resetSuppressorToDefaults()
 {
     // One gesture per parameter, like any other control edit, so hosts record
     // the reset as ordinary automation/undo steps. The controls themselves
     // pick the new values up from the 30Hz timer sync, and the processor
     // applies them live like any other change.
-    for (auto* param : getCleanupParameters()) {
+    for (auto* param : getSuppressorParameters()) {
         param->beginChangeGesture();
         param->setValueNotifyingHost(param->getDefaultValue());
         param->endChangeGesture();
@@ -725,25 +729,53 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 
 void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
 {
-    // Mirrors the panel exactly: the three columns left to right, then how
-    // to use it live and in post. The order is the thing that has to match
-    // the panel, and does.
+    // How the two stages work first, then the panel exactly: the columns
+    // left to right (the middle one as its two stages), then how to use it
+    // live and in post. The order is the thing that has to match the
+    // panel, and does.
     static const juce::String helpText =
         "LESS PA removes PA speaker bleed from an audience microphone, using "
         "the PA feed itself as a reference -- wire the PA signal into the "
-        "Reference sidechain input. It works by acoustic echo cancellation "
-        "(AEC), the same technique phones and conferencing systems use to "
-        "remove speaker bleed.\n"
-        "\n"
-        "It works in two steps. First it learns how the PA sounds by the "
-        "time it reaches the mic, makes a copy of that from the PA feed, "
-        "and subtracts it. That copy is never perfect, so some bleed is "
-        "left. Second, an extra removal step turns down the frequencies "
-        "where that leftover bleed is still audible. Amount, Max Reduction "
-        "and Response set the second step.\n"
+        "Reference sidechain input. It is built on acoustic echo cancellation "
+        "(AEC), the technique phones and conferencing systems use to remove "
+        "speaker bleed.\n"
         "\n"
         "The panel follows the signal, left to right: what reaches the "
-        "canceller, how it cancels, and what comes out.\n"
+        "processing, the two processing stages, and what comes out.\n"
+        "\n"
+        "\n"
+        "=== HOW IT WORKS: TWO STAGES ===\n"
+        "\n"
+        "STAGE 1: CANCELLER (LINEAR SUBTRACTION)\n"
+        "An adaptive filter learns the path from the PA feed to the mic: the "
+        "delay, the room's reflections and reverb tail, and the colouring of "
+        "speakers and room. Tail Length sets how long a response it models. "
+        "It is a frequency-domain Kalman filter, so each frequency band "
+        "adapts at its own rate: quickly while it is still unsure, slowly "
+        "once it has settled. It produces a modelled copy of the PA as it "
+        "arrives at the mic and subtracts it from the mic signal. Because "
+        "this is subtraction, not EQ or gating, the crowd and anything else "
+        "that isn't the PA passes through untouched.\n"
+        "What it cannot remove is anything that is not a linear copy of the "
+        "PA feed: speaker and amp distortion, a room that changes (people "
+        "moving, wind), reverb longer than the Tail Length, and sound that "
+        "never appears on the reference, such as stage monitors, backline "
+        "and acoustic drums.\n"
+        "\n"
+        "STAGE 2: BLEED SUPPRESSOR (PER-BAND DUCKING)\n"
+        "This stage works on what is left after the subtraction, in "
+        "frequency bands about 170-190 Hz wide. For each band it estimates "
+        "how much PA is still there, from the filter's own uncertainty plus "
+        "a share of the modelled PA (which covers distortion and modelling "
+        "error), and compares that with the band's actual output. The band "
+        "is then ducked in proportion: a band that is mostly leftover PA is "
+        "turned down, a band that is mostly crowd is left alone. Think of it "
+        "as a multiband ducker keyed from the estimated leftover PA. The "
+        "band gains are applied through a linear-phase filter.\n"
+        "Unlike stage 1, this stage turns down everything in a ducked band, "
+        "crowd included, so it trades a little crowd for less PA. Strength, "
+        "Range and Time set this stage. At 0% Strength it is bypassed and "
+        "you hear stage 1 only.\n"
         "\n"
         "\n"
         "=== INPUT ===\n"
@@ -755,7 +787,7 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "zone the canceller may not register the feed as PA, so raise the "
         "trim. Above the zone nothing breaks, but "
         "a feed that hot risks clipping, so there is no benefit in going "
-        "further. Not a substitute for Amount.\n"
+        "further. Not a substitute for Strength.\n"
         "\n"
         "INPUT HPF\n"
         "A 24dB/octave high-pass filter (80-300Hz), applied identically to "
@@ -769,47 +801,57 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "zone, red means above it.\n"
         "\n"
         "\n"
-        "=== CANCELLATION ===\n"
+        "=== 1  CANCELLER ===\n"
         "\n"
         "TAIL LENGTH\n"
-        "How long a reverb tail the canceller models. Pick by venue: 50 ms "
-        "for a small room, up to 800 ms for an arena or outdoor rig. Longer "
+        "How long a room response stage 1 models. Pick by venue: 50 ms for "
+        "a small room, up to 800 ms for an arena or outdoor rig. Longer "
         "costs a little more CPU. Applies live.\n"
         "\n"
-        "AMOUNT\n"
-        "How much of the bleed that is left after the subtraction gets "
-        "removed on top. 0% turns the extra removal off: only the "
-        "subtraction, the most natural sound. Higher removes more PA, and "
-        "more of the crowd with it. 25% is a good start; raise it if PA "
-        "still comes through, lower it if the crowd sounds thin or watery. "
-        "Applies live.\n"
         "\n"
-        "MAX REDUCTION\n"
-        "How far the extra removal may turn down any frequency. Closer to "
-        "0 dB keeps more of the room under the PA; -24 dB lets it go "
-        "furthest. Has no effect at 0% Amount. Applies live.\n"
+        "=== 2  BLEED SUPPRESSOR ===\n"
         "\n"
-        "RESPONSE\n"
-        "How quickly the extra removal follows the sound (3-50 ms). "
-        "Shorter tracks the PA more tightly but can make crowd noise "
-        "flutter; longer is smoother but lets a little more PA through on "
-        "fast changes. Applies live.\n"
+        "STRENGTH\n"
+        "How hard the bleed suppressor ducks. It scales both the estimate of "
+        "leftover PA and how hard a band is ducked for it. 0% bypasses stage "
+        "2. Raise it if PA still comes through after the cancellation. Lower "
+        "it if the crowd sounds thin, underwater or swirly (\"musical "
+        "noise\"), a sign that crowd is being ducked along with the PA. 25% "
+        "is a good start. Applies live.\n"
         "\n"
-        "RESET\n"
-        "Puts Amount, Max Reduction and Response back to their defaults. "
-        "Greyed out when they already are.\n"
+        "RANGE\n"
+        "The most any one band can be ducked. It works like a gate's range: "
+        "a floor no band goes below, however much PA the suppressor thinks "
+        "is in it. A smaller range keeps more room and crowd under the PA "
+        "and makes artefacts less obvious; a bigger range removes more where "
+        "the PA dominates. Has no effect at 0% Strength. Applies live.\n"
+        "\n"
+        "TIME\n"
+        "The time constant of the ducking, the same for attack and release. "
+        "It smooths both the level measurement and the gain, so the audible "
+        "reaction is somewhat slower than the number. Shorter follows "
+        "transients (kick, snare) more tightly but can make the crowd "
+        "flutter; longer is smoother but lets a little PA through on fast "
+        "changes. One processing block is about 2.7 ms at 48kHz, so 3 ms is "
+        "essentially unsmoothed. Applies live.\n"
+        "\n"
+        "DEFAULTS\n"
+        "Puts Strength, Range and Time back to their defaults (25%, -12 dB, "
+        "20 ms). It does not reset the canceller, which keeps what it has "
+        "learned. Greyed out when they already are.\n"
         "\n"
         "\n"
         "=== OUTPUT ===\n"
         "\n"
-        "SUPPRESSION / OUTPUT METERS\n"
-        "Suppression is the dB difference between mic in and output, so it "
+        "REDUCTION / OUTPUT METERS\n"
+        "Reduction is the dB difference between mic in and output -- the "
+        "combined effect of both stages -- so it "
         "always matches what you hear: near 0dB with no PA to remove, higher "
         "when there is.\n"
         "\n"
         "MIX\n"
-        "Blends the cancelled output with the original mic. 100% is fully "
-        "cancelled; lower it to bring some of the original back.\n"
+        "Blends the processed output (both stages) with the original mic. "
+        "100% is fully processed; lower it to bring some of the original back.\n"
         "\n"
         "STATUS AND PA DELAY\n"
         "\"No PA signal\" means nothing is arriving on the Reference input -- "
@@ -823,8 +865,9 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "=== LIVE AND IN POST ===\n"
         "\n"
         "Live (e.g. LiveProfessor, MainStage): the plugin adds about 4 ms "
-        "of latency (192 samples at 44.1/48kHz, 320 at 96kHz) and reports "
-        "it to the host. Give it a few seconds of PA signal to lock on "
+        "of latency (192 samples at 44.1/48kHz: 128 for the canceller's "
+        "processing block and 64 for the suppressor's linear-phase filter; "
+        "320 at 96kHz) and reports it to the host. Give it a few seconds of PA signal to lock on "
         "before relying on it. Every control applies without interruption.\n"
         "\n"
         "In post: insert it on the mic track with the PA feed on the "

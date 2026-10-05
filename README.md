@@ -9,8 +9,8 @@ and conferencing software use to remove speaker bleed — using the actual
 PA feed as a reference signal (wired into the plugin's Reference sidechain
 input), not a guess at the room's acoustics.
 
-The canceller is a full-band frequency-domain Kalman adaptive filter with a
-light cleanup stage, adding about 4 ms of latency. Built by SGTM on top of
+The canceller is a full-band frequency-domain Kalman adaptive filter followed
+by a per-band bleed suppressor, adding about 4 ms of latency. Built by SGTM on top of
 [JUCE](https://juce.com).
 
 ## Requirements
@@ -56,14 +56,28 @@ hot risks clipping, so there is no benefit in going further.
 
 ### Set how much is removed
 
-The plugin first subtracts its own copy of the PA bleed. That copy is never
-perfect, so some bleed is left, and an extra removal step turns down the
-frequencies where it is still audible. **Amount** sets how much of that
-leftover is removed: 0% turns the extra step off and sounds most natural,
-higher removes more PA and more of the crowd with it. **Max Reduction**
-limits how far it may turn down any frequency, and **Response** how quickly
-it follows the sound. Start at the defaults (25%, −12 dB, 20 ms) and adjust
-by ear.
+Less PA works in two stages. **Stage 1, the canceller**, is an adaptive
+filter that learns the path from the PA feed to the mic (delay, reflections,
+reverb tail, speaker and room colouring), builds a copy of the PA as it
+arrives at the mic and subtracts it. Subtraction leaves the crowd untouched,
+but it cannot remove what isn't a linear copy of the PA feed: distortion, a
+changing room, reverb longer than the **Tail Length**, or sound that never
+reaches the reference, such as stage monitors and backline.
+
+**Stage 2, the bleed suppressor**, works on what is left, in frequency bands
+about 170–190 Hz wide. It estimates how much PA is still in each band and
+ducks the band in proportion, like a multiband ducker keyed from the
+estimated leftover PA. It turns down everything in a ducked band, crowd
+included, so it trades a little crowd for less PA.
+
+- **Strength** (0–100%, default 25%): how hard the suppressor ducks. 0%
+  bypasses stage 2. Lower it if the crowd sounds thin or swirly.
+- **Range** (0 to −24 dB, default −12 dB): the most any band can be ducked,
+  like a gate's range.
+- **Time** (3–50 ms, default 20 ms): attack and release of the ducking.
+
+**Defaults** puts these three back to their defaults; the canceller keeps
+what it has learned. Start at the defaults and adjust by ear.
 
 It also helps to start a bounce a few seconds early. The plugin keeps
 adapting for as long as it runs, and a lead-in of about 10 seconds before the

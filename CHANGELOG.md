@@ -10,19 +10,22 @@ Planned as 1.1.0.
 ### Changed
 
 - **New canceller.** Less PA now uses a full-band Kalman adaptive filter
-  with a light cleanup stage, in place of the WebRTC AEC3 engine of 1.0.x.
+  followed by a per-band bleed suppressor, in place of the WebRTC AEC3 engine of 1.0.x.
   Latency drops from about 19 ms to 192 samples (4.0 ms) at 44.1/48 kHz and
   320 samples (3.3 ms) at 96 kHz. It starts from the mic/PA level ratio,
   so it locks on within a few seconds of PA, and every control applies
   live with no dropout.
-- **New cancellation controls.** Tail Length stays. Suppression Strength
-  and Crowd Protection are replaced by three controls for the extra
-  removal of the bleed that is left after the canceller's subtraction:
-  **Amount** (0-100%, default 25%; 0% turns it off), **Max Reduction** (0
-  to -24 dB, default -12 dB: how far it may turn down any frequency) and
-  **Response** (3-50 ms, default 20 ms: how quickly it follows the sound).
-  All are on the main panel, with a **Reset** button that puts them back
-  to their defaults. The Fine tuning page is gone.
+- **Two stages on the panel.** The middle column now shows the canceller
+  (Tail Length stays) and the **Bleed Suppressor**, which ducks each
+  frequency band by the PA left after cancellation. Suppression Strength
+  and Crowd Protection are replaced by its three controls: **Strength**
+  (0-100%, default 25%; 0% bypasses it), **Range** (0 to -24 dB, default
+  -12 dB: the most any band can be ducked) and **Time** (3-50 ms, default
+  20 ms: attack and release). A **Defaults** button puts them back to
+  their defaults. The Fine tuning page is gone, and the help explains both
+  stages.
+- The Suppression meter is now called Reduction, since it shows the total
+  of both stages.
 - The PA delay readout comes from the filter itself and holds steady.
 
 ### Removed
@@ -34,7 +37,7 @@ Planned as 1.1.0.
 ### Upgrading
 
 - Sessions saved by 1.0.x keep their Tail Length, PA Reference Trim, Input
-  HPF and Mix. Amount, Max Reduction and Response start at their defaults;
+  HPF and Mix. Strength, Range and Time start at their defaults;
   saved values of the removed controls are ignored.
 
 ### Fixed
