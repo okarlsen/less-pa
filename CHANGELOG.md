@@ -15,7 +15,7 @@ Planned as 1.1.0.
   320 samples (3.3 ms) at 96 kHz. It starts from the mic/PA level ratio,
   so it locks on within a few seconds of PA, and every control applies
   live with no dropout.
-- **Two stages on the panel.** The middle column now shows the canceller
+- **Two stages on the panel.** The middle column now shows the **PA Canceller**
   (Tail Length stays) and the **Bleed Suppressor**, which ducks each
   frequency band by the PA left after cancellation. Suppression Strength
   and Crowd Protection are replaced by its three controls: **Strength**

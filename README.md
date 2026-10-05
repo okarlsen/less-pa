@@ -56,7 +56,7 @@ hot risks clipping, so there is no benefit in going further.
 
 ### Set how much is removed
 
-Less PA works in two stages. **Stage 1, the canceller**, is an adaptive
+Less PA works in two stages. **Stage 1, the PA Canceller**, is an adaptive
 filter that learns the path from the PA feed to the mic (delay, reflections,
 reverb tail, speaker and room colouring), builds a copy of the PA as it
 arrives at the mic and subtracts it. Subtraction leaves the crowd untouched,
@@ -64,7 +64,7 @@ but it cannot remove what isn't a linear copy of the PA feed: distortion, a
 changing room, reverb longer than the **Tail Length**, or sound that never
 reaches the reference, such as stage monitors and backline.
 
-**Stage 2, the bleed suppressor**, works on what is left, in frequency bands
+**Stage 2, the Bleed Suppressor**, works on what is left, in frequency bands
 about 170–190 Hz wide. It estimates how much PA is still in each band and
 ducks the band in proportion, like a multiband ducker keyed from the
 estimated leftover PA. It turns down everything in a ducked band, crowd

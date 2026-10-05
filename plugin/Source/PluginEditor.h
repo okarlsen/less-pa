@@ -173,8 +173,8 @@ private:
     // than floating above it, so the panel rectangle and the Grid area it is
     // laid out from are one and the same rectangle.
     juce::Label inputSectionLabel{ "inputSectionLabel", "INPUT" };
-    juce::Label cancellationSectionLabel{ "cancellationSectionLabel", "1  CANCELLER" };
-    juce::Label suppressorSectionLabel{ "suppressorSectionLabel", "2  BLEED SUPPRESSOR" };
+    juce::Label cancellationSectionLabel{ "cancellationSectionLabel", "PA CANCELLER" };
+    juce::Label suppressorSectionLabel{ "suppressorSectionLabel", "BLEED SUPPRESSOR" };
     juce::Label outputSectionLabel{ "outputSectionLabel", "OUTPUT" };
 
     // Puts Strength, Range and Time back to their defaults; the canceller's
