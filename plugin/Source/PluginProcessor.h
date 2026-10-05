@@ -10,10 +10,12 @@
 
 #include "FrameFifo.h"
 #include "HighPassFilterChain.h"
+#include "KalmanEchoCanceller.h"
 #include "TailLengthEchoControl.h"
 
 class PAEchoCancellerAudioProcessor : public juce::AudioProcessor,
-                                       private juce::Thread
+                                       private juce::Thread,
+                                       private juce::AsyncUpdater
 {
 public:
     PAEchoCancellerAudioProcessor();
@@ -55,6 +57,12 @@ public:
     juce::AudioParameterFloat* getProtectionHoldTimeParameter() const noexcept { return protectionHoldTimeParam; }
     juce::AudioParameterChoice* getNearendDetectorParameter() const noexcept { return nearendDetectorParam; }
     juce::AudioParameterFloat* getTransitionSmoothingParameter() const noexcept { return transitionSmoothingParam; }
+    juce::AudioParameterChoice* getEngineParameter() const noexcept { return engineParam; }
+
+    // Engine choice indices (the "engine" parameter)
+    static constexpr int engineKalman = 0;
+    static constexpr int engineClassic = 1;
+    int getAppliedEngine() const noexcept { return appliedEngine.load(std::memory_order_relaxed); }
 
     // Latency-matched internal bypass. Without this override, hosts
     // synthesize their own bypass by routing around the plugin entirely,
@@ -359,7 +367,7 @@ private:
     // throwaway AudioProcessing instance, a guaranteed dropout when run
     // inside an audio callback.
     int aec3InternalDelaySamples = 0;
-    std::vector<float> dryPrefillSilence; // sized to aec3InternalDelaySamples in prepareToPlay, so resyncDryDelay never allocates
+    std::vector<float> dryPrefillSilence; // sized to the larger engine internal delay in prepareToPlay, so resyncDryDelay never allocates
     std::vector<FrameFifo> dryDelayFifos;               // one per mic channel -- see (1) above
     std::vector<FrameFifo> aec3DelayCompensationFifos;  // one per mic channel -- see (2) above
     std::vector<std::vector<float>> dryOutputScratch;   // [channel][sample], sized to samplesPerBlock
@@ -454,6 +462,26 @@ private:
     // sizes to that fixed frame size, adding no more buffering than the gap
     // between the two requires.
     int frameSize = 0;
+
+    // Engine switch. Kalman (default): KalmanEchoCanceller, fed the same
+    // FIFO/frame pipeline as AEC3 but with its own, much smaller frame (one
+    // Kalman block, 128 samples at 44.1/48 kHz) and its suppressor FIR delay
+    // in place of AEC3's internal delay -- so the dry, bypass and latency
+    // bookkeeping below is shared, just parameterised by the engine:
+    // reported latency = frameSize + engineInternalDelaySamples().
+    // Classic: AEC3 as before (480-sample frames, ~878 samples in all).
+    // The AEC3 instance keeps being built/rebuilt while Kalman runs, so
+    // switching back never waits on a rebuild.
+    juce::AudioParameterChoice* engineParam = nullptr;
+    std::atomic<int> appliedEngine{ -1 };
+    KalmanEchoCanceller kalman;
+    int aec3FrameSize = 0;
+    int maxFrameSize = 0;
+    int engineInternalDelaySamples() const noexcept;
+    void applyEngine(int engine);          // audio thread or prepareToPlay; never allocates
+    void updateKalmanSettings();           // Tail Length / Suppression Strength / Crowd Protection -> Kalman
+    void handleAsyncUpdate() override;     // reports a live engine switch's new latency from the message thread
+    std::atomic<int> pendingLatencySamples{ 0 };
 
     std::vector<FrameFifo> micInFifos;
     std::vector<FrameFifo> micOutFifos;

@@ -7,9 +7,26 @@ All notable changes to Less PA are documented here. Versions follow
 
 ### Added
 
+- **Engine** switch in the title strip. **Kalman (low latency)** is a new
+  full-band adaptive filter with a light cleanup stage: 192 samples (4.0 ms)
+  of latency at 44.1/48 kHz and 320 samples (3.3 ms) at 96 kHz, against
+  about 19 ms for **Classic**, the WebRTC AEC3 engine of earlier versions.
+  On three real venue recordings it removed 3-6 dB more PA bleed. Kalman is
+  the default, including for sessions saved by earlier versions; pick
+  Classic to get the old sound back. Switching applies live and reports the
+  new latency to the host. Tail Length, Suppression Strength and Crowd
+  Protection drive both engines; the Fine tuning page applies to Classic
+  only and is greyed out under Kalman.
 - A **Reset to defaults** button on the Fine tuning page puts Near-end
   Detector, Protection Hold Time, Transition Smoothing and Limit HF Gain back
   to their defaults. It is greyed out when nothing there has been changed.
+
+### Fixed
+
+- The delay the plugin reports to the host now matches the delay it adds at
+  every host buffer size. Previously, buffer sizes that are a multiple of
+  the internal frame could make the audio arrive earlier than reported, and
+  the first frame after a reset could drop out briefly.
 
 ## [1.0.4]
 

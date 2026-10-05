@@ -276,6 +276,17 @@ std::vector<float> runRawAec3(const webrtc::EchoCanceller3Config& config, int sa
     return output;
 }
 
+// Which engine the suite is exercising. The original suite was written
+// against AEC3 and runs with Classic; main() then re-runs the
+// engine-agnostic tests (latency, dry/wet, bypass, bounce, robustness)
+// with Kalman. Every test processor gets it right after construction.
+int gTestEngine = PAEchoCancellerAudioProcessor::engineClassic;
+
+void applyTestEngine(PAEchoCancellerAudioProcessor& proc) {
+    auto* engine = proc.getEngineParameter();
+    engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(gTestEngine)));
+}
+
 bool setMonoLayout(PAEchoCancellerAudioProcessor& proc) {
     PAEchoCancellerAudioProcessor::BusesLayout layout;
     layout.inputBuses.add(juce::AudioChannelSet::mono());
@@ -294,6 +305,7 @@ bool testSuppressionMeterUpdates(int sampleRate) {
     auto signals = makeSignals(sampleRate, durationS);
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -409,6 +421,7 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, int suppressionStren
     }
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -517,6 +530,7 @@ bool testSuppressionMeterTransientAlignment(int sampleRate) {
     const std::vector<float> reference(static_cast<size_t>(n), 0.0f); // no PA content whatsoever
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -579,6 +593,7 @@ bool testClickFreeRoomChange(int sampleRate) {
     auto signals = makeSignals(sampleRate, durationS);
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -654,6 +669,7 @@ bool testLargeRoomBenefit(int sampleRate) {
 
     auto runWithRoomSize = [&](int roomSizeIndex) {
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         setMonoLayout(proc);
         auto* param = proc.getParameters()[0];
         param->setValueNotifyingHost(static_cast<float>(roomSizeIndex) / static_cast<float>(param->getNumSteps() - 1));
@@ -743,6 +759,7 @@ bool testSuppressionStrengthPresets(int sampleRate) {
 
     auto runWithStrength = [&](int strengthIndex) {
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         setMonoLayout(proc);
         proc.getParameters()[1]->setValueNotifyingHost(static_cast<float>(strengthIndex) / 2.0f);
         return runThroughProcessor(proc, sampleRate, reference, mic);
@@ -843,6 +860,7 @@ bool testOfflineVsLiveDynamicHfContent(int sampleRate) {
     }
 
     PAEchoCancellerAudioProcessor liveProc;
+    applyTestEngine(liveProc);
     if (!setMonoLayout(liveProc)) {
         printf("  FAILED to set mono layout (live)\n");
         return false;
@@ -851,6 +869,7 @@ bool testOfflineVsLiveDynamicHfContent(int sampleRate) {
                                            -1, -1, nullptr, /*nonRealtime*/ false);
 
     PAEchoCancellerAudioProcessor offlineProc;
+    applyTestEngine(offlineProc);
     if (!setMonoLayout(offlineProc)) {
         printf("  FAILED to set mono layout (offline)\n");
         return false;
@@ -997,6 +1016,7 @@ bool testOfflineVsLiveSpectralShiftAfterWarmup(int sampleRate) {
     }
 
     PAEchoCancellerAudioProcessor liveProc;
+    applyTestEngine(liveProc);
     if (!setMonoLayout(liveProc)) {
         printf("  FAILED to set mono layout (live)\n");
         return false;
@@ -1005,6 +1025,7 @@ bool testOfflineVsLiveSpectralShiftAfterWarmup(int sampleRate) {
                                            -1, -1, nullptr, /*nonRealtime*/ false);
 
     PAEchoCancellerAudioProcessor offlineProc;
+    applyTestEngine(offlineProc);
     if (!setMonoLayout(offlineProc)) {
         printf("  FAILED to set mono layout (offline)\n");
         return false;
@@ -1097,6 +1118,7 @@ bool testOfflineRenderUsesCurrentSettingsNotDefaults(int sampleRate) {
 
     auto runOffline = [&](bool useHardAndLimitHf) {
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         setMonoLayout(proc);
         if (useHardAndLimitHf) {
             proc.getSuppressionStrengthParameter()->setValueNotifyingHost(1.0f); // Hard (index 2 of 0-2)
@@ -1151,6 +1173,7 @@ bool testDryWetAlignment(int sampleRate) {
     auto signals = makeSignals(sampleRate, durationS);
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -1306,6 +1329,7 @@ bool testDryWetCombFiltering(int sampleRate) {
 
     auto runWithMix = [&](float wetMixPercent, int blockSize) {
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         setMonoLayout(proc);
         proc.getDryWetMixParameter()->setValueNotifyingHost(wetMixPercent / 100.0f);
         proc.prepareToPlay(sampleRate, blockSize);
@@ -1424,6 +1448,7 @@ bool testGetLatencySamplesAccuracyAllRates() {
         const std::vector<float> reference(static_cast<size_t>(n), 0.0f); // silent: AEC3 stays transparent
 
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         if (!setMonoLayout(proc)) {
             printf("  FAILED to set mono layout\n");
             allPass = false;
@@ -1606,6 +1631,7 @@ bool testReferenceGainTrim() {
     const int blockSize = 512;
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -1692,6 +1718,7 @@ bool testLimitHfGainToggle(int sampleRate) {
 
     auto runWithLimitHfGain = [&](bool limitHfGain) {
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         setMonoLayout(proc);
         proc.getSuppressionStrengthParameter()->setValueNotifyingHost(0.0f); // Gentle
         proc.getLimitHfGainParameter()->setValueNotifyingHost(limitHfGain ? 1.0f : 0.0f);
@@ -1776,6 +1803,7 @@ bool testLiveSuppressorConfigUpdate(int sampleRate) {
     }
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -1875,6 +1903,7 @@ bool testLiveNearendDetectorToggle(int sampleRate) {
     // Run 1: toggle Classic -> Subband mid-stream through the public
     // parameter API. The detector parameter was appended last, after bypass.
     PAEchoCancellerAudioProcessor toggleProc;
+    applyTestEngine(toggleProc);
     if (!setMonoLayout(toggleProc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -1922,6 +1951,7 @@ bool testLiveNearendDetectorToggle(int sampleRate) {
     // input -- the wiring proof (see the block comment above).
     auto runWithDetector = [&](int detectorIndex) {
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         setMonoLayout(proc);
         auto* param = proc.getNearendDetectorParameter();
         param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(detectorIndex)));
@@ -2087,6 +2117,7 @@ bool testReferenceMeterIncludesTrim() {
     bool ok = true;
     for (float trimDb : { -12.0f, 0.0f, 12.0f }) {
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         setMonoLayout(proc);
         auto* trim = proc.getReferenceGainParameter();
         trim->setValueNotifyingHost(trim->convertTo0to1(trimDb));
@@ -2229,6 +2260,7 @@ bool testOversizedHostBlock(int sampleRate) {
     const int oversizedBlock = 4096; // 16x what we told the host we expected
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -2315,6 +2347,7 @@ bool testNonFiniteInputRecovery(int sampleRate) {
             (i % 2 == 0) ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -2388,6 +2421,7 @@ bool testLatencyInvariantAcrossTailLengths() {
         int latencies[4] = { -1, -1, -1, -1 };
         for (int tailIndex = 0; tailIndex < 4; ++tailIndex) {
             PAEchoCancellerAudioProcessor proc;
+            applyTestEngine(proc);
             setMonoLayout(proc);
             auto* param = proc.getTailLengthParameter();
             param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(tailIndex)));
@@ -2420,6 +2454,7 @@ bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
     auto signals = makeSignals(sampleRate, durationS);
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -2523,6 +2558,7 @@ bool testFastBounceTailLengthAppliedPromptly(int sampleRate) {
     auto run = [&](Mode mode) {
         Result r;
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         setMonoLayout(proc);
         auto setSavedTail = [&] {
             auto* param = proc.getTailLengthParameter();
@@ -2627,6 +2663,7 @@ bool testDelayStatsExposed(int sampleRate) {
     auto signals = makeSignals(sampleRate, durationS);
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -2665,10 +2702,81 @@ bool testDelayStatsExposed(int sampleRate) {
     return pass;
 }
 
+// Kalman <-> Classic while playing: each engine reports its own latency
+// (from the message thread, after the switch), the audio thread never
+// blocks on the switch, and the output resumes cleanly on the new engine.
+bool testEngineSwitch(int sampleRate) {
+    printf("\n=== Engine switch test (%d Hz) ===\n", sampleRate);
+    juce::MessageManager::getInstance(); // the latency report is posted to the message thread -- this one
+    const double durationS = 9.0;
+    auto signals = makeSignals(sampleRate, durationS);
+
+    PAEchoCancellerAudioProcessor proc;
+    auto* engine = proc.getEngineParameter();
+    engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(PAEchoCancellerAudioProcessor::engineClassic)));
+    if (!setMonoLayout(proc)) { printf("  FAILED to set mono layout\n"); return false; }
+    engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(PAEchoCancellerAudioProcessor::engineClassic)));
+
+    const int blockSize = 512;
+    proc.prepareToPlay(sampleRate, blockSize);
+    const int latencyClassic = proc.getLatencySamples();
+
+    const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer(totalChannels, blockSize);
+    juce::MidiBuffer midi;
+    const int n = static_cast<int>(signals.mic.size());
+    std::vector<float> output(static_cast<size_t>(n), 0.0f);
+    double worstBlockMs = 0.0;
+    int latencyKalman = -1;
+    bool allFinite = true;
+    for (int pos = 0; pos + blockSize <= n; pos += blockSize) {
+        if (pos == 3 * sampleRate / blockSize * blockSize)
+            engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(PAEchoCancellerAudioProcessor::engineKalman)));
+        if (pos == 6 * sampleRate / blockSize * blockSize) {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(20); // the async latency report
+            latencyKalman = proc.getLatencySamples();
+            engine->setValueNotifyingHost(engine->convertTo0to1(static_cast<float>(PAEchoCancellerAudioProcessor::engineClassic)));
+        }
+        buffer.clear();
+        auto mainIn = proc.getBusBuffer(buffer, true, 0);
+        auto refIn = proc.getBusBuffer(buffer, true, 1);
+        for (int ch = 0; ch < mainIn.getNumChannels(); ++ch)
+            mainIn.copyFrom(ch, 0, signals.mic.data() + pos, blockSize);
+        for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
+            refIn.copyFrom(ch, 0, signals.reference.data() + pos, blockSize);
+        const auto t0 = juce::Time::getHighResolutionTicks();
+        proc.processBlock(buffer, midi);
+        worstBlockMs = std::max(worstBlockMs, juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t0) * 1000.0);
+        auto mainOut = proc.getBusBuffer(buffer, false, 0);
+        for (int s = 0; s < blockSize; ++s) {
+            output[static_cast<size_t>(pos + s)] = mainOut.getSample(0, s);
+            allFinite = allFinite && std::isfinite(mainOut.getSample(0, s));
+        }
+    }
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+    const int latencyBack = proc.getLatencySamples();
+
+    // Output is alive on each engine (the brief zero-padded restart at a
+    // switch is expected; a stuck-silent engine is not).
+    const double rmsKalman = rmsDbfs(output, sampleRate, 4.0, 6.0);
+    const double rmsClassicAgain = rmsDbfs(output, sampleRate, 7.0, 9.0);
+    const int expectedKalman = KalmanEchoCanceller::blockSizeForRate(sampleRate) + KalmanEchoCanceller::suppressorDelaySamples;
+    printf("  Latency: Classic %d -> Kalman %d (expected %d) -> Classic %d samples\n",
+           latencyClassic, latencyKalman, expectedKalman, latencyBack);
+    printf("  Output RMS: Kalman 4-6 s %.1f dBFS, Classic again 7-9 s %.1f dBFS; worst block %.2f ms; finite: %s\n",
+           rmsKalman, rmsClassicAgain, worstBlockMs, allFinite ? "yes" : "NO");
+    const bool pass = latencyKalman == expectedKalman && latencyBack == latencyClassic && latencyClassic > expectedKalman
+                      && rmsKalman > -80.0 && rmsClassicAgain > -80.0 && allFinite && worstBlockMs < 80.0;
+    printf("  %s\n", pass ? "PASS -- engines switch live, each reporting its own latency"
+                          : "CHECK -- engine switch misbehaves");
+    return pass;
+}
+
 bool testStateSaveRestore() {
     printf("\n=== State save/restore round-trip test ===\n");
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     proc.getTailLengthParameter()->setValueNotifyingHost(
         proc.getTailLengthParameter()->convertTo0to1(2.0f));                 // "400ms"
     proc.getSuppressionStrengthParameter()->setValueNotifyingHost(0.0f);     // "Gentle"
@@ -2687,6 +2795,7 @@ bool testStateSaveRestore() {
     proc.getStateInformation(state);
 
     PAEchoCancellerAudioProcessor restored;
+    applyTestEngine(restored);
     restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
 
     const bool pass =
@@ -2730,6 +2839,7 @@ bool testStateSaveRestore() {
         crafted.writeToStream(stream);
     }
     PAEchoCancellerAudioProcessor craftedTarget;
+    applyTestEngine(craftedTarget);
     craftedTarget.setStateInformation(craftedBlock.getData(), static_cast<int>(craftedBlock.getSize()));
     const bool bypassNotRestored = craftedTarget.getBypassParameter()->getValue() < 0.5f;
 
@@ -2777,6 +2887,7 @@ bool testBypassRawPassthrough(int sampleRate) {
     }
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -2891,6 +3002,7 @@ bool testBypassToggleClickFree(int sampleRate) {
     const int n = static_cast<int>(signals.mic.size());
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     if (!setMonoLayout(proc)) {
         printf("  FAILED to set mono layout\n");
         return false;
@@ -3036,6 +3148,7 @@ bool testHighPassFilterResponse() {
 
 static void printDefaultBusLayout() {
     PAEchoCancellerAudioProcessor proc; // freshly constructed, no layout negotiation yet
+    applyTestEngine(proc);
     printf("=== Default bus layout (as declared, before any host negotiation) ===\n");
     printf("  Input buses:  %d\n", proc.getBusCount(true));
     for (int i = 0; i < proc.getBusCount(true); ++i) {
@@ -3067,6 +3180,7 @@ static void benchmarkTailLengthCpuCost(int sampleRate) {
 
     for (int tailIndex = 0; tailIndex < 4; ++tailIndex) {
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         setMonoLayout(proc);
         auto* param = proc.getTailLengthParameter();
         param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(tailIndex)));
@@ -3195,9 +3309,10 @@ static void reportPeriodicity(const char* label, const std::vector<double>& trac
 }
 
 int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeconds, bool writeOutputs,
-                        bool irregularCadence) {
-    printf("=== Real-material regression harness (%s cadence) ===\n",
-           irregularCadence ? "IRREGULAR block-size" : "uniform 512-sample");
+                        bool irregularCadence, int engine) {
+    const bool kalmanEngine = engine == PAEchoCancellerAudioProcessor::engineKalman;
+    printf("=== Real-material regression harness (%s engine, %s cadence) ===\n",
+           kalmanEngine ? "Kalman" : "Classic", irregularCadence ? "IRREGULAR block-size" : "uniform 512-sample");
     std::vector<float> mic, ref;
     double micRate = 0.0, refRate = 0.0;
     if (!loadWavMono(juce::File(juce::String(micPath)), mic, micRate)) return 1;
@@ -3268,19 +3383,21 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     // cadence comparison never clobbers the uniform baseline it's being
     // compared against.
     juce::File csvFile(juce::File::getCurrentWorkingDirectory().getChildFile(
-        irregularCadence ? "real_material_report_irregular.csv" : "real_material_report.csv"));
+        juce::String(kalmanEngine ? "kalman_" : "") + (irregularCadence ? "real_material_report_irregular.csv" : "real_material_report.csv")));
     juce::String csv("config,tail,suppression,fullband_reduction_db,highband_reduction_db,aec3_erle_db,aec3_delay_ms\n");
 
     printf("\n%-22s %14s %14s %10s %10s\n", "config", "full-band red.", ">=2kHz red.", "ERLE", "delay est.");
     bool allRan = true;
     for (const auto& cfg : configs) {
         PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
         if (!setMonoLayout(proc)) { printf("  FAILED to set mono layout\n"); return 1; }
         {
             auto* tailParam = proc.getTailLengthParameter();
             tailParam->setValueNotifyingHost(tailParam->convertTo0to1(static_cast<float>(cfg.tailIndex)));
             proc.getSuppressionStrengthParameter()->setValueNotifyingHost(static_cast<float>(cfg.suppressionIndex) / 2.0f);
             proc.getNearendDetectorParameter()->setValueNotifyingHost(static_cast<float>(cfg.detectorIndex));
+            proc.getEngineParameter()->setValueNotifyingHost(proc.getEngineParameter()->convertTo0to1(static_cast<float>(engine)));
         }
 
         // Irregular cadence: the same deliberately off-frame-boundary cycling
@@ -3405,7 +3522,7 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
             << "," << juce::String(erleDb, 2) << "," << delayMs << "\n";
 
         if (writeOutputs)
-            writeWav16("real_out_" + std::string(cfg.name) + ".wav", output, sampleRate);
+            writeWav16("real_out_" + std::string(kalmanEngine ? "kalman_" : "") + cfg.name + ".wav", output, sampleRate);
     }
 
     csvFile.replaceWithText(csv);
@@ -4179,17 +4296,21 @@ bool testSubbandHoldReducesFlipRate(int sampleRate) {
     return pass;
 }
 
-// --screenshot <out.png> [--fine-tuning]: renders the editor to a PNG after
+// --screenshot <out.png> [--fine-tuning] [--classic]: renders the editor to a PNG after
 // a few seconds of the synthetic test signals have run through the
 // processor, so the meters and status line show a realistic mid-show state.
 // For reviewing panel changes without a host; needs a display (or xvfb-run).
-int runScreenshotMode(const char* outPath, bool showFineTuning) {
+// Shows the default engine (Kalman) unless --classic is given.
+int runScreenshotMode(const char* outPath, bool showFineTuning, bool classic) {
     juce::ScopedJuceInitialiser_GUI gui;
+    gTestEngine = classic ? PAEchoCancellerAudioProcessor::engineClassic
+                          : PAEchoCancellerAudioProcessor::engineKalman;
     const int sampleRate = 48000;
     const int blockSize = 512;
     auto signals = makeSignals(sampleRate, 6.0);
 
     PAEchoCancellerAudioProcessor proc;
+    applyTestEngine(proc);
     setMonoLayout(proc);
     proc.prepareToPlay(sampleRate, blockSize);
     std::unique_ptr<juce::AudioProcessorEditor> editor(proc.createEditor());
@@ -4237,9 +4358,91 @@ int runScreenshotMode(const char* outPath, bool showFineTuning) {
     return ok ? 0 : 1;
 }
 
+bool testBasicCancellation(int rate, double durationS) {
+    {
+        printf("\n=== Sample rate: %d Hz (%s engine) ===\n", rate,
+               gTestEngine == PAEchoCancellerAudioProcessor::engineKalman ? "Kalman" : "Classic");
+
+        auto signals = makeSignals(rate, durationS);
+
+        PAEchoCancellerAudioProcessor proc;
+        applyTestEngine(proc);
+        PAEchoCancellerAudioProcessor::BusesLayout layout;
+        layout.inputBuses.add(juce::AudioChannelSet::mono());
+        layout.inputBuses.add(juce::AudioChannelSet::mono());
+        layout.outputBuses.add(juce::AudioChannelSet::mono());
+        if (!proc.setBusesLayout(layout)) {
+            printf("  FAILED to set mono buses layout\n");
+            return false;
+        }
+
+        auto output = runThroughProcessor(proc, rate, signals.reference, signals.mic);
+        int latency = proc.getLatencySamples();
+        double latencyMs = 1000.0 * latency / rate;
+        printf("  Reported latency: %d samples (%.2f ms)\n", latency, latencyMs);
+
+        double picS0 = 0.0, picS1 = durationS * (2.0 / 6.0);
+        double mic_pa = rmsDbfs(signals.mic, rate, picS0, picS1);
+        double cleaned_pa = rmsDbfs(output, rate, picS0, picS1);
+        double reductionDb = mic_pa - cleaned_pa;
+
+        double voiceStartS = durationS * (2.25 / 6.0);
+        double voiceEndS = durationS * (3.75 / 6.0);
+        double voice_gt = rmsDbfs(signals.voice, rate, voiceStartS, voiceEndS);
+        double cleaned_voice = rmsDbfs(output, rate, voiceStartS, voiceEndS);
+        double voiceErrDb = cleaned_voice - voice_gt;
+
+        printf("  PA-only window: mic=%.1f dBFS cleaned=%.1f dBFS reduction=%.1f dB\n", mic_pa, cleaned_pa, reductionDb);
+        printf("  Voice window:   ground_truth=%.1f dBFS cleaned=%.1f dBFS error=%.1f dB\n", voice_gt, cleaned_voice, voiceErrDb);
+
+        bool pass = reductionDb > 10.0 && std::abs(voiceErrDb) < 6.0;
+        printf("  %s\n", pass ? "PASS" : "CHECK");
+
+        writeWav16("plugin_verify_" + std::string(gTestEngine == PAEchoCancellerAudioProcessor::engineKalman ? "kalman_" : "") + std::to_string(rate) + "_mic.wav", signals.mic, rate);
+        writeWav16("plugin_verify_" + std::string(gTestEngine == PAEchoCancellerAudioProcessor::engineKalman ? "kalman_" : "") + std::to_string(rate) + "_cleaned.wav", output, rate);
+        return pass;
+    }
+}
+
+// --bench-kalman: CPU of the Kalman engine alone, and of its FFT, at 48 kHz.
+static int runKalmanBench() {
+    const int fs = 48000, seconds = 10;
+    KalmanEchoCanceller k;
+    k.prepare(fs, 1, 0.8);
+    const int N = k.getBlockSize();
+    std::mt19937 rng(1);
+    std::normal_distribution<float> nd(0.0f, 0.1f);
+    std::vector<float> ref(static_cast<size_t>(N)), mic(static_cast<size_t>(N));
+    float* micPtr = mic.data();
+    const int blocks = fs * seconds / N;
+    const auto t0 = juce::Time::getHighResolutionTicks();
+    for (int b = 0; b < blocks; ++b) {
+        for (int i = 0; i < N; ++i) { ref[static_cast<size_t>(i)] = nd(rng); mic[static_cast<size_t>(i)] = 0.3f * ref[static_cast<size_t>(i)] + 0.1f * nd(rng); }
+        k.processFrame(&micPtr, ref.data(), 1);
+    }
+    const double tk = juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t0);
+    juce::dsp::FFT fft(8);
+    std::vector<float> buf(512, 0.0f);
+    const int nfft = blocks * 43;
+    const auto t1 = juce::Time::getHighResolutionTicks();
+    for (int i = 0; i < nfft; ++i) { buf[0] = static_cast<float>(i); fft.performRealOnlyForwardTransform(buf.data(), true); }
+    const double tf = juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t1);
+    printf("Kalman 800 ms, mono: %.3f s for %d s of audio = %.1f%% of one core\n", tk, seconds, 100.0 * tk / seconds);
+    printf("  of which ~%d FFTs of 256: %.3f s (%.1f%% of one core)\n", nfft, tf, 100.0 * tf / seconds);
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
-    if (argc >= 3 && std::string(argv[1]) == "--screenshot")
-        return runScreenshotMode(argv[2], argc >= 4 && std::string(argv[3]) == "--fine-tuning");
+    if (argc >= 2 && std::string(argv[1]) == "--bench-kalman")
+        return runKalmanBench();
+    if (argc >= 3 && std::string(argv[1]) == "--screenshot") {
+        bool fineTuning = false, classic = false;
+        for (int i = 3; i < argc; ++i) {
+            fineTuning |= std::string(argv[i]) == "--fine-tuning";
+            classic |= std::string(argv[i]) == "--classic";
+        }
+        return runScreenshotMode(argv[2], fineTuning, classic);
+    }
 
     // --subband-probe <mic.wav> <ref.wav>: SubbandNearendDetector band-pair
     // sweep vs the dominant-detector baseline on real material (see the
@@ -4282,12 +4485,13 @@ int main(int argc, char* argv[]) {
     // the synthetic suite (see the block comment above runRealMaterialMode).
     if (argc >= 2 && std::string(argv[1]) == "--real") {
         if (argc < 4) {
-            printf("Usage: %s --real <mic.wav> <reference.wav> [--seconds N] [--write-outputs]\n", argv[0]);
+            printf("Usage: %s --real <mic.wav> <reference.wav> [--seconds N] [--write-outputs] [--irregular] [--engine kalman|classic]\n", argv[0]);
             return 1;
         }
         double maxSeconds = 0.0; // 0 = whole file
         bool writeOutputs = false;
         bool irregularCadence = false; // --irregular: host-realistic varying block sizes (see runRealMaterialMode)
+        int engine = PAEchoCancellerAudioProcessor::engineClassic; // --engine kalman|classic
         for (int i = 4; i < argc; ++i) {
             const std::string arg(argv[i]);
             if (arg == "--seconds" && i + 1 < argc)
@@ -4296,8 +4500,11 @@ int main(int argc, char* argv[]) {
                 writeOutputs = true;
             else if (arg == "--irregular")
                 irregularCadence = true;
+            else if (arg == "--engine" && i + 1 < argc)
+                engine = std::string(argv[++i]) == "kalman" ? PAEchoCancellerAudioProcessor::engineKalman
+                                                            : PAEchoCancellerAudioProcessor::engineClassic;
         }
-        return runRealMaterialMode(argv[2], argv[3], maxSeconds, writeOutputs, irregularCadence);
+        return runRealMaterialMode(argv[2], argv[3], maxSeconds, writeOutputs, irregularCadence, engine);
     }
 
     // --bypass-only: just the bypass regression tests, for fast iteration on
@@ -4317,48 +4524,7 @@ int main(int argc, char* argv[]) {
     const double durationS = 6.0;
     bool allPass = true;
 
-    for (int rate : rates) {
-        printf("\n=== Sample rate: %d Hz ===\n", rate);
-
-        auto signals = makeSignals(rate, durationS);
-
-        PAEchoCancellerAudioProcessor proc;
-        PAEchoCancellerAudioProcessor::BusesLayout layout;
-        layout.inputBuses.add(juce::AudioChannelSet::mono());
-        layout.inputBuses.add(juce::AudioChannelSet::mono());
-        layout.outputBuses.add(juce::AudioChannelSet::mono());
-        if (!proc.setBusesLayout(layout)) {
-            printf("  FAILED to set mono buses layout\n");
-            allPass = false;
-            continue;
-        }
-
-        auto output = runThroughProcessor(proc, rate, signals.reference, signals.mic);
-        int latency = proc.getLatencySamples();
-        double latencyMs = 1000.0 * latency / rate;
-        printf("  Reported latency: %d samples (%.2f ms)\n", latency, latencyMs);
-
-        double picS0 = 0.0, picS1 = durationS * (2.0 / 6.0);
-        double mic_pa = rmsDbfs(signals.mic, rate, picS0, picS1);
-        double cleaned_pa = rmsDbfs(output, rate, picS0, picS1);
-        double reductionDb = mic_pa - cleaned_pa;
-
-        double voiceStartS = durationS * (2.25 / 6.0);
-        double voiceEndS = durationS * (3.75 / 6.0);
-        double voice_gt = rmsDbfs(signals.voice, rate, voiceStartS, voiceEndS);
-        double cleaned_voice = rmsDbfs(output, rate, voiceStartS, voiceEndS);
-        double voiceErrDb = cleaned_voice - voice_gt;
-
-        printf("  PA-only window: mic=%.1f dBFS cleaned=%.1f dBFS reduction=%.1f dB\n", mic_pa, cleaned_pa, reductionDb);
-        printf("  Voice window:   ground_truth=%.1f dBFS cleaned=%.1f dBFS error=%.1f dB\n", voice_gt, cleaned_voice, voiceErrDb);
-
-        bool pass = reductionDb > 10.0 && std::abs(voiceErrDb) < 6.0;
-        printf("  %s\n", pass ? "PASS" : "CHECK");
-        allPass = allPass && pass;
-
-        writeWav16("plugin_verify_" + std::to_string(rate) + "_mic.wav", signals.mic, rate);
-        writeWav16("plugin_verify_" + std::to_string(rate) + "_cleaned.wav", output, rate);
-    }
+    for (int rate : rates) allPass = testBasicCancellation(rate, durationS) && allPass;
 
     allPass = testClickFreeRoomChange(48000) && allPass;
     allPass = testLiveSuppressorConfigUpdate(48000) && allPass;
@@ -4396,9 +4562,37 @@ int main(int argc, char* argv[]) {
     allPass = testFastBounceTailLengthAppliedPromptly(48000) && allPass;
     allPass = testDelayStatsExposed(48000) && allPass;
 
+    // ---- Kalman engine: the engine-agnostic tests again, plus its own ----
+    printf("\n\n######## Kalman engine ########\n");
+    gTestEngine = PAEchoCancellerAudioProcessor::engineKalman;
+    for (int rate : rates) allPass = testBasicCancellation(rate, durationS) && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 1, "Moderate, default") && allPass;
+    allPass = testSuppressionMeterTransientAlignment(48000) && allPass;
+    allPass = testOfflineVsLiveDynamicHfContent(48000) && allPass;
+    allPass = testOfflineVsLiveSpectralShiftAfterWarmup(48000) && allPass;
+    for (int rate : rates) allPass = testDryWetAlignment(rate) && allPass;
+    for (int rate : rates) allPass = testDryWetCombFiltering(rate) && allPass;
+    allPass = testGetLatencySamplesAccuracyAllRates() && allPass;
+    allPass = testReferenceMeterIncludesTrim() && allPass;
+    allPass = testStateSaveRestore() && allPass;
+    for (int rate : rates) allPass = testBypassRawPassthrough(rate) && allPass;
+    allPass = testBypassToggleClickFree(48000) && allPass;
+    allPass = testReferenceGainTrim() && allPass;
+    for (int rate : rates) allPass = testOversizedHostBlock(rate) && allPass;
+    for (int rate : rates) allPass = testNonFiniteInputRecovery(rate) && allPass;
+    for (int rate : rates) allPass = testLiveTailLengthChangeNonBlocking(rate) && allPass;
+    allPass = testFastBounceTailLengthAppliedPromptly(48000) && allPass;
+    allPass = testDelayStatsExposed(48000) && allPass;
+    allPass = testEngineSwitch(48000) && allPass;
+    gTestEngine = PAEchoCancellerAudioProcessor::engineClassic;
+
     printf("\n%s\n", allPass ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
 
     benchmarkTailLengthCpuCost(48000);
+    printf("\n(Kalman engine)\n");
+    gTestEngine = PAEchoCancellerAudioProcessor::engineKalman;
+    benchmarkTailLengthCpuCost(48000);
+    gTestEngine = PAEchoCancellerAudioProcessor::engineClassic;
 
     return allPass ? 0 : 1;
 }

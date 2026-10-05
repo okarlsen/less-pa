@@ -42,6 +42,14 @@ private:
     static constexpr int versionHelpGap = 6;
     static constexpr int versionLabelWidth = 40;
 
+    // The Engine selector sits in the title strip, left of the version label:
+    // the CANCELLATION column has no room for another combo, and the engine
+    // is a whole-plugin choice rather than one stage's setting.
+    static constexpr int engineLabelWidth = 50;
+    static constexpr int engineComboWidth = 180;
+    static constexpr int engineVersionGap = 16;
+    static constexpr int engineSelectorWidth = engineLabelWidth + engineComboWidth + engineVersionGap;
+
     static constexpr int columnWidth = 240;
     static constexpr int columnGap = 14;
     static constexpr int columnAreaHeight = 302;
@@ -91,8 +99,8 @@ private:
                           + footerGap + footerStripHeight
                       == designHeight,
                   "title, columns, footer, gaps and margins must fill designHeight exactly");
-    static_assert(helpButtonSize + versionHelpGap + versionLabelWidth <= columnWidth,
-                  "the help button and version label must fit inside the title strip");
+    static_assert(helpButtonSize + versionHelpGap + versionLabelWidth + engineSelectorWidth <= 2 * columnWidth,
+                  "the engine selector, version label and help button must leave room for the title");
 
     // Each panel's rows must fit its body; the remainder is bottom air.
     static_assert(sectionHeaderRow + 2 * (controlGap + labelledSlider) + meterBlockGap + meterPair
@@ -129,6 +137,8 @@ private:
     void timerCallback() override;
     void tailLengthComboChanged();
     void updateTailLengthCombo();
+    void engineComboChanged();
+    void updateEngineCombo();
     void suppressionStrengthComboChanged();
     void updateSuppressionStrengthCombo();
     void limitHfGainToggleChanged();
@@ -209,6 +219,11 @@ private:
         float scale = 1.0f;
     };
     FineTuningOverlay fineTuningOverlay;
+
+    // Kalman (low latency) or Classic (the WebRTC AEC3 engine). Switches live;
+    // the processor reports the new latency to the host.
+    juce::Label engineLabel{ "engineLabel", "Engine" };
+    juce::ComboBox engineCombo;
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };
     juce::ComboBox tailLengthCombo;

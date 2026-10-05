@@ -165,6 +165,14 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
                          &hpfLabel, &referenceGainLabel, &dryWetLabel })
         label->setJustificationType(juce::Justification::centredLeft);
 
+    engineLabel.setJustificationType(juce::Justification::centredRight);
+    engineLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
+    addAndMakeVisible(engineLabel);
+    engineCombo.addItem("Kalman (low latency)", 1);
+    engineCombo.addItem("Classic", 2);
+    engineCombo.onChange = [this] { engineComboChanged(); };
+    addAndMakeVisible(engineCombo);
+
     addAndMakeVisible(tailLengthLabel);
 
     // The room a length suits is part of the item text: choosing by venue is
@@ -319,6 +327,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // length is a readability choice here rather than a correctness one.)
     helpButton.setTooltip("Full control reference");
     versionLabel.setTooltip("Less PA v" JucePlugin_VersionString);
+    engineCombo.setTooltip("Kalman: about 4 ms latency. Classic: about 19 ms");
     tailLengthCombo.setTooltip("Match to the venue's reverb");
     suppressionStrengthCombo.setTooltip("Residual echo cleanup");
     limitHfGainToggle.setTooltip("Clamp HF while converging");
@@ -337,6 +346,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     delayReadoutLabel.setTooltip("Echo path delay estimate");
     statusLabel.setTooltip("What the canceller is doing");
 
+    updateEngineCombo();
     updateTailLengthCombo();
     updateSuppressionStrengthCombo();
     updateLimitHfGainToggle();
@@ -440,7 +450,8 @@ void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
     // clear of the version label and help button on the right.
     auto titleArea = sections.title.reduced(juce::roundToInt(scale * static_cast<float>(panelPaddingX)), 0)
                          .withTrimmedRight(juce::roundToInt(
-                             scale * static_cast<float>(helpButtonSize + versionHelpGap + versionLabelWidth)));
+                             scale * static_cast<float>(helpButtonSize + versionHelpGap + versionLabelWidth
+                                                        + engineSelectorWidth)));
 
     g.setColour(LessPAColours::primaryText);
     g.setFont(juce::FontOptions(23.0f * scale).withStyle("Bold"));
@@ -473,6 +484,12 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     versionLabel.setBounds(titleArea.removeFromRight(sc(versionLabelWidth))
                                 .withSizeKeepingCentre(sc(versionLabelWidth), sc(helpButtonSize)));
     versionLabel.setFont(juce::FontOptions(scale * 10.0f));
+    titleArea.removeFromRight(sc(engineVersionGap));
+    engineCombo.setBounds(titleArea.removeFromRight(sc(engineComboWidth))
+                              .withSizeKeepingCentre(sc(engineComboWidth), sc(comboRow)));
+    engineLabel.setBounds(titleArea.removeFromRight(sc(engineLabelWidth))
+                              .withSizeKeepingCentre(sc(engineLabelWidth), sc(comboRow)));
+    engineLabel.setFont(juce::FontOptions(scale * 12.5f));
 
     // Fonts are the one part of the layout Grid can't scale for us, and a
     // stale text-box size would silently cap the value text at the default
@@ -679,6 +696,47 @@ void PAEchoCancellerAudioProcessorEditor::updateTailLengthCombo()
         tailLengthCombo.setSelectedId(currentId, juce::dontSendNotification);
 }
 
+void PAEchoCancellerAudioProcessorEditor::engineComboChanged()
+{
+    const int index = engineCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
+    auto* param = processor.getEngineParameter();
+    param->beginChangeGesture();
+    param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(index)));
+    param->endChangeGesture();
+}
+
+void PAEchoCancellerAudioProcessorEditor::updateEngineCombo()
+{
+    const int index = processor.getEngineParameter()->getIndex();
+    if (engineCombo.getSelectedId() != index + 1)
+        engineCombo.setSelectedId(index + 1, juce::dontSendNotification);
+
+    // The Fine tuning page shapes the Classic engine's crowd detector only;
+    // under Kalman, Tail Length, Suppression Strength and Crowd Protection
+    // are the whole story, so grey the page out rather than let it look live.
+    const bool classic = index == PAEchoCancellerAudioProcessor::engineClassic;
+    if (nearendDetectorCombo.isEnabled() != classic) {
+        for (auto* component : std::initializer_list<juce::Component*>{
+                 &nearendDetectorLabel, &nearendDetectorCombo, &limitHfGainToggle,
+                 &protectionHoldTimeLabel, &protectionHoldTimeSlider,
+                 &transitionSmoothingLabel, &transitionSmoothingSlider })
+            component->setEnabled(classic);
+        // The look-and-feel draws disabled sliders and toggles at full
+        // strength, so dim them by hand to match the greyed labels.
+        for (auto* component : std::initializer_list<juce::Component*>{
+                 &limitHfGainToggle, &protectionHoldTimeSlider, &transitionSmoothingSlider })
+            component->setAlpha(classic ? 1.0f : 0.45f);
+        fineTuningHintLabel.setText(
+            classic ? "These shape how the crowd detector switches on and off. "
+                      "The defaults suit most shows; Crowd Protection on the main "
+                      "panel is the control to reach for first."
+                    : "These tune the Classic engine only. With Kalman, Tail Length, "
+                      "Suppression Strength and Crowd Protection on the main panel "
+                      "are all there is to set.",
+            juce::dontSendNotification);
+    }
+}
+
 void PAEchoCancellerAudioProcessorEditor::suppressionStrengthComboChanged()
 {
     const int index = suppressionStrengthCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
@@ -839,6 +897,7 @@ void PAEchoCancellerAudioProcessorEditor::updateDryWetSlider()
 
 void PAEchoCancellerAudioProcessorEditor::timerCallback()
 {
+    updateEngineCombo();
     updateTailLengthCombo();
     updateSuppressionStrengthCombo();
     updateLimitHfGainToggle();
@@ -961,7 +1020,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 
 void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
 {
-    // Mirrors the panel exactly: the three columns left to right, then the
+    // Mirrors the panel exactly: the engine choice, the three columns left to right, then the
     // Fine tuning overlay, then how to use it live and in post. The order is
     // the thing that has to match the panel, and does.
     static const juce::String helpText =
@@ -973,6 +1032,20 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "\n"
         "The panel follows the signal, left to right: what reaches the "
         "canceller, how it cancels, and what comes out.\n"
+        "\n"
+        "\n"
+        "=== ENGINE ===\n"
+        "\n"
+        "Top right. Two cancellers to choose between; both use the same "
+        "panel, and switching applies live.\n"
+        "Kalman (low latency), the default: a full-band adaptive filter "
+        "with a light cleanup stage. About 4 ms of latency (192 samples at "
+        "44.1/48kHz). On real venue recordings it removed more PA and "
+        "sounded more natural.\n"
+        "Classic: the WebRTC AEC3 engine from earlier versions. About 19 ms "
+        "of latency. The Fine tuning page applies to Classic only.\n"
+        "The new latency is reported to the host when you switch; some "
+        "hosts only pick it up after playback is stopped and restarted.\n"
         "\n"
         "\n"
         "=== INPUT ===\n"
@@ -1005,9 +1078,9 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "TAIL LENGTH\n"
         "How long a reverb tail the canceller models. Pick by venue: 50 ms "
         "for a small room, up to 800 ms for an arena or outdoor rig. Longer "
-        "costs a little more CPU. This is the one control that restarts the "
-        "canceller when changed, so set it before the show rather than "
-        "during it.\n"
+        "costs a little more CPU. With Classic this is the one control that "
+        "restarts the canceller when changed, so set it before the show "
+        "rather than during it; with Kalman it applies live.\n"
         "\n"
         "SUPPRESSION STRENGTH\n"
         "Gentle / Moderate / Hard. How hard leftover bleed is cleaned up "
@@ -1043,7 +1116,8 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "\n"
         "\n"
         "=== FINE TUNING ===\n"
-        "Behind the Fine tuning button. The defaults suit most shows; the "
+        "Behind the Fine tuning button, and for the Classic engine only "
+        "(greyed out under Kalman). The defaults suit most shows; the "
         "button says \"adjusted\" when anything in here is off its default, "
         "and Reset to defaults puts all four back in one click.\n"
         "\n"
@@ -1071,10 +1145,11 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "\n"
         "=== LIVE AND IN POST ===\n"
         "\n"
-        "Live (e.g. LiveProfessor, MainStage): the plugin adds about 20 ms "
-        "of latency and reports it to the host. Give it a few seconds of PA "
-        "signal to lock on before relying on it. Avoid changing Tail Length "
-        "mid-show; everything else applies without interruption.\n"
+        "Live (e.g. LiveProfessor, MainStage): the plugin adds about 4 ms "
+        "of latency with Kalman (about 19 ms with Classic) and reports it to "
+        "the host. Give it a few seconds of PA signal to lock on before "
+        "relying on it. With Classic, avoid changing Tail Length mid-show; "
+        "everything else applies without interruption.\n"
         "\n"
         "In post: insert it on the mic track with the PA feed on the "
         "sidechain. An offline bounce sounds the same as playing back from "

@@ -182,6 +182,13 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
         "transitionSmoothing", "Transition Smoothing",
         juce::NormalisableRange<float>(0.0f, 200.0f, 1.0f), 40.0f));
 
+    // Appended last, like every parameter above. Kalman is the default: on
+    // the LS26 / Oslo Spektrum recordings it removed 3-6 dB more PA than
+    // Classic at 192 instead of 878 samples of latency. Classic stays one
+    // click away for A/B (and for sessions that want the old sound).
+    addParameter(engineParam = new juce::AudioParameterChoice(
+        "engine", "Engine", juce::StringArray{ "Kalman (low latency)", "Classic" }, engineKalman));
+
     startThread(); // background Tail Length rebuilds -- see run()
 }
 
@@ -191,6 +198,7 @@ PAEchoCancellerAudioProcessor::~PAEchoCancellerAudioProcessor()
     // relying on the juce::Thread base destructor would run it after this
     // class's members are already gone.
     stopThread(4000);
+    cancelPendingUpdate();
     delete stagedApmSwap.exchange(nullptr);
     delete retiredApmSwap.exchange(nullptr);
 }
@@ -198,7 +206,8 @@ PAEchoCancellerAudioProcessor::~PAEchoCancellerAudioProcessor()
 void PAEchoCancellerAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
-    frameSize = static_cast<int>(std::round(sampleRate / 100.0));
+    aec3FrameSize = static_cast<int>(std::round(sampleRate / 100.0));
+    maxFrameSize = std::max(aec3FrameSize, KalmanEchoCanceller::blockSizeForRate(sampleRate));
     preparedBlockSize = juce::jmax(1, samplesPerBlock);
 
     const int numMicChannels = juce::jmax(1, getChannelCountOfBus(true, 0));
@@ -213,20 +222,22 @@ void PAEchoCancellerAudioProcessor::prepareToPlay(double sampleRate, int samples
     micInFifos.assign(static_cast<size_t>(numMicChannels), FrameFifo());
     micOutFifos.assign(static_cast<size_t>(numMicChannels), FrameFifo());
 
-    const int fifoCapacity = 2 * (frameSize + samplesPerBlock);
+    // Sized for the larger of the two engines' frames, so an engine switch
+    // never has to reallocate.
+    const int fifoCapacity = 2 * (maxFrameSize + samplesPerBlock);
     for (auto& fifo : micInFifos) fifo.setCapacity(fifoCapacity);
     for (auto& fifo : micOutFifos) fifo.setCapacity(fifoCapacity);
     refInFifo.setCapacity(fifoCapacity);
 
-    micFrameBuffers.assign(static_cast<size_t>(numMicChannels), std::vector<float>(static_cast<size_t>(frameSize), 0.0f));
+    micFrameBuffers.assign(static_cast<size_t>(numMicChannels), std::vector<float>(static_cast<size_t>(maxFrameSize), 0.0f));
     micFramePtrs.assign(static_cast<size_t>(numMicChannels), nullptr);
     for (int ch = 0; ch < numMicChannels; ++ch)
         micFramePtrs[static_cast<size_t>(ch)] = micFrameBuffers[static_cast<size_t>(ch)].data();
 
-    refFrameBuffer.assign(static_cast<size_t>(frameSize), 0.0f);
+    refFrameBuffer.assign(static_cast<size_t>(maxFrameSize), 0.0f);
     refFramePtrs.assign(1, refFrameBuffer.data());
 
-    dryFrameScratch.assign(static_cast<size_t>(numMicChannels), std::vector<float>(static_cast<size_t>(frameSize), 0.0f));
+    dryFrameScratch.assign(static_cast<size_t>(numMicChannels), std::vector<float>(static_cast<size_t>(maxFrameSize), 0.0f));
 
     silenceBuffer.assign(static_cast<size_t>(samplesPerBlock), 0.0f);
 
@@ -255,7 +266,7 @@ void PAEchoCancellerAudioProcessor::prepareToPlay(double sampleRate, int samples
     for (auto& fifo : bypassDelayFifos) fifo.setCapacity(fifoCapacity);
     bypassCompFifos.assign(static_cast<size_t>(numMicChannels), FrameFifo());
     for (auto& fifo : bypassCompFifos) fifo.setCapacity(fifoCapacity);
-    bypassFrameScratch.assign(static_cast<size_t>(numMicChannels), std::vector<float>(static_cast<size_t>(frameSize), 0.0f));
+    bypassFrameScratch.assign(static_cast<size_t>(numMicChannels), std::vector<float>(static_cast<size_t>(maxFrameSize), 0.0f));
     bypassOutputScratch.assign(static_cast<size_t>(numMicChannels), std::vector<float>(static_cast<size_t>(samplesPerBlock), 0.0f));
     bypassMixScratch.assign(static_cast<size_t>(samplesPerBlock), 0.0f);
     // Jump straight to the parameter's current state at stream start -- the
@@ -289,8 +300,19 @@ void PAEchoCancellerAudioProcessor::prepareToPlay(double sampleRate, int samples
                                  protectionHoldTimeParam->get(),
                                  4.0f, -96.0f, // the shipped erleMin/comfort-noise defaults, spelled out to reach the trailing detector index
                                  nearendDetectorParam->getIndex(), transitionSmoothingParam->get()),
-        static_cast<int>(sampleRate), frameSize);
-    dryPrefillSilence.assign(static_cast<size_t>(std::max(0, aec3InternalDelaySamples)), 0.0f);
+        static_cast<int>(sampleRate), aec3FrameSize);
+    dryPrefillSilence.assign(static_cast<size_t>(std::max({ maxFrameSize, aec3InternalDelaySamples,
+                                                            KalmanEchoCanceller::suppressorDelaySamples })), 0.0f);
+
+    // Kalman engine: allocated for the longest Tail Length (800 ms), so
+    // shorter/longer tails later are a live change without allocation.
+    kalman.prepare(sampleRate, numMicChannels, 0.8);
+    updateKalmanSettings();
+
+    // Pick the engine (frame size + internal delay) before the rebuild
+    // below reports latency and re-primes the dry path from them.
+    appliedEngine.store(engineParam->getIndex(), std::memory_order_relaxed);
+    frameSize = appliedEngine.load(std::memory_order_relaxed) == engineKalman ? kalman.getBlockSize() : aec3FrameSize;
 
     // Reports the true worst-case buffering delay (one AEC3 frame, plus its
     // own measured internal processing delay) and resyncs the dry delay
@@ -311,6 +333,7 @@ void PAEchoCancellerAudioProcessor::releaseResources()
 
     apm = nullptr;
     activeEchoControlFactory = nullptr; // apm owned it; now dangling if left set
+    kalman.reset(); // keeps its allocation for the next prepareToPlay; clears the delay readout
 }
 
 juce::AudioProcessorParameter* PAEchoCancellerAudioProcessor::getBypassParameter() const
@@ -327,6 +350,8 @@ float PAEchoCancellerAudioProcessor::getSuppressionDb() const
 
 int PAEchoCancellerAudioProcessor::getEstimatedEchoPathDelayMs() const
 {
+    if (appliedEngine.load(std::memory_order_relaxed) == engineKalman)
+        return kalman.getDelayEstimateMs();
     if (apm == nullptr)
         return -1;
     return apm->GetStatistics().delay_ms.value_or(-1);
@@ -334,6 +359,8 @@ int PAEchoCancellerAudioProcessor::getEstimatedEchoPathDelayMs() const
 
 int PAEchoCancellerAudioProcessor::getEchoPathDelayMedianMs() const
 {
+    if (appliedEngine.load(std::memory_order_relaxed) == engineKalman)
+        return -1; // the Kalman estimate is already a steady filter readout, not a jittery tracker
     if (apm == nullptr)
         return -1;
     return apm->GetStatistics().delay_median_ms.value_or(-1);
@@ -406,12 +433,16 @@ void PAEchoCancellerAudioProcessor::adoptStagedApm(StagedApm& box)
     // in-flight audio from the old instance and re-prime the dry path.
     // Latency does NOT change -- aec3InternalDelaySamples is
     // Tail-Length-invariant (see its comment), so no setLatencySamples()
-    // here (which wouldn't be audio-thread-safe anyway).
-    for (auto& fifo : micInFifos) fifo.reset();
-    for (auto& fifo : micOutFifos) fifo.reset();
-    for (auto& fifo : bypassInFifos) fifo.reset(); // in lockstep with micInFifos -- see resyncDryDelay
-    refInFifo.reset();
-    resyncDryDelay();
+    // here (which wouldn't be audio-thread-safe anyway). While the Kalman
+    // engine is running, the AEC3 instance is only kept ready for a switch
+    // back, so its swap must not interrupt the audio.
+    if (appliedEngine.load(std::memory_order_relaxed) == engineClassic) {
+        for (auto& fifo : micInFifos) fifo.reset();
+        for (auto& fifo : micOutFifos) fifo.reset();
+        for (auto& fifo : bypassInFifos) fifo.reset(); // in lockstep with micInFifos -- see resyncDryDelay
+        refInFifo.reset();
+        resyncDryDelay();
+    }
 
     appliedTailLengthIndex.store(box.tailLengthIndex, std::memory_order_relaxed);
     appliedSuppressionStrengthIndex = box.suppressionStrengthIndex;
@@ -508,7 +539,7 @@ void PAEchoCancellerAudioProcessor::rebuildEchoCanceller(int tailLengthIndex, in
     // patching AEC3's own internals (trading cancellation quality/
     // robustness for a latency win, which is explicitly not wanted), there
     // is no smaller true figure to report -- so report this one honestly.
-    reportedLatencySamples = frameSize + aec3InternalDelaySamples;
+    reportedLatencySamples = frameSize + engineInternalDelaySamples();
     setLatencySamples(reportedLatencySamples);
 
     // Reset the dry path alongside the wet path it's now written in
@@ -579,13 +610,16 @@ void PAEchoCancellerAudioProcessor::resyncDryDelay()
     // frameSize chunks -- the leftover prefill silence ends up spliced into
     // the *middle* of the first real frame's data instead of cleanly
     // preceding it, corrupting the alignment instead of fixing it.
+    // (With the Kalman engine the same stage carries its suppressor FIR
+    // delay instead -- see engineInternalDelaySamples.)
+    const int internalDelay = engineInternalDelaySamples();
     for (auto& fifo : aec3DelayCompensationFifos) fifo.reset();
-    if (aec3InternalDelaySamples > 0) {
+    if (internalDelay > 0) {
         // dryPrefillSilence was pre-sized in prepareToPlay: this also runs
         // from processBlock (live Tail Length adoption), where allocating a
         // fresh vector -- as this used to -- is not acceptable.
         for (auto& fifo : aec3DelayCompensationFifos)
-            fifo.write(dryPrefillSilence.data(), aec3InternalDelaySamples);
+            fifo.write(dryPrefillSilence.data(), internalDelay);
     }
 
     // The bypass path is structured identically to the dry path (see the
@@ -596,9 +630,76 @@ void PAEchoCancellerAudioProcessor::resyncDryDelay()
     // micInFifos for the same lockstep reason.
     for (auto& fifo : bypassDelayFifos) fifo.reset();
     for (auto& fifo : bypassCompFifos) fifo.reset();
-    if (aec3InternalDelaySamples > 0)
+    if (internalDelay > 0)
         for (auto& fifo : bypassCompFifos)
-            fifo.write(dryPrefillSilence.data(), aec3InternalDelaySamples);
+            fifo.write(dryPrefillSilence.data(), internalDelay);
+
+    // Prime the output side of the frame FIFOs with one frame of silence
+    // (every caller has just reset micOutFifos). Without it the FIFO's delay
+    // depended on how the host's block size lines up with the frame: zero
+    // when blocks are a multiple of the frame (e.g. Kalman's 128 frames in
+    // 512-sample blocks), otherwise up to a frame, settling only after a few
+    // zero-padded underruns at startup. Primed, the true delay is always
+    // exactly frameSize + internal delay -- what getLatencySamples() reports
+    // -- at any block size, and the startup underruns are gone. The dry and
+    // bypass delay lines get the same frame so they stay in lockstep.
+    for (auto& fifo : micOutFifos) fifo.write(dryPrefillSilence.data(), frameSize);
+    for (auto& fifo : dryDelayFifos) fifo.write(dryPrefillSilence.data(), frameSize);
+    for (auto& fifo : bypassDelayFifos) fifo.write(dryPrefillSilence.data(), frameSize);
+}
+
+int PAEchoCancellerAudioProcessor::engineInternalDelaySamples() const noexcept
+{
+    return appliedEngine.load(std::memory_order_relaxed) == engineKalman ? KalmanEchoCanceller::suppressorDelaySamples
+                                                                          : aec3InternalDelaySamples;
+}
+
+void PAEchoCancellerAudioProcessor::updateKalmanSettings()
+{
+    // Tail Length: the filter length itself.
+    static constexpr double tailSeconds[] = { 0.05, 0.2, 0.4, 0.8 };
+    kalman.setTailSeconds(tailSeconds[juce::jlimit(0, 3, tailLengthParam->getIndex())]);
+
+    // Suppression Strength: how hard the suppressor acts on the filter's own
+    // residual-echo estimate. Moderate is the setting tuned on the LS26 and
+    // Oslo recordings. Crowd Protection then backs it off (or pushes it) by
+    // up to a factor 2 around its 75% default, so the same knob means "keep
+    // more of the room" on both engines.
+    static constexpr KalmanEchoCanceller::SuppressorSettings strengths[] = {
+        { 0.1f, 1.0f, -10.0f }, // Gentle
+        { 0.3f, 2.0f, -18.0f }, // Moderate
+        { 0.6f, 3.0f, -24.0f }, // Hard
+    };
+    auto settings = strengths[juce::jlimit(0, 2, suppressionStrengthParam->getIndex())];
+    settings.overSub *= std::pow(2.0f, (75.0f - nearendSensitivityParam->get()) / 50.0f);
+    kalman.setSuppressor(settings);
+}
+
+void PAEchoCancellerAudioProcessor::applyEngine(int engine)
+{
+    // Like a Tail Length swap: drop in-flight audio (reads zero-pad briefly
+    // instead of splicing the two engines' outputs) and re-prime the dry and
+    // bypass paths for the new frame size and internal delay.
+    appliedEngine.store(engine, std::memory_order_relaxed);
+    frameSize = engine == engineKalman ? kalman.getBlockSize() : aec3FrameSize;
+    for (auto& fifo : micInFifos) fifo.reset();
+    for (auto& fifo : micOutFifos) fifo.reset();
+    for (auto& fifo : bypassInFifos) fifo.reset(); // in lockstep with micInFifos -- see resyncDryDelay
+    refInFifo.reset();
+    if (engine == engineKalman)
+        kalman.reset();
+    resyncDryDelay();
+
+    // setLatencySamples notifies the host, which isn't audio-thread-safe in
+    // every wrapper: report it from the message thread.
+    reportedLatencySamples = frameSize + engineInternalDelaySamples();
+    pendingLatencySamples.store(reportedLatencySamples, std::memory_order_relaxed);
+    triggerAsyncUpdate();
+}
+
+void PAEchoCancellerAudioProcessor::handleAsyncUpdate()
+{
+    setLatencySamples(pendingLatencySamples.load(std::memory_order_relaxed));
 }
 
 bool PAEchoCancellerAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -656,6 +757,14 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     const float desiredProtectionHoldTime = protectionHoldTimeParam->get();
     const int desiredNearendDetectorIndex = nearendDetectorParam->getIndex();
     const float desiredTransitionSmoothing = transitionSmoothingParam->get();
+
+    const int desiredEngine = engineParam->getIndex();
+    if (desiredEngine != appliedEngine.load(std::memory_order_relaxed))
+        applyEngine(desiredEngine);
+    const bool useKalman = desiredEngine == engineKalman;
+    if (useKalman)
+        updateKalmanSettings();
+
     if (desiredTailLengthIndex != appliedTailLengthIndex.load(std::memory_order_relaxed) && isNonRealtime()) {
         // Offline render (bounce/export): the host isn't on a deadline, so
         // build and adopt the new instance right here instead of waiting on
@@ -801,8 +910,12 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
                 std::copy_n(micFramePtrs[static_cast<size_t>(ch)], frameSize,
                             dryFrameScratch[static_cast<size_t>(ch)].data());
 
-            apm->ProcessReverseStream(refFramePtrs.data(), refStreamConfig, refStreamConfig, refFramePtrs.data());
-            apm->ProcessStream(micFramePtrs.data(), micStreamConfig, micStreamConfig, micFramePtrs.data());
+            if (useKalman) {
+                kalman.processFrame(micFramePtrs.data(), refFramePtrs[0], numMicChannels);
+            } else {
+                apm->ProcessReverseStream(refFramePtrs.data(), refStreamConfig, refStreamConfig, refFramePtrs.data());
+                apm->ProcessStream(micFramePtrs.data(), micStreamConfig, micStreamConfig, micFramePtrs.data());
+            }
 
             for (int ch = 0; ch < numMicChannels; ++ch) {
                 micOutFifos[static_cast<size_t>(ch)].write(micFramePtrs[static_cast<size_t>(ch)], frameSize);

@@ -9,8 +9,11 @@ and conferencing software use to remove speaker bleed — using the actual
 PA feed as a reference signal (wired into the plugin's Reference sidechain
 input), not a guess at the room's acoustics.
 
-Built by SGTM on top of [JUCE](https://juce.com) and a patched fork of
-[WebRTC's AEC3](https://github.com/okarlsen/webrtc-audio-processing).
+Two engines, switchable on the panel: **Kalman (low latency)**, a
+full-band frequency-domain Kalman filter with about 4 ms of latency (the
+default), and **Classic**, a patched fork of
+[WebRTC's AEC3](https://github.com/okarlsen/webrtc-audio-processing) with
+about 19 ms. Built by SGTM on top of [JUCE](https://juce.com).
 
 ## Requirements
 
