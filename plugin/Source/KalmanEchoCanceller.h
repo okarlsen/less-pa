@@ -108,7 +108,12 @@ public:
             std::fill(c.pout.begin(), c.pout.end(), 1e-12f); std::fill(c.gain.begin(), c.gain.end(), 1.0f);
             std::fill(c.hist.begin(), c.hist.end(), 0.0f);
             c.hasPrev = false;
+            c.accMic = 0.0;
+            c.psiStart = psi0;
         }
+        accRef = 0.0;
+        accBlocks = 0;
+        startDone = false;
         head = 0;
         blockCount = 0;
         delayEstimateMs.store(-1, std::memory_order_relaxed);
@@ -125,7 +130,7 @@ public:
                 for (int q = activePartitions; q < p; ++q) {
                     std::fill_n(c.wr.begin() + q * K, K, 0.0f);
                     std::fill_n(c.wi.begin() + q * K, K, 0.0f);
-                    std::fill_n(c.psi.begin() + q * K, K, psi0);
+                    std::fill_n(c.psi.begin() + q * K, K, c.psiStart);
                 }
         activePartitions = p;
     }
@@ -157,7 +162,11 @@ public:
             x2[i] = xr[i] * xr[i] + xi[i] * xi[i];
         }
 
-        for (int ch = 0; ch < std::min(numChannels, static_cast<int>(channels.size())); ++ch)
+        const int numCh = std::min(numChannels, static_cast<int>(channels.size()));
+        if (!startDone)
+            updateStartUncertainty(mic, ref, numCh);
+
+        for (int ch = 0; ch < numCh; ++ch)
             processChannel(channels[static_cast<size_t>(ch)], mic[ch], P);
 
         ++blockCount;
@@ -169,7 +178,40 @@ private:
     struct Channel {
         std::vector<float> wr, wi, psi, psiS, py, pe, pout, gain, h, hPrev, hist;
         bool hasPrev = false;
+        double accMic = 0.0;   // mic power summed over the PA-active start blocks
+        float psiStart = psi0; // the uncertainty newly started partitions get
     };
+
+    // Level-relative start. A fixed starting uncertainty only suits one
+    // mic/PA level ratio: too small and the filter learns for minutes (LS26
+    // 56-66 min: ~2 min behind Classic), too large and it can lose its lock
+    // later (LS26 Pub 2). So once startSeconds of PA (ref blocks above
+    // startRefPower) have been seen, the uncertainty restarts at
+    // startScale * mic power / ref power -- the echo-path gain it may have to
+    // learn. Tested on five recordings with the ref trimmed -10/0/+10 dB.
+    void updateStartUncertainty(float* const* mic, const float* ref, int numCh)
+    {
+        double px = 0.0;
+        for (int n = 0; n < N; ++n)
+            px += static_cast<double>(ref[n]) * ref[n];
+        px /= N;
+        if (px <= startRefPower)
+            return;
+        accRef += px;
+        for (int c = 0; c < numCh; ++c) {
+            double py = 0.0;
+            for (int n = 0; n < N; ++n)
+                py += static_cast<double>(mic[c][n]) * mic[c][n];
+            channels[static_cast<size_t>(c)].accMic += py / N;
+        }
+        if (++accBlocks * N < static_cast<int>(startSeconds * fs))
+            return;
+        for (auto& c : channels) {
+            c.psiStart = std::max(psiFloor, static_cast<float>(startScale * c.accMic / accRef));
+            std::fill(c.psi.begin(), c.psi.end(), c.psiStart);
+        }
+        startDone = true;
+    }
 
     // fdkf_x.py defaults, tuned on the real recordings
     static constexpr float A2 = 0.99999f * 0.99999f;
@@ -180,6 +222,9 @@ private:
     static constexpr float guardSmooth = 0.9f;
     static constexpr float suppSmooth = 0.7f;
     static constexpr int constraintStride = 64; // gradient constraint on 1 partition in 64 per block
+    static constexpr double startSeconds = 3.0;    // PA needed before the level-relative start
+    static constexpr double startRefPower = 1e-5;  // a "PA-active" ref block: mean square above -50 dBFS
+    static constexpr double startScale = 1.0;
 
     int partitionsFor(double seconds) const
     {
@@ -404,6 +449,9 @@ private:
     int maxPartitions = 1, activePartitions = 1;
     int head = 0;
     uint64_t blockCount = 0;
+    double accRef = 0.0;
+    int accBlocks = 0;
+    bool startDone = false;
     std::unique_ptr<juce::dsp::FFT> fft;
     SuppressorSettings supp;
     std::atomic<int> delayEstimateMs{ -1 };
