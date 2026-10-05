@@ -285,6 +285,16 @@ private:
     // live Tail Length changes working (and testable) everywhere.
     void run() override;
 
+    // Builds a complete StagedApm for the given Tail Length from the other
+    // controls' current values. Allocates heavily, so only ever called from
+    // the rebuild thread, or from processBlock while the host is rendering
+    // offline (see the isNonRealtime() branch there).
+    void buildStagedApm(StagedApm& box, int tailLengthIndex, double sampleRate) const;
+
+    // Swaps box's instance into the live audio path (the old one moves into
+    // box) and restarts the FIFOs/dry path cleanly around it. Allocation-free.
+    void adoptStagedApm(StagedApm& box);
+
     std::atomic<StagedApm*> stagedApmSwap{ nullptr };  // rebuild thread -> audio thread
     std::atomic<StagedApm*> retiredApmSwap{ nullptr }; // audio thread -> rebuild thread (for deletion)
     std::atomic<int> requestedTailLengthIndex{ -1 };   // what processBlock wants built; -1 = nothing

@@ -369,24 +369,54 @@ void PAEchoCancellerAudioProcessor::run()
         delete staged; // stale (older request or rate) -- rebuild below
 
         auto* fresh = new StagedApm();
-        fresh->tailLengthIndex = requested;
-        fresh->suppressionStrengthIndex = suppressionStrengthParam->getIndex();
-        fresh->limitHfGain = limitHfGainParam->get();
-        fresh->nearendSensitivity = nearendSensitivityParam->get();
-        fresh->protectionHoldTime = protectionHoldTimeParam->get();
-        fresh->nearendDetectorIndex = nearendDetectorParam->getIndex();
-        fresh->transitionSmoothing = transitionSmoothingParam->get();
-        fresh->sampleRate = sampleRate;
-        fresh->apm = makeConfiguredApm(
-            makeEchoCanceller3Config(fresh->tailLengthIndex, fresh->suppressionStrengthIndex,
-                                     fresh->limitHfGain, fresh->nearendSensitivity,
-                                     fresh->protectionHoldTime,
-                                     4.0f, -96.0f, // shipped defaults, spelled out to reach the trailing detector index
-                                     fresh->nearendDetectorIndex, fresh->transitionSmoothing),
-            &fresh->factory);
+        buildStagedApm(*fresh, requested, sampleRate);
 
         delete stagedApmSwap.exchange(fresh, std::memory_order_acq_rel); // replace anything staged meanwhile (there shouldn't be)
     }
+}
+
+void PAEchoCancellerAudioProcessor::buildStagedApm(StagedApm& box, int tailLengthIndex, double sampleRate) const
+{
+    box.tailLengthIndex = tailLengthIndex;
+    box.suppressionStrengthIndex = suppressionStrengthParam->getIndex();
+    box.limitHfGain = limitHfGainParam->get();
+    box.nearendSensitivity = nearendSensitivityParam->get();
+    box.protectionHoldTime = protectionHoldTimeParam->get();
+    box.nearendDetectorIndex = nearendDetectorParam->getIndex();
+    box.transitionSmoothing = transitionSmoothingParam->get();
+    box.sampleRate = sampleRate;
+    box.apm = makeConfiguredApm(
+        makeEchoCanceller3Config(box.tailLengthIndex, box.suppressionStrengthIndex,
+                                 box.limitHfGain, box.nearendSensitivity,
+                                 box.protectionHoldTime,
+                                 4.0f, -96.0f, // shipped defaults, spelled out to reach the trailing detector index
+                                 box.nearendDetectorIndex, box.transitionSmoothing),
+        &box.factory);
+}
+
+void PAEchoCancellerAudioProcessor::adoptStagedApm(StagedApm& box)
+{
+    std::swap(apm, box.apm); // old instance moves into the box -- freed by whoever owns the box
+    activeEchoControlFactory = box.factory;
+
+    // Same clean-restart treatment as rebuildEchoCanceller: discard
+    // in-flight audio from the old instance and re-prime the dry path.
+    // Latency does NOT change -- aec3InternalDelaySamples is
+    // Tail-Length-invariant (see its comment), so no setLatencySamples()
+    // here (which wouldn't be audio-thread-safe anyway).
+    for (auto& fifo : micInFifos) fifo.reset();
+    for (auto& fifo : micOutFifos) fifo.reset();
+    for (auto& fifo : bypassInFifos) fifo.reset(); // in lockstep with micInFifos -- see resyncDryDelay
+    refInFifo.reset();
+    resyncDryDelay();
+
+    appliedTailLengthIndex.store(box.tailLengthIndex, std::memory_order_relaxed);
+    appliedSuppressionStrengthIndex = box.suppressionStrengthIndex;
+    appliedLimitHfGain = box.limitHfGain;
+    appliedNearendSensitivity = box.nearendSensitivity;
+    appliedProtectionHoldTime = box.protectionHoldTime;
+    appliedNearendDetectorIndex = box.nearendDetectorIndex;
+    appliedTransitionSmoothing = box.transitionSmoothing;
 }
 
 float PAEchoCancellerAudioProcessor::getInputPeakLevelPostDelayed(int delaySamples) const noexcept
@@ -623,7 +653,20 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     const float desiredProtectionHoldTime = protectionHoldTimeParam->get();
     const int desiredNearendDetectorIndex = nearendDetectorParam->getIndex();
     const float desiredTransitionSmoothing = transitionSmoothingParam->get();
-    if (desiredTailLengthIndex != appliedTailLengthIndex.load(std::memory_order_relaxed)) {
+    if (desiredTailLengthIndex != appliedTailLengthIndex.load(std::memory_order_relaxed) && isNonRealtime()) {
+        // Offline render (bounce/export): the host isn't on a deadline, so
+        // build and adopt the new instance right here instead of waiting on
+        // the background thread. That thread polls on wall-clock time, and at
+        // bounce speed its few tens of ms cover up to a second of audio
+        // processed on the wrong instance -- the bounce then sounds different
+        // from playback in its first window (~11dB less suppression,
+        // measured by testFastBounceTailLengthAppliedPromptly). The old
+        // instance is freed when the local box goes out of scope, which is
+        // also fine offline.
+        StagedApm inlineBuild;
+        buildStagedApm(inlineBuild, desiredTailLengthIndex, currentSampleRate);
+        adoptStagedApm(inlineBuild);
+    } else if (desiredTailLengthIndex != appliedTailLengthIndex.load(std::memory_order_relaxed)) {
         requestedTailLengthIndex.store(desiredTailLengthIndex, std::memory_order_release);
 
         // Only touch the staged slot while the retired slot is free: the
@@ -633,28 +676,7 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
             if (StagedApm* staged = stagedApmSwap.exchange(nullptr, std::memory_order_acq_rel)) {
                 if (staged->tailLengthIndex == desiredTailLengthIndex
                     && juce::exactlyEqual(staged->sampleRate, currentSampleRate)) {
-                    std::swap(apm, staged->apm); // old instance moves into the box -- freed later, off this thread
-                    activeEchoControlFactory = staged->factory;
-
-                    // Same clean-restart treatment as rebuildEchoCanceller:
-                    // discard in-flight audio from the old instance and
-                    // re-prime the dry path. Latency does NOT change --
-                    // aec3InternalDelaySamples is Tail-Length-invariant
-                    // (see its comment), so no setLatencySamples() here
-                    // (which wouldn't be audio-thread-safe anyway).
-                    for (auto& fifo : micInFifos) fifo.reset();
-                    for (auto& fifo : micOutFifos) fifo.reset();
-                    for (auto& fifo : bypassInFifos) fifo.reset(); // in lockstep with micInFifos -- see resyncDryDelay
-                    refInFifo.reset();
-                    resyncDryDelay();
-
-                    appliedTailLengthIndex.store(staged->tailLengthIndex, std::memory_order_relaxed);
-                    appliedSuppressionStrengthIndex = staged->suppressionStrengthIndex;
-                    appliedLimitHfGain = staged->limitHfGain;
-                    appliedNearendSensitivity = staged->nearendSensitivity;
-                    appliedProtectionHoldTime = staged->protectionHoldTime;
-                    appliedNearendDetectorIndex = staged->nearendDetectorIndex;
-                    appliedTransitionSmoothing = staged->transitionSmoothing;
+                    adoptStagedApm(*staged); // the old instance is freed later, off this thread
                 }
                 // Park the box whether adopted (it now holds the old
                 // instance) or rejected as stale (wrong tail/rate) -- the

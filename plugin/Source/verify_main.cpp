@@ -2440,9 +2440,12 @@ bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
 // session state after prepareToPlay, or re-prepares with defaults before a
 // bounce. The reference run sets the saved Tail Length *before*
 // prepareToPlay (what a bounce does when state is restored first); the
-// other two set it right after, unpaced (bounce speed) and paced at roughly
+// other two set it right after, unpaced (bounce speed, with the host's
+// non-realtime flag set the way a bounce sets it) and paced at roughly
 // realtime. Reported per run: how much audio went by before the saved value
-// took effect, and the suppression reached in fixed windows.
+// took effect, and the suppression reached in fixed windows. Offline the
+// plugin builds the new instance inline, so the bounce must adopt it on its
+// first block and match the reference from the start.
 bool testFastBounceTailLengthAppliedPromptly(int sampleRate) {
     printf("\n=== Fast-bounce Tail Length applied promptly test (%d Hz) ===\n", sampleRate);
     const double durationS = 14.0; // makeSignals puts the voice burst at ~4.7-9.3s
@@ -2467,6 +2470,8 @@ bool testFastBounceTailLengthAppliedPromptly(int sampleRate) {
         };
         if (mode == Mode::tailBeforePrepare)
             setSavedTail();
+        if (mode == Mode::unpacedAfterPrepare)
+            proc.setNonRealtime(true);
         proc.prepareToPlay(sampleRate, blockSize);
         if (mode != Mode::tailBeforePrepare)
             setSavedTail();
@@ -2525,23 +2530,26 @@ bool testFastBounceTailLengthAppliedPromptly(int sampleRate) {
                suppressionDb(r.out, 10.5, 14.0), r.wallMs);
     };
     report("tail set before prepareToPlay", reference);
-    report("tail set after, unpaced (bounce)", unpaced);
+    report("tail set after, offline (bounce)", unpaced);
     report("tail set after, paced (~realtime)", paced);
 
     const bool allAdopted = reference.adoptedAtS >= 0.0 && unpaced.adoptedAtS >= 0.0 && paced.adoptedAtS >= 0.0;
     const double lateGapDb = std::abs(suppressionDb(reference.out, 10.5, 14.0) - suppressionDb(unpaced.out, 10.5, 14.0));
     const double preVoiceGapDb = suppressionDb(reference.out, 3.0, 4.5) - suppressionDb(unpaced.out, 3.0, 4.5);
-    // Provisional bound: how much audio may pass on the wrong instance.
-    const double maxAdoptS = 1.0;
-    const bool promptly = unpaced.adoptedAtS >= 0.0 && unpaced.adoptedAtS <= maxAdoptS;
+    const double earlyGapDb = std::abs(suppressionDb(reference.out, 0.5, 2.5) - suppressionDb(unpaced.out, 0.5, 2.5));
+    // Offline the swap happens inside the first processBlock, so no audio at
+    // all may pass on the wrong instance beyond that one block.
+    const double maxAdoptS = static_cast<double>(blockSize) / sampleRate;
+    const bool promptly = unpaced.adoptedAtS >= 0.0 && unpaced.adoptedAtS <= maxAdoptS + 1e-9;
     const bool lateEqual = lateGapDb < 1.5;
+    const bool earlyEqual = earlyGapDb < 1.5;
 
-    printf("  Unpaced adoption window: %.2f s of audio (paced: %.2f s, limit %.2f s)\n",
+    printf("  Offline adoption window: %.2f s of audio (paced: %.2f s, limit %.2f s)\n",
            unpaced.adoptedAtS, paced.adoptedAtS, maxAdoptS);
-    printf("  Late-window suppression gap vs reference: %.2f dB (limit 1.5); pre-voice shortfall: %.2f dB\n",
-           lateGapDb, preVoiceGapDb);
+    printf("  Suppression gap vs reference: early %.2f dB, late %.2f dB (limit 1.5 each); pre-voice shortfall: %.2f dB\n",
+           earlyGapDb, lateGapDb, preVoiceGapDb);
 
-    const bool pass = allAdopted && promptly && lateEqual;
+    const bool pass = allAdopted && promptly && lateEqual && earlyEqual;
     printf("  %s\n", pass ? "PASS -- a Tail Length applied after prepareToPlay takes effect promptly even at bounce speed"
                           : "CHECK -- the saved Tail Length is applied late or the result differs when processing outruns real time");
     return pass;

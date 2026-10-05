@@ -111,7 +111,7 @@ target_link_libraries(PAEchoCanceller
         juce::juce_dsp
         PkgConfig::WEBRTC_APM
         ${WEBRTC_APM_ABSL_LIBS}
-        "-framework CoreFoundation"
+        "$<$<PLATFORM_ID:Darwin>:-framework CoreFoundation>"
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -155,7 +155,7 @@ target_link_libraries(PAEchoCancellerVerify
         juce::juce_dsp
         PkgConfig::WEBRTC_APM
         ${WEBRTC_APM_ABSL_LIBS}
-        "-framework CoreFoundation"
+        "$<$<PLATFORM_ID:Darwin>:-framework CoreFoundation>"
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
