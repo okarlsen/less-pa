@@ -1,6 +1,8 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+
+#include <array>
 #include "PluginProcessor.h"
 #include "LessPALookAndFeel.h"
 #include "LevelMeterComponent.h"
@@ -77,6 +79,8 @@ private:
     static constexpr int meterPair = 2 * meterRowHeight + meterRowGap;
 
     static constexpr int fineTuningDoneWidth = 70;
+    static constexpr int fineTuningResetWidth = 140;
+    static constexpr int fineTuningHeaderButtonGap = 8;
 
     static constexpr int logoWidth = 70;
     static constexpr float logoAspect = 814.0f / 200.0f;
@@ -146,6 +150,12 @@ private:
     void showHelpDialog();
     void setFineTuningVisible(bool shouldShow);
     void updateFineTuningButton();
+    void resetFineTuningToDefaults();
+
+    // The four parameters that live on the Fine tuning overlay -- the one
+    // list both the "adjusted" indicator and Reset to defaults work from, so
+    // the two can never disagree about what the overlay covers.
+    std::array<juce::RangedAudioParameter*, 4> getFineTuningParameters() const;
 
     PAEchoCancellerAudioProcessor& processor;
 
@@ -186,6 +196,7 @@ private:
     // there is ever invisible from the main panel.
     juce::TextButton fineTuningButton{ "Fine tuning..." };
     juce::TextButton fineTuningDoneButton{ "Done" };
+    juce::TextButton fineTuningResetButton{ "Reset to defaults" };
     juce::Label fineTuningHintLabel{ "fineTuningHintLabel",
                                      "These shape how the crowd detector switches on and off. "
                                      "The defaults suit most shows; Crowd Protection on the main "

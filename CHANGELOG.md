@@ -3,6 +3,14 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- A **Reset to defaults** button on the Fine tuning page puts Near-end
+  Detector, Protection Hold Time, Transition Smoothing and Limit HF Gain back
+  to their defaults. It is greyed out when nothing there has been changed.
+
 ## [1.0.4]
 
 ### Changed

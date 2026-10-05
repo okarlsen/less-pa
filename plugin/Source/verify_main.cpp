@@ -4212,6 +4212,13 @@ int runScreenshotMode(const char* outPath, bool showFineTuning) {
             juce::MessageManager::getInstance()->runDispatchLoopUntil(10);
     }
 
+    // An adjusted overlay is the interesting state to review: the main
+    // button says "adjusted" and Reset to defaults is enabled.
+    if (showFineTuning)
+        proc.getProtectionHoldTimeParameter()->setValueNotifyingHost(
+            proc.getProtectionHoldTimeParameter()->convertTo0to1(250.0f));
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+
     if (showFineTuning)
         for (auto* child : editor->getChildren())
             if (auto* button = dynamic_cast<juce::TextButton*>(child))

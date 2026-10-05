@@ -297,8 +297,10 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // The detector's expert controls live on the overlay, which is added
     // last so it covers columns 2 and 3 when shown.
     fineTuningDoneButton.onClick = [this] { setFineTuningVisible(false); };
+    fineTuningResetButton.onClick = [this] { resetFineTuningToDefaults(); };
+    fineTuningResetButton.setTooltip("Restore the four settings on this page");
     for (auto* component : std::initializer_list<juce::Component*>{
-             &fineTuningSectionLabel, &fineTuningDoneButton,
+             &fineTuningSectionLabel, &fineTuningDoneButton, &fineTuningResetButton,
              &nearendDetectorLabel, &nearendDetectorCombo, &limitHfGainToggle,
              &protectionHoldTimeLabel, &protectionHoldTimeSlider,
              &transitionSmoothingLabel, &transitionSmoothingSlider, &fineTuningHintLabel })
@@ -490,7 +492,7 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         label->setFont(juce::FontOptions(scale * 12.0f));
     statusLabel.setFont(juce::FontOptions(scale * 12.5f).withStyle("Bold"));
     fineTuningHintLabel.setFont(juce::FontOptions(scale * 12.0f));
-    for (auto* button : { &fineTuningButton, &fineTuningDoneButton }) {
+    for (auto* button : { &fineTuningButton, &fineTuningDoneButton, &fineTuningResetButton }) {
         button->getProperties().set("fontHeight", scale * 12.5f);
         button->repaint(); // a property change alone doesn't invalidate it
     }
@@ -590,6 +592,9 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         auto header = body.removeFromTop(sc(sectionHeaderRow));
         fineTuningDoneButton.setBounds(header.removeFromRight(sc(fineTuningDoneWidth))
                                            .withSizeKeepingCentre(sc(fineTuningDoneWidth), sc(buttonRow)));
+        header.removeFromRight(sc(fineTuningHeaderButtonGap));
+        fineTuningResetButton.setBounds(header.removeFromRight(sc(fineTuningResetWidth))
+                                            .withSizeKeepingCentre(sc(fineTuningResetWidth), sc(buttonRow)));
         fineTuningSectionLabel.setBounds(header);
 
         auto left = body.removeFromLeft((body.getWidth() - sc(columnGap)) / 2);
@@ -623,16 +628,38 @@ void PAEchoCancellerAudioProcessorEditor::updateFineTuningButton()
     // Says so on the main panel when anything behind it has been moved off
     // its default, so a tweak made weeks ago in the overlay can't silently
     // explain why one session sounds different from another.
-    const auto isDefault = [](juce::RangedAudioParameter* param) {
-        return std::abs(param->getValue() - param->getDefaultValue()) < 1.0e-4f;
-    };
-    const bool modified = !isDefault(processor.getNearendDetectorParameter())
-                          || !isDefault(processor.getProtectionHoldTimeParameter())
-                          || !isDefault(processor.getTransitionSmoothingParameter())
-                          || !isDefault(processor.getLimitHfGainParameter());
+    bool modified = false;
+    for (auto* param : getFineTuningParameters())
+        modified = modified || std::abs(param->getValue() - param->getDefaultValue()) >= 1.0e-4f;
+
     const juce::String text = modified ? "Fine tuning (adjusted)..." : "Fine tuning...";
     if (fineTuningButton.getButtonText() != text)
         fineTuningButton.setButtonText(text);
+
+    // Greyed out when there is nothing to reset, so the button also answers
+    // "is anything on this page changed?" at a glance.
+    if (fineTuningResetButton.isEnabled() != modified)
+        fineTuningResetButton.setEnabled(modified);
+}
+
+std::array<juce::RangedAudioParameter*, 4> PAEchoCancellerAudioProcessorEditor::getFineTuningParameters() const
+{
+    return { processor.getNearendDetectorParameter(), processor.getProtectionHoldTimeParameter(),
+             processor.getTransitionSmoothingParameter(), processor.getLimitHfGainParameter() };
+}
+
+void PAEchoCancellerAudioProcessorEditor::resetFineTuningToDefaults()
+{
+    // One gesture per parameter, like any other control edit, so hosts record
+    // the reset as ordinary automation/undo steps. The controls themselves
+    // pick the new values up from the 30Hz timer sync, and the processor
+    // applies them live like any other suppressor-only change.
+    for (auto* param : getFineTuningParameters()) {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost(param->getDefaultValue());
+        param->endChangeGesture();
+    }
+    updateFineTuningButton();
 }
 
 void PAEchoCancellerAudioProcessorEditor::tailLengthComboChanged()
@@ -1017,7 +1044,8 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "\n"
         "=== FINE TUNING ===\n"
         "Behind the Fine tuning button. The defaults suit most shows; the "
-        "button says \"adjusted\" when anything in here is off its default.\n"
+        "button says \"adjusted\" when anything in here is off its default, "
+        "and Reset to defaults puts all four back in one click.\n"
         "\n"
         "NEAR-END DETECTOR\n"
         "How audience sound is recognised. Classic watches the overall "
