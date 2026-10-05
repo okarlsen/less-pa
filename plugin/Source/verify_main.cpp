@@ -2815,7 +2815,157 @@ static int runKalmanBench() {
     return 0;
 }
 
+// End-to-end latency check, for phase-aligned mixing of ambience mics: the
+// delay the plugin actually adds must equal what it reports to the host,
+// in every situation a host can put it in -- every sample rate, any block
+// size (fixed or varying from call to call), realtime or offline, mono or
+// stereo, any Mix, bypassed, and with the PA present so the suppressor is
+// working. The mic carries independent white noise (the "crowd") per
+// channel; the delay is the lag of the output's cross-correlation peak
+// against that noise, and its sign must be positive (no polarity flip).
+// The input HPF is minimum-phase, so its impulse response peaks at lag 0
+// and does not move the peak.
+namespace latencymatrix {
+struct Case {
+    int rate; int block; bool stereo; float mixPct; bool bypass; bool nonRealtime; bool paActive;
+};
+struct Result { int reported = -1; int measured[2] = { -1, -1 }; double peakRatio[2] = { 0, 0 }; bool positive[2] = { false, false }; };
+
+Result run(const Case& c, double durationS = 2.0) {
+    const int n = static_cast<int>(c.rate * durationS);
+    std::mt19937 rngL(101), rngR(202), rngRef(303);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<float> crowd[2] = { std::vector<float>(static_cast<size_t>(n)), std::vector<float>(static_cast<size_t>(n)) };
+    for (auto& v : crowd[0]) v = 0.1f * dist(rngL);
+    for (auto& v : crowd[1]) v = 0.1f * dist(rngR);
+    std::vector<float> ref(static_cast<size_t>(n), 0.0f), echo(static_cast<size_t>(n), 0.0f);
+    if (c.paActive) {
+        for (auto& v : ref) v = 0.3f * dist(rngRef);
+        // A short room: 5 ms direct path plus a few reflections.
+        const int d0 = c.rate / 200;
+        const std::pair<int, float> taps[] = { { d0, 0.8f }, { d0 + c.rate / 300, 0.35f }, { d0 + c.rate / 90, -0.2f }, { d0 + c.rate / 40, 0.1f } };
+        for (auto [d, g] : taps)
+            for (int i = d; i < n; ++i) echo[static_cast<size_t>(i)] += g * ref[static_cast<size_t>(i - d)];
+    }
+
+    PAEchoCancellerAudioProcessor proc;
+    PAEchoCancellerAudioProcessor::BusesLayout layout;
+    const auto mainSet = c.stereo ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    layout.inputBuses.add(mainSet);
+    layout.inputBuses.add(juce::AudioChannelSet::mono());
+    layout.outputBuses.add(mainSet);
+    proc.setBusesLayout(layout);
+    proc.getDryWetMixParameter()->setValueNotifyingHost(proc.getDryWetMixParameter()->convertTo0to1(c.mixPct));
+    proc.getBypassParameter()->setValueNotifyingHost(c.bypass ? 1.0f : 0.0f);
+
+    // block > 0: fixed size. block == 0: a varying host-like pattern.
+    static const int pattern[] = { 512, 37, 129, 1, 4096, 256, 7, 1000, 64 };
+    const int maxBlock = c.block > 0 ? c.block : 4096;
+    proc.setNonRealtime(c.nonRealtime);
+    proc.prepareToPlay(c.rate, c.block > 0 ? c.block : 512); // pattern also exceeds the prepared size
+    Result r;
+    r.reported = proc.getLatencySamples();
+
+    const int numCh = c.stereo ? 2 : 1;
+    std::vector<float> out[2] = { std::vector<float>(static_cast<size_t>(n), 0.0f), std::vector<float>(static_cast<size_t>(n), 0.0f) };
+    const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer(totalChannels, maxBlock);
+    juce::MidiBuffer midi;
+    int pos = 0, idx = 0;
+    while (pos < n) {
+        const int bs = std::min(c.block > 0 ? c.block : pattern[idx++ % 9], n - pos);
+        buffer.setSize(totalChannels, bs, false, false, true);
+        buffer.clear();
+        auto mainIn = proc.getBusBuffer(buffer, true, 0);
+        auto refIn = proc.getBusBuffer(buffer, true, 1);
+        for (int ch = 0; ch < numCh; ++ch)
+            for (int s = 0; s < bs; ++s)
+                mainIn.setSample(ch, s, crowd[ch][static_cast<size_t>(pos + s)] + echo[static_cast<size_t>(pos + s)]);
+        for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
+            refIn.copyFrom(ch, 0, ref.data() + pos, bs);
+        proc.processBlock(buffer, midi);
+        auto mainOut = proc.getBusBuffer(buffer, false, 0);
+        for (int ch = 0; ch < numCh; ++ch)
+            for (int s = 0; s < bs; ++s) out[ch][static_cast<size_t>(pos + s)] = mainOut.getSample(ch, s);
+        pos += bs;
+    }
+    if (proc.getLatencySamples() != r.reported) r.reported = -2; // must not change while running
+    proc.releaseResources();
+
+    // Correlate over a window in the second half, where the canceller has
+    // converged and the suppressor is acting on the PA.
+    const int win = 8192, start = n - win - 2048;
+    for (int ch = 0; ch < numCh; ++ch) {
+        double best = 0.0, second = 0.0; int bestLag = -1; double bestSigned = 0.0;
+        std::vector<double> xc(1025);
+        for (int lag = 0; lag <= 1024; ++lag) {
+            double acc = 0.0;
+            for (int i = 0; i < win; ++i)
+                acc += static_cast<double>(out[ch][static_cast<size_t>(start + i)]) * crowd[ch][static_cast<size_t>(start + i - lag)];
+            xc[static_cast<size_t>(lag)] = acc;
+            if (std::abs(acc) > best) { best = std::abs(acc); bestLag = lag; bestSigned = acc; }
+        }
+        for (int lag = 0; lag <= 1024; ++lag)
+            if (std::abs(lag - bestLag) > 2) second = std::max(second, std::abs(xc[static_cast<size_t>(lag)]));
+        r.measured[ch] = bestLag;
+        r.peakRatio[ch] = second > 0 ? 20.0 * std::log10(best / second) : 99.0;
+        r.positive[ch] = bestSigned > 0.0;
+    }
+    return r;
+}
+
+// Returns pass; prints one line per case when verbose, else only failures.
+bool runMatrix(bool full, bool verbose) {
+    std::vector<int> rates = full ? std::vector<int>{ 44100, 48000, 88200, 96000, 176400, 192000 }
+                                  : std::vector<int>{ 44100, 48000, 96000 };
+    std::vector<int> blocks = full ? std::vector<int>{ 16, 32, 64, 100, 128, 192, 256, 441, 512, 1024, 2048, 0 }
+                                   : std::vector<int>{ 32, 128, 192, 512, 0 };
+    struct Variant { bool stereo; float mix; bool bypass; bool nonRealtime; bool pa; const char* name; };
+    const Variant variants[] = {
+        { true, 100.0f, false, false, true, "stereo, Mix 100%, PA on" },
+        { true, 100.0f, false, true, true, "stereo, Mix 100%, PA on, offline" },
+        { true, 50.0f, false, false, true, "stereo, Mix 50%, PA on" },
+        { true, 0.0f, false, false, true, "stereo, Mix 0%, PA on" },
+        { false, 100.0f, false, false, true, "mono, Mix 100%, PA on" },
+        { true, 100.0f, false, false, false, "stereo, Mix 100%, no PA" },
+        { true, 100.0f, true, false, true, "stereo, bypassed" },
+        { true, 100.0f, true, true, true, "stereo, bypassed, offline" },
+    };
+    bool allOk = true;
+    int cases = 0, failures = 0;
+    for (int rate : rates)
+        for (int block : blocks)
+            for (const auto& v : variants) {
+                const Case c{ rate, block, v.stereo, v.mix, v.bypass, v.nonRealtime, v.pa };
+                const auto r = run(c);
+                bool ok = r.reported > 0;
+                for (int ch = 0; ch < (v.stereo ? 2 : 1); ++ch)
+                    ok = ok && r.measured[ch] == r.reported && r.positive[ch] && r.peakRatio[ch] > 6.0;
+                ++cases;
+                if (!ok) { ++failures; allOk = false; }
+                if (verbose || !ok)
+                    printf("  %6d Hz  block %-7s %-34s reported %4d  measured %4d/%4d  peak +%.0f dB%s  %s\n", rate,
+                           block > 0 ? std::to_string(block).c_str() : "varying", v.name, r.reported, r.measured[0],
+                           v.stereo ? r.measured[1] : r.measured[0], r.peakRatio[0],
+                           (r.positive[0] && (!v.stereo || r.positive[1])) ? "" : " INVERTED", ok ? "ok" : "MISMATCH");
+            }
+    printf("  %d cases, %d mismatches\n", cases, failures);
+    return allOk;
+}
+} // namespace latencymatrix
+
+bool testLatencyMatrix() {
+    printf("\n=== Measured latency vs reported, across rates, block sizes, Mix, bypass, offline ===\n");
+    const bool pass = latencymatrix::runMatrix(false, false);
+    printf("  %s\n", pass ? "PASS" : "CHECK -- measured delay differs from getLatencySamples()");
+    return pass;
+}
+
 int main(int argc, char* argv[]) {
+    // --latency-matrix: the full latency sweep (all rates and block sizes),
+    // one line per case.
+    if (argc >= 2 && std::string(argv[1]) == "--latency-matrix")
+        return latencymatrix::runMatrix(true, true) ? 0 : 1;
     if (argc >= 2 && std::string(argv[1]) == "--bench-kalman")
         return runKalmanBench();
     if (argc >= 3 && std::string(argv[1]) == "--screenshot") {
@@ -2881,6 +3031,7 @@ int main(int argc, char* argv[]) {
     for (int rate : rates) allPass = testDryWetAlignment(rate) && allPass;
     for (int rate : rates) allPass = testDryWetCombFiltering(rate) && allPass;
     allPass = testGetLatencySamplesAccuracyAllRates() && allPass;
+    allPass = testLatencyMatrix() && allPass;
     allPass = testReferenceMeterIncludesTrim() && allPass;
     allPass = testStateSaveRestore() && allPass;
     allPass = testOldSessionRestore() && allPass;

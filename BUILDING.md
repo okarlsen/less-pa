@@ -74,9 +74,18 @@ cmake --build build --target PAEchoCancellerVerify -j8
 ./build/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify
 ```
 
-It must report 45 individual `PASS` results and end with `ALL TESTS PASS`.
-(`grep -c PASS` reports 46, because it counts the closing `ALL TESTS PASS`
+It must report 46 individual `PASS` results and end with `ALL TESTS PASS`.
+(`grep -c PASS` reports 47, because it counts the closing `ALL TESTS PASS`
 line as well.)
+
+To check the plugin's real delay against what it reports to the host across
+every sample rate (44.1 to 192 kHz), buffer sizes from 16 to 2048 samples,
+Mix settings, bypass and offline rendering, run the full latency sweep (a
+few minutes):
+
+```sh
+./build/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify --latency-matrix
+```
 
 For the AU, Apple's own validation tool should also succeed:
 
