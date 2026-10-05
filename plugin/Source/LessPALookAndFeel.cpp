@@ -202,7 +202,7 @@ void LessPALookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, b
 juce::Font LessPALookAndFeel::getTextButtonFont(juce::TextButton& button, int buttonHeight)
 {
     // Same opt-in as drawToggleButton: a text button that sits among labelled
-    // controls (Fine tuning, Done) asks for the label size via the
+    // controls (Reset) asks for the label size via the
     // "fontHeight" property, so it doesn't shout over the controls around it.
     // Everything else (the "?" help button) keeps JUCE's stock sizing.
     const auto requestedFontHeight = button.getProperties()["fontHeight"];

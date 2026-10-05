@@ -16,12 +16,13 @@ Planned as 1.1.0.
   so it locks on within a few seconds of PA, and every control applies
   live with no dropout.
 - **New cancellation controls.** Tail Length stays. Suppression Strength
-  and Crowd Protection are replaced by **Amount** (0-100%, default 25%: how
-  hard the PA left over after the filter is cleaned up; 0% is the filter
-  alone) and **Max Reduction** (0 to -24 dB, default -12 dB: the deepest cut
-  at any frequency). The Fine tuning page now holds **Response** (3-50 ms,
-  default 20 ms: how quickly the cleanup follows the sound) and Reset to
-  defaults.
+  and Crowd Protection are replaced by three controls for the extra
+  removal of the bleed that is left after the canceller's subtraction:
+  **Amount** (0-100%, default 25%; 0% turns it off), **Max Reduction** (0
+  to -24 dB, default -12 dB: how far it may turn down any frequency) and
+  **Response** (3-50 ms, default 20 ms: how quickly it follows the sound).
+  All are on the main panel, with a **Reset** button that puts them back
+  to their defaults. The Fine tuning page is gone.
 - The PA delay readout comes from the filter itself and holds steady.
 
 ### Removed

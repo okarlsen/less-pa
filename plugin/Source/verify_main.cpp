@@ -2687,11 +2687,11 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     return allRan ? 0 : 1;
 }
 
-// --screenshot <out.png> [--fine-tuning]: renders the editor to a PNG after
+// --screenshot <out.png> [--adjusted]: renders the editor to a PNG after
 // a few seconds of the synthetic test signals have run through the
 // processor, so the meters and status line show a realistic mid-show state.
 // For reviewing panel changes without a host; needs a display (or xvfb-run).
-int runScreenshotMode(const char* outPath, bool showFineTuning) {
+int runScreenshotMode(const char* outPath, bool adjusted) {
     juce::ScopedJuceInitialiser_GUI gui;
     const int sampleRate = 48000;
     const int blockSize = 512;
@@ -2720,18 +2720,12 @@ int runScreenshotMode(const char* outPath, bool showFineTuning) {
             juce::MessageManager::getInstance()->runDispatchLoopUntil(10);
     }
 
-    // An adjusted overlay is the interesting state to review: the main
-    // button says "adjusted" and Reset to defaults is enabled.
-    if (showFineTuning)
+    // --adjusted moves a cleanup control off its default, so the Reset
+    // button shows enabled.
+    if (adjusted)
         proc.getResponseParameter()->setValueNotifyingHost(
             proc.getResponseParameter()->convertTo0to1(35.0f));
     juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
-
-    if (showFineTuning)
-        for (auto* child : editor->getChildren())
-            if (auto* button = dynamic_cast<juce::TextButton*>(child))
-                if (button->getButtonText().startsWith("Fine tuning") && button->onClick)
-                    button->onClick();
 
     const auto image = editor->createComponentSnapshot(editor->getLocalBounds(), true, 2.0f);
     juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile(outPath);
@@ -2825,10 +2819,10 @@ int main(int argc, char* argv[]) {
     if (argc >= 2 && std::string(argv[1]) == "--bench-kalman")
         return runKalmanBench();
     if (argc >= 3 && std::string(argv[1]) == "--screenshot") {
-        bool fineTuning = false;
+        bool adjusted = false;
         for (int i = 3; i < argc; ++i)
-            fineTuning |= std::string(argv[i]) == "--fine-tuning";
-        return runScreenshotMode(argv[2], fineTuning);
+            adjusted |= std::string(argv[i]) == "--adjusted";
+        return runScreenshotMode(argv[2], adjusted);
     }
 
     // --real <mic.wav> <ref.wav>: run the real-material harness instead of

@@ -145,8 +145,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     versionLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
     addAndMakeVisible(versionLabel);
 
-    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel,
-                         &outputSectionLabel, &fineTuningSectionLabel }) {
+    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel, &outputSectionLabel }) {
         label->setJustificationType(juce::Justification::centredLeft);
         // Secondary text: a group header names the region, it isn't a control,
         // so it should sit behind the labels it groups in the reading order.
@@ -200,6 +199,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     responseSlider.setNumDecimalPlacesToDisplay(0);
     responseSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
     responseSlider.onValueChange = [this] { responseSliderChanged(); };
+    addAndMakeVisible(responseLabel);
+    addAndMakeVisible(responseSlider);
 
     addAndMakeVisible(hpfLabel);
 
@@ -263,21 +264,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     statusLabel.setColour(juce::Label::textColourId, LessPAColours::primaryText);
     addAndMakeVisible(statusLabel);
 
-    fineTuningButton.onClick = [this] { setFineTuningVisible(true); };
-    addAndMakeVisible(fineTuningButton);
-
-    // The expert control lives on the overlay, which is added last so it
-    // covers columns 2 and 3 when shown.
-    fineTuningDoneButton.onClick = [this] { setFineTuningVisible(false); };
-    fineTuningResetButton.onClick = [this] { resetFineTuningToDefaults(); };
-    fineTuningResetButton.setTooltip("Restore the setting on this page");
-    for (auto* component : std::initializer_list<juce::Component*>{
-             &fineTuningSectionLabel, &fineTuningDoneButton, &fineTuningResetButton,
-             &responseLabel, &responseSlider, &fineTuningHintLabel })
-        fineTuningOverlay.addAndMakeVisible(component);
-    fineTuningHintLabel.setJustificationType(juce::Justification::bottomLeft);
-    fineTuningHintLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
-    addChildComponent(fineTuningOverlay);
+    resetButton.onClick = [this] { resetCleanupToDefaults(); };
+    addAndMakeVisible(resetButton);
 
     // A few words each, deliberately much shorter than the corresponding
     // section of showHelpDialog(): a tooltip answers "what is this?" while the
@@ -290,13 +278,13 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     helpButton.setTooltip("Full control reference");
     versionLabel.setTooltip("Less PA v" JucePlugin_VersionString);
     tailLengthCombo.setTooltip("Match to the venue's reverb");
-    amountSlider.setTooltip("Cleanup after the filter; 0% = filter only");
-    maxReductionSlider.setTooltip("Deepest cut at any frequency");
-    responseSlider.setTooltip("Shorter = tighter, longer = smoother");
+    amountSlider.setTooltip("Extra removal of the PA bleed that's left; 0% = none");
+    maxReductionSlider.setTooltip("How far the extra removal may turn down any frequency");
+    responseSlider.setTooltip("How fast the extra removal reacts; longer = smoother");
     hpfSlider.setTooltip("Cutoff on mic + reference");
     referenceGainSlider.setTooltip("Reference gain only");
     dryWetSlider.setTooltip("Blend cancelled vs original");
-    fineTuningButton.setTooltip("Response, and reset");
+    resetButton.setTooltip("Amount, Max Reduction and Response back to defaults");
     inputMeter.setTooltip("Mic, after the HPF");
     sidechainMeter.setTooltip("After HPF and trim; aim for the zone");
     suppressionMeter.setTooltip("Reduction, in vs out");
@@ -306,7 +294,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     updateTailLengthCombo();
     updateSliders();
-    updateFineTuningButton();
+    updateResetButton();
     startTimerHz(30); // meter ballistics + keeps controls in sync with host automation
 }
 
@@ -351,7 +339,6 @@ PAEchoCancellerAudioProcessorEditor::computeSectionBounds() const
     // corner wordmark, aligned to the content edge.
     bounds.column3 = content;
 
-    bounds.fineTuning = bounds.column2.getUnion(bounds.column3);
     return bounds;
 }
 
@@ -367,18 +354,6 @@ juce::Rectangle<int> PAEchoCancellerAudioProcessorEditor::computeLogoBounds() co
     auto content = getLocalBounds().reduced(sc(outerMargin));
     const auto footer = content.removeFromBottom(sc(footerStripHeight));
     return { footer.getRight() - width, footer.getCentreY() - height / 2, width, height };
-}
-
-void PAEchoCancellerAudioProcessorEditor::FineTuningOverlay::paint(juce::Graphics& g)
-{
-    // Opaque, in the panel colour with an accent outline: it has to fully
-    // hide the panels underneath, and the outline marks it as a temporary
-    // layer rather than a fourth section.
-    const auto area = getLocalBounds().toFloat();
-    g.setColour(LessPAColours::panel);
-    g.fillRoundedRectangle(area, 6.0f * scale);
-    g.setColour(LessPAColours::accent.withAlpha(0.6f));
-    g.drawRoundedRectangle(area.reduced(0.5f), 6.0f * scale, 1.0f);
 }
 
 void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
@@ -437,8 +412,7 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     // stale text-box size would silently cap the value text at the default
     // size. Both are skipped when unchanged so the common
     // "same size, re-laid out" path doesn't rebuild the sliders' text boxes.
-    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel,
-                         &outputSectionLabel, &fineTuningSectionLabel })
+    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel, &outputSectionLabel })
         label->setFont(juce::FontOptions(scale * 11.0f).withStyle("Bold"));
 
     for (auto* label : { &tailLengthLabel, &amountLabel, &maxReductionLabel, &responseLabel,
@@ -449,11 +423,8 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                          &suppressionMeterLabel, &delayReadoutLabel })
         label->setFont(juce::FontOptions(scale * 12.0f));
     statusLabel.setFont(juce::FontOptions(scale * 12.5f).withStyle("Bold"));
-    fineTuningHintLabel.setFont(juce::FontOptions(scale * 12.0f));
-    for (auto* button : { &fineTuningButton, &fineTuningDoneButton, &fineTuningResetButton }) {
-        button->getProperties().set("fontHeight", scale * 12.5f);
-        button->repaint(); // a property change alone doesn't invalidate it
-    }
+    resetButton.getProperties().set("fontHeight", scale * 12.0f);
+    resetButton.repaint(); // a property change alone doesn't invalidate it
 
     juce::Slider* const sliders[] = { &amountSlider, &maxReductionSlider, &responseSlider,
                                       &hpfSlider, &referenceGainSlider, &dryWetSlider };
@@ -509,17 +480,22 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                      inputMeterLabel, inputMeter, sidechainMeterLabel, sidechainMeter);
     }
 
-    // COLUMN 2 -- CANCELLATION: the three decisions that matter for a show,
-    // then the door to the expert controls.
+    // COLUMN 2 -- CANCELLATION: the venue's Tail Length, then the three
+    // controls for how much is removed, with their Reset in the header row.
     {
+        auto body = panelBody(sections.column2);
+        auto header = body.withHeight(sc(sectionHeaderRow));
+        resetButton.setBounds(header.removeFromRight(sc(resetButtonWidth))
+                                  .withSizeKeepingCentre(sc(resetButtonWidth), sc(buttonRow - 4)));
+
         SectionGrid grid(1, scale, 0);
         grid.row(sectionHeaderRow, cancellationSectionLabel);
         addLabelled(grid, headerGap, tailLengthLabel, tailLengthCombo, comboRow);
         addLabelled(grid, controlGap, amountLabel, amountSlider, sliderRow);
         addLabelled(grid, controlGap, maxReductionLabel, maxReductionSlider, sliderRow);
-        grid.gap(controlGap);
-        grid.row(buttonRow, fineTuningButton);
-        grid.performLayout(panelBody(sections.column2));
+        addLabelled(grid, controlGap, responseLabel, responseSlider, sliderRow);
+        grid.performLayout(body);
+        cancellationSectionLabel.setBounds(cancellationSectionLabel.getBounds().withRight(resetButton.getX()));
     }
 
     // COLUMN 3 -- OUTPUT: what the canceller is doing, then the mix.
@@ -539,76 +515,36 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                      suppressionMeterLabel, suppressionMeter, outputMeterLabel, outputMeter);
     }
 
-    // FINE TUNING overlay across columns 2 and 3: Response on the left, the
-    // hint across the bottom.
-    {
-        fineTuningOverlay.scale = scale;
-        fineTuningOverlay.setBounds(sections.fineTuning);
-        auto body = panelBody(fineTuningOverlay.getLocalBounds());
-
-        auto header = body.removeFromTop(sc(sectionHeaderRow));
-        fineTuningDoneButton.setBounds(header.removeFromRight(sc(fineTuningDoneWidth))
-                                           .withSizeKeepingCentre(sc(fineTuningDoneWidth), sc(buttonRow)));
-        header.removeFromRight(sc(fineTuningHeaderButtonGap));
-        fineTuningResetButton.setBounds(header.removeFromRight(sc(fineTuningResetWidth))
-                                            .withSizeKeepingCentre(sc(fineTuningResetWidth), sc(buttonRow)));
-        fineTuningSectionLabel.setBounds(header);
-
-        auto left = body.removeFromLeft((body.getWidth() - sc(columnGap)) / 2);
-        body.removeFromLeft(sc(columnGap));
-        auto right = body;
-
-        SectionGrid leftGrid(1, scale, 0);
-        addLabelled(leftGrid, headerGap, responseLabel, responseSlider, sliderRow);
-        leftGrid.performLayout(left);
-
-        fineTuningHintLabel.setBounds(left.getUnion(right).removeFromBottom(sc(3 * statusRow)));
-    }
 }
 
-void PAEchoCancellerAudioProcessorEditor::setFineTuningVisible(bool shouldShow)
+void PAEchoCancellerAudioProcessorEditor::updateResetButton()
 {
-    fineTuningOverlay.setVisible(shouldShow);
-    if (shouldShow)
-        fineTuningOverlay.toFront(false);
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateFineTuningButton()
-{
-    // Says so on the main panel when anything behind it has been moved off
-    // its default, so a tweak made weeks ago in the overlay can't silently
-    // explain why one session sounds different from another.
-    bool modified = false;
-    for (auto* param : getFineTuningParameters())
-        modified = modified || std::abs(param->getValue() - param->getDefaultValue()) >= 1.0e-4f;
-
-    const juce::String text = modified ? "Fine tuning (adjusted)..." : "Fine tuning...";
-    if (fineTuningButton.getButtonText() != text)
-        fineTuningButton.setButtonText(text);
-
     // Greyed out when there is nothing to reset, so the button also answers
-    // "is anything on this page changed?" at a glance.
-    if (fineTuningResetButton.isEnabled() != modified)
-        fineTuningResetButton.setEnabled(modified);
+    // "have I changed how much is removed?" at a glance.
+    bool modified = false;
+    for (auto* param : getCleanupParameters())
+        modified = modified || std::abs(param->getValue() - param->getDefaultValue()) >= 1.0e-4f;
+    if (resetButton.isEnabled() != modified)
+        resetButton.setEnabled(modified);
 }
 
-std::array<juce::RangedAudioParameter*, 1> PAEchoCancellerAudioProcessorEditor::getFineTuningParameters() const
+std::array<juce::RangedAudioParameter*, 3> PAEchoCancellerAudioProcessorEditor::getCleanupParameters() const
 {
-    return { processor.getResponseParameter() };
+    return { processor.getAmountParameter(), processor.getMaxReductionParameter(), processor.getResponseParameter() };
 }
 
-void PAEchoCancellerAudioProcessorEditor::resetFineTuningToDefaults()
+void PAEchoCancellerAudioProcessorEditor::resetCleanupToDefaults()
 {
     // One gesture per parameter, like any other control edit, so hosts record
     // the reset as ordinary automation/undo steps. The controls themselves
     // pick the new values up from the 30Hz timer sync, and the processor
     // applies them live like any other change.
-    for (auto* param : getFineTuningParameters()) {
+    for (auto* param : getCleanupParameters()) {
         param->beginChangeGesture();
         param->setValueNotifyingHost(param->getDefaultValue());
         param->endChangeGesture();
     }
-    updateFineTuningButton();
+    updateResetButton();
 }
 
 void PAEchoCancellerAudioProcessorEditor::tailLengthComboChanged()
@@ -692,7 +628,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 {
     updateTailLengthCombo();
     updateSliders();
-    updateFineTuningButton();
+    updateResetButton();
 
     // Two different ways "nothing is happening" can look, both of which
     // need catching:
@@ -789,15 +725,22 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 
 void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
 {
-    // Mirrors the panel exactly: the three columns left to right, then the
-    // Fine tuning overlay, then how to use it live and in post. The order is
-    // the thing that has to match the panel, and does.
+    // Mirrors the panel exactly: the three columns left to right, then how
+    // to use it live and in post. The order is the thing that has to match
+    // the panel, and does.
     static const juce::String helpText =
         "LESS PA removes PA speaker bleed from an audience microphone, using "
         "the PA feed itself as a reference -- wire the PA signal into the "
         "Reference sidechain input. It works by acoustic echo cancellation "
         "(AEC), the same technique phones and conferencing systems use to "
         "remove speaker bleed.\n"
+        "\n"
+        "It works in two steps. First it learns how the PA sounds by the "
+        "time it reaches the mic, makes a copy of that from the PA feed, "
+        "and subtracts it. That copy is never perfect, so some bleed is "
+        "left. Second, an extra removal step turns down the frequencies "
+        "where that leftover bleed is still audible. Amount, Max Reduction "
+        "and Response set the second step.\n"
         "\n"
         "The panel follows the signal, left to right: what reaches the "
         "canceller, how it cancels, and what comes out.\n"
@@ -834,16 +777,27 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "costs a little more CPU. Applies live.\n"
         "\n"
         "AMOUNT\n"
-        "How hard the PA left over after the main filter is cleaned up. "
-        "0% is the filter alone: the most natural sound. Higher removes "
-        "more PA, and more of the crowd with it. 25% is a good start; "
-        "raise it if PA still comes through, lower it if the crowd sounds "
-        "thin or watery. Applies live.\n"
+        "How much of the bleed that is left after the subtraction gets "
+        "removed on top. 0% turns the extra removal off: only the "
+        "subtraction, the most natural sound. Higher removes more PA, and "
+        "more of the crowd with it. 25% is a good start; raise it if PA "
+        "still comes through, lower it if the crowd sounds thin or watery. "
+        "Applies live.\n"
         "\n"
         "MAX REDUCTION\n"
-        "The deepest cut the cleanup may make at any frequency. Closer to "
+        "How far the extra removal may turn down any frequency. Closer to "
         "0 dB keeps more of the room under the PA; -24 dB lets it go "
         "furthest. Has no effect at 0% Amount. Applies live.\n"
+        "\n"
+        "RESPONSE\n"
+        "How quickly the extra removal follows the sound (3-50 ms). "
+        "Shorter tracks the PA more tightly but can make crowd noise "
+        "flutter; longer is smoother but lets a little more PA through on "
+        "fast changes. Applies live.\n"
+        "\n"
+        "RESET\n"
+        "Puts Amount, Max Reduction and Response back to their defaults. "
+        "Greyed out when they already are.\n"
         "\n"
         "\n"
         "=== OUTPUT ===\n"
@@ -864,18 +818,6 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "delay is how far the PA reference leads the bleed in the mic; a "
         "steady number means a solid lock, a jumping one means the reference "
         "and mic timing is unstable.\n"
-        "\n"
-        "\n"
-        "=== FINE TUNING ===\n"
-        "Behind the Fine tuning button. The default suits most shows; the "
-        "button says \"adjusted\" when the setting in here is off its "
-        "default, and Reset to defaults puts it back in one click.\n"
-        "\n"
-        "RESPONSE\n"
-        "How quickly the cleanup follows the sound (3-50 ms). Shorter "
-        "tracks the PA more tightly but can make crowd noise flutter; "
-        "longer is smoother but lets a little more PA through on fast "
-        "changes. Applies live.\n"
         "\n"
         "\n"
         "=== LIVE AND IN POST ===\n"

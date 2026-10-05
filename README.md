@@ -56,10 +56,14 @@ hot risks clipping, so there is no benefit in going further.
 
 ### Set how much is removed
 
-**Amount** sets how hard the PA left over after the main filter is cleaned
-up: 0% is the filter alone and sounds most natural, higher removes more PA
-and more of the crowd with it. **Max Reduction** limits how deep that
-cleanup may cut. Start at the defaults (25%, −12 dB) and adjust by ear.
+The plugin first subtracts its own copy of the PA bleed. That copy is never
+perfect, so some bleed is left, and an extra removal step turns down the
+frequencies where it is still audible. **Amount** sets how much of that
+leftover is removed: 0% turns the extra step off and sounds most natural,
+higher removes more PA and more of the crowd with it. **Max Reduction**
+limits how far it may turn down any frequency, and **Response** how quickly
+it follows the sound. Start at the defaults (25%, −12 dB, 20 ms) and adjust
+by ear.
 
 It also helps to start a bounce a few seconds early. The plugin keeps
 adapting for as long as it runs, and a lead-in of about 10 seconds before the

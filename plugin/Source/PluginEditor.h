@@ -25,11 +25,8 @@ private:
     //
     // Three columns, one panel each, reading left to right as the signal
     // flows: INPUT (what reaches the canceller, and its levels) ->
-    // CANCELLATION (the three decisions that matter for a show) -> OUTPUT
-    // (what the canceller is doing, and the mix). Response, the one expert
-    // control, lives behind "Fine tuning", an overlay across columns 2 and
-    // 3 -- still a real, automatable parameter, it just doesn't compete for
-    // attention on the main panel.
+    // CANCELLATION (how much is removed) -> OUTPUT (what the canceller is
+    // doing, and the mix). Every control is on this one page.
     static constexpr int designWidth = 768;
     static constexpr int designHeight = 432;
 
@@ -77,9 +74,7 @@ private:
     static constexpr int labelledCombo = controlLabelRow + comboRow;
     static constexpr int meterPair = 2 * meterRowHeight + meterRowGap;
 
-    static constexpr int fineTuningDoneWidth = 70;
-    static constexpr int fineTuningResetWidth = 140;
-    static constexpr int fineTuningHeaderButtonGap = 8;
+    static constexpr int resetButtonWidth = 64; // sits in the CANCELLATION header row
 
     static constexpr int logoWidth = 70;
     static constexpr float logoAspect = 814.0f / 200.0f;
@@ -97,23 +92,19 @@ private:
     static_assert(sectionHeaderRow + 2 * (controlGap + labelledSlider) + meterBlockGap + meterPair
                       <= panelBodyHeight,
                   "INPUT rows must fit the panel");
-    static_assert(sectionHeaderRow + headerGap + labelledCombo + 2 * (controlGap + labelledSlider)
-                          + controlGap + buttonRow
+    static_assert(sectionHeaderRow + headerGap + labelledCombo + 3 * (controlGap + labelledSlider)
                       <= panelBodyHeight,
                   "CANCELLATION rows must fit the panel");
     static_assert(sectionHeaderRow + headerGap + meterPair + meterBlockGap + labelledSlider
                           + controlGap + 2 * statusRow
                       <= panelBodyHeight,
                   "OUTPUT rows must fit the panel");
-    static_assert(sectionHeaderRow + headerGap + labelledSlider + 3 * statusRow <= panelBodyHeight,
-                  "FINE TUNING rows must fit the overlay");
     static_assert(logoWidth * 200 / 814 <= footerStripHeight,
                   "the wordmark must fit inside the footer strip");
 
     struct SectionBounds {
         juce::Rectangle<int> title;
         juce::Rectangle<int> column1, column2, column3;
-        juce::Rectangle<int> fineTuning; // spans columns 2 and 3
         juce::Rectangle<int> footer;
     };
 
@@ -135,14 +126,14 @@ private:
     void dryWetSliderChanged();
     void updateSliders();
     void showHelpDialog();
-    void setFineTuningVisible(bool shouldShow);
-    void updateFineTuningButton();
-    void resetFineTuningToDefaults();
+    void updateResetButton();
+    void resetCleanupToDefaults();
 
-    // The parameters that live on the Fine tuning overlay -- the one list
-    // both the "adjusted" indicator and Reset to defaults work from, so the
-    // two can never disagree about what the overlay covers.
-    std::array<juce::RangedAudioParameter*, 1> getFineTuningParameters() const;
+    // The cleanup controls (Amount, Max Reduction, Response) -- the one list
+    // both the Reset button's enabled state and the reset itself work from.
+    // Tail Length is left out on purpose: it is a venue choice, not a
+    // sound-shaping setting someone would want undone with it.
+    std::array<juce::RangedAudioParameter*, 3> getCleanupParameters() const;
 
     PAEchoCancellerAudioProcessor& processor;
 
@@ -176,41 +167,25 @@ private:
     juce::Label inputSectionLabel{ "inputSectionLabel", "INPUT" };
     juce::Label cancellationSectionLabel{ "cancellationSectionLabel", "CANCELLATION" };
     juce::Label outputSectionLabel{ "outputSectionLabel", "OUTPUT" };
-    juce::Label fineTuningSectionLabel{ "fineTuningSectionLabel", "FINE TUNING" };
 
-    // Opens the overlay holding the expert control; its text says when
-    // anything in there is away from its default, so nothing tuned in there
-    // is ever invisible from the main panel.
-    juce::TextButton fineTuningButton{ "Fine tuning..." };
-    juce::TextButton fineTuningDoneButton{ "Done" };
-    juce::TextButton fineTuningResetButton{ "Reset to defaults" };
-    juce::Label fineTuningHintLabel{ "fineTuningHintLabel",
-                                     "Shorter follows the PA more tightly but can flutter on crowd "
-                                     "noise; longer is smoother. The default suits most shows: "
-                                     "Amount and Max Reduction are the controls to reach for first." };
-
-    // Paints the overlay's panel and hosts its controls. Added after every
-    // main-panel component, so it sits on top of columns 2 and 3 when shown.
-    struct FineTuningOverlay : public juce::Component {
-        void paint(juce::Graphics& g) override;
-        float scale = 1.0f;
-    };
-    FineTuningOverlay fineTuningOverlay;
+    // Puts Amount, Max Reduction and Response back to their defaults. Greyed
+    // out when they already are, so it also answers "have I changed
+    // anything here?" at a glance.
+    juce::TextButton resetButton{ "Reset" };
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };
     juce::ComboBox tailLengthCombo;
 
-    // The suppressor's two main-panel controls. Both apply live and are
-    // cheap to change, so they commit on every value change like Mix.
-    // Max Reduction's slider runs 0..24 (more reduction to the right, like
-    // Amount) and shows the parameter's negative dB value.
+    // The cleanup stage's controls. All apply live and are cheap to change,
+    // so they commit on every value change like Mix. Max Reduction's slider
+    // runs 0..24 (more reduction to the right, like Amount) and shows the
+    // parameter's negative dB value.
     juce::Label amountLabel{ "amountLabel", "Amount" };
     juce::Slider amountSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     juce::Label maxReductionLabel{ "maxReductionLabel", "Max Reduction" };
     juce::Slider maxReductionSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
-    // On the Fine tuning overlay.
     juce::Label responseLabel{ "responseLabel", "Response" };
     juce::Slider responseSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
