@@ -15,6 +15,7 @@
 #include <fstream>
 #include <limits>
 #include <random>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -2429,6 +2430,123 @@ bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
     return pass;
 }
 
+// A Tail Length that differs from what prepareToPlay built goes through the
+// background rebuild thread, which polls on a 30ms *wall-clock* wait and
+// then spends wall-clock time constructing the new AEC3. Live that costs a
+// fraction of a second of audio; in a faster-than-realtime bus bounce the
+// same wall-clock cost spans many seconds of audio, all processed on the
+// wrong (default 800ms) instance before the swap -- which then resets the
+// filter and re-converges. This is the case when a host applies the saved
+// session state after prepareToPlay, or re-prepares with defaults before a
+// bounce. The reference run sets the saved Tail Length *before*
+// prepareToPlay (what a bounce does when state is restored first); the
+// other two set it right after, unpaced (bounce speed) and paced at roughly
+// realtime. Reported per run: how much audio went by before the saved value
+// took effect, and the suppression reached in fixed windows.
+bool testFastBounceTailLengthAppliedPromptly(int sampleRate) {
+    printf("\n=== Fast-bounce Tail Length applied promptly test (%d Hz) ===\n", sampleRate);
+    const double durationS = 14.0; // makeSignals puts the voice burst at ~4.7-9.3s
+    auto signals = makeSignals(sampleRate, durationS);
+    const int savedTailIndex = 2; // 400ms; the plugin's default is index 3 (800ms)
+    const int blockSize = 512;
+
+    enum class Mode { tailBeforePrepare, unpacedAfterPrepare, pacedAfterPrepare };
+    struct Result {
+        std::vector<float> out;
+        double adoptedAtS = -1.0;
+        double wallMs = 0.0;
+    };
+
+    auto run = [&](Mode mode) {
+        Result r;
+        PAEchoCancellerAudioProcessor proc;
+        setMonoLayout(proc);
+        auto setSavedTail = [&] {
+            auto* param = proc.getTailLengthParameter();
+            param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(savedTailIndex)));
+        };
+        if (mode == Mode::tailBeforePrepare)
+            setSavedTail();
+        proc.prepareToPlay(sampleRate, blockSize);
+        if (mode != Mode::tailBeforePrepare)
+            setSavedTail();
+
+        const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+        juce::AudioBuffer<float> buffer(totalChannels, blockSize);
+        juce::MidiBuffer midi;
+        const int n = static_cast<int>(signals.mic.size());
+        r.out.assign(static_cast<size_t>(n), 0.0f);
+        if (proc.getAppliedTailLengthIndex() == savedTailIndex)
+            r.adoptedAtS = 0.0;
+
+        const auto wallStart = std::chrono::steady_clock::now();
+        for (int pos = 0; pos + blockSize <= n; pos += blockSize) {
+            buffer.clear();
+            auto mainIn = proc.getBusBuffer(buffer, true, 0);
+            auto refIn = proc.getBusBuffer(buffer, true, 1);
+            for (int ch = 0; ch < mainIn.getNumChannels(); ++ch)
+                mainIn.copyFrom(ch, 0, signals.mic.data() + pos, blockSize);
+            for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
+                refIn.copyFrom(ch, 0, signals.reference.data() + pos, blockSize);
+
+            proc.processBlock(buffer, midi);
+
+            auto mainOut = proc.getBusBuffer(buffer, false, 0);
+            for (int s = 0; s < blockSize; ++s)
+                r.out[static_cast<size_t>(pos + s)] = mainOut.getSample(0, s);
+
+            if (r.adoptedAtS < 0.0 && proc.getAppliedTailLengthIndex() == savedTailIndex)
+                r.adoptedAtS = static_cast<double>(pos + blockSize) / sampleRate;
+
+            // Realtime pacing only until the change lands; the rest of the
+            // run is unpaced for every mode so the three stay comparable.
+            if (mode == Mode::pacedAfterPrepare && r.adoptedAtS < 0.0)
+                std::this_thread::sleep_for(std::chrono::duration<double>(static_cast<double>(blockSize) / sampleRate));
+        }
+        r.wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wallStart).count();
+        proc.releaseResources();
+        return r;
+    };
+
+    const auto reference = run(Mode::tailBeforePrepare);
+    const auto unpaced = run(Mode::unpacedAfterPrepare);
+    const auto paced = run(Mode::pacedAfterPrepare);
+
+    // Suppression = mic level minus output level over the window. The mic
+    // carries the leakage in every window except the voice burst, so the
+    // windows sit before (3.0-4.5s) and after (10.5-14s) it.
+    auto suppressionDb = [&](const std::vector<float>& out, double a, double b) {
+        return rmsDbfs(signals.mic, sampleRate, a, b) - rmsDbfs(out, sampleRate, a, b);
+    };
+    const auto report = [&](const char* name, const Result& r) {
+        printf("  %-34s adopted after %5.2f s of audio | suppression early(0.5-2.5s) %5.1f dB, "
+               "pre-voice(3-4.5s) %5.1f dB, late(10.5-14s) %5.1f dB | wall %6.0f ms\n",
+               name, r.adoptedAtS, suppressionDb(r.out, 0.5, 2.5), suppressionDb(r.out, 3.0, 4.5),
+               suppressionDb(r.out, 10.5, 14.0), r.wallMs);
+    };
+    report("tail set before prepareToPlay", reference);
+    report("tail set after, unpaced (bounce)", unpaced);
+    report("tail set after, paced (~realtime)", paced);
+
+    const bool allAdopted = reference.adoptedAtS >= 0.0 && unpaced.adoptedAtS >= 0.0 && paced.adoptedAtS >= 0.0;
+    const double lateGapDb = std::abs(suppressionDb(reference.out, 10.5, 14.0) - suppressionDb(unpaced.out, 10.5, 14.0));
+    const double preVoiceGapDb = suppressionDb(reference.out, 3.0, 4.5) - suppressionDb(unpaced.out, 3.0, 4.5);
+    // Provisional bound: how much audio may pass on the wrong instance.
+    const double maxAdoptS = 1.0;
+    const bool promptly = unpaced.adoptedAtS >= 0.0 && unpaced.adoptedAtS <= maxAdoptS;
+    const bool lateEqual = lateGapDb < 1.5;
+
+    printf("  Unpaced adoption window: %.2f s of audio (paced: %.2f s, limit %.2f s)\n",
+           unpaced.adoptedAtS, paced.adoptedAtS, maxAdoptS);
+    printf("  Late-window suppression gap vs reference: %.2f dB (limit 1.5); pre-voice shortfall: %.2f dB\n",
+           lateGapDb, preVoiceGapDb);
+
+    const bool pass = allAdopted && promptly && lateEqual;
+    printf("  %s\n", pass ? "PASS -- a Tail Length applied after prepareToPlay takes effect promptly even at bounce speed"
+                          : "CHECK -- the saved Tail Length is applied late or the result differs when processing outruns real time");
+    return pass;
+}
+
 // The delay readout added to the editor is only useful if AEC3's delay
 // stats actually flow through the new getters -- confirm an estimate
 // appears once the canceller has signal to lock onto, and that it lands in
@@ -4147,6 +4265,7 @@ int main(int argc, char* argv[]) {
     for (int rate : rates) allPass = testNonFiniteInputRecovery(rate) && allPass;
     allPass = testLatencyInvariantAcrossTailLengths() && allPass;
     for (int rate : rates) allPass = testLiveTailLengthChangeNonBlocking(rate) && allPass;
+    allPass = testFastBounceTailLengthAppliedPromptly(48000) && allPass;
     allPass = testDelayStatsExposed(48000) && allPass;
 
     printf("\n%s\n", allPass ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
