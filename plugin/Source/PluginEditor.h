@@ -1,6 +1,8 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+
+#include <array>
 #include "PluginProcessor.h"
 #include "LessPALookAndFeel.h"
 #include "LevelMeterComponent.h"
@@ -23,11 +25,9 @@ private:
     //
     // Three columns, one panel each, reading left to right as the signal
     // flows: INPUT (what reaches the canceller, and its levels) ->
-    // CANCELLATION (the three decisions that matter for a show) -> OUTPUT
-    // (what the canceller is doing, and the mix). The expert controls that
-    // tune the double-talk detector live behind "Fine tuning", an overlay
-    // across columns 2 and 3 -- they stay real, automatable parameters, they
-    // just no longer compete for attention on the main panel.
+    // CANCELLATION (stage 1, the canceller, then stage 2, the bleed
+    // suppressor) -> OUTPUT (what the canceller is
+    // doing, and the mix). Every control is on this one page.
     static constexpr int designWidth = 768;
     static constexpr int designHeight = 432;
 
@@ -51,7 +51,6 @@ private:
     static constexpr int controlLabelRow = 16;
     static constexpr int comboRow = 28;
     static constexpr int sliderRow = 26;
-    static constexpr int toggleRow = 24;
     static constexpr int buttonRow = 26;
     static constexpr int statusRow = 16;
 
@@ -76,7 +75,13 @@ private:
     static constexpr int labelledCombo = controlLabelRow + comboRow;
     static constexpr int meterPair = 2 * meterRowHeight + meterRowGap;
 
-    static constexpr int fineTuningDoneWidth = 70;
+    static constexpr int resetButtonWidth = 64; // sits in the BLEED SUPPRESSOR header row
+
+    // The CANCELLATION column holds two stages, so its second header and
+    // sliders sit closer than the other columns' controls to fit.
+    static constexpr int stageGap = 14;       // Tail Length to the suppressor's header
+    static constexpr int stageHeaderGap = 8;  // suppressor header to Strength
+    static constexpr int stageControlGap = 10; // between the suppressor's sliders
 
     static constexpr int logoWidth = 70;
     static constexpr float logoAspect = 814.0f / 200.0f;
@@ -88,30 +93,26 @@ private:
                       == designHeight,
                   "title, columns, footer, gaps and margins must fill designHeight exactly");
     static_assert(helpButtonSize + versionHelpGap + versionLabelWidth <= columnWidth,
-                  "the help button and version label must fit inside the title strip");
+                  "the version label and help button must leave room for the title");
 
     // Each panel's rows must fit its body; the remainder is bottom air.
     static_assert(sectionHeaderRow + 2 * (controlGap + labelledSlider) + meterBlockGap + meterPair
                       <= panelBodyHeight,
                   "INPUT rows must fit the panel");
-    static_assert(sectionHeaderRow + headerGap + 2 * labelledCombo + 2 * controlGap + labelledSlider
-                          + controlGap + buttonRow
+    static_assert(sectionHeaderRow + headerGap + labelledCombo + stageGap + sectionHeaderRow
+                          + stageHeaderGap + 3 * labelledSlider + 2 * stageControlGap
                       <= panelBodyHeight,
                   "CANCELLATION rows must fit the panel");
     static_assert(sectionHeaderRow + headerGap + meterPair + meterBlockGap + labelledSlider
                           + controlGap + 2 * statusRow
                       <= panelBodyHeight,
                   "OUTPUT rows must fit the panel");
-    static_assert(sectionHeaderRow + headerGap + labelledCombo + controlGap + toggleRow <= panelBodyHeight
-                      && sectionHeaderRow + headerGap + 2 * labelledSlider + controlGap <= panelBodyHeight,
-                  "FINE TUNING rows must fit the overlay");
     static_assert(logoWidth * 200 / 814 <= footerStripHeight,
                   "the wordmark must fit inside the footer strip");
 
     struct SectionBounds {
         juce::Rectangle<int> title;
         juce::Rectangle<int> column1, column2, column3;
-        juce::Rectangle<int> fineTuning; // spans columns 2 and 3
         juce::Rectangle<int> footer;
     };
 
@@ -125,27 +126,22 @@ private:
     void timerCallback() override;
     void tailLengthComboChanged();
     void updateTailLengthCombo();
-    void suppressionStrengthComboChanged();
-    void updateSuppressionStrengthCombo();
-    void limitHfGainToggleChanged();
-    void updateLimitHfGainToggle();
-    void nearendDetectorComboChanged();
-    void updateNearendDetectorCombo();
-    void nearendSensitivitySliderChanged();
-    void updateNearendSensitivitySlider();
-    void protectionHoldTimeSliderChanged();
-    void updateProtectionHoldTimeSlider();
-    void transitionSmoothingSliderChanged();
-    void updateTransitionSmoothingSlider();
+    void amountSliderChanged();
+    void maxReductionSliderChanged();
+    void responseSliderChanged();
     void hpfSliderChanged();
-    void updateHpfSlider();
     void referenceGainSliderChanged();
-    void updateReferenceGainSlider();
     void dryWetSliderChanged();
-    void updateDryWetSlider();
+    void updateSliders();
     void showHelpDialog();
-    void setFineTuningVisible(bool shouldShow);
-    void updateFineTuningButton();
+    void updateResetButton();
+    void resetSuppressorToDefaults();
+
+    // The bleed suppressor's controls (Strength, Range, Time) -- the one list
+    // both the Reset button's enabled state and the reset itself work from.
+    // Tail Length is left out on purpose: it is a venue choice, not a
+    // sound-shaping setting someone would want undone with it.
+    std::array<juce::RangedAudioParameter*, 3> getSuppressorParameters() const;
 
     PAEchoCancellerAudioProcessor& processor;
 
@@ -177,64 +173,32 @@ private:
     // than floating above it, so the panel rectangle and the Grid area it is
     // laid out from are one and the same rectangle.
     juce::Label inputSectionLabel{ "inputSectionLabel", "INPUT" };
-    juce::Label cancellationSectionLabel{ "cancellationSectionLabel", "CANCELLATION" };
+    juce::Label cancellationSectionLabel{ "cancellationSectionLabel", "PA CANCELLER" };
+    juce::Label suppressorSectionLabel{ "suppressorSectionLabel", "BLEED SUPPRESSOR" };
     juce::Label outputSectionLabel{ "outputSectionLabel", "OUTPUT" };
-    juce::Label fineTuningSectionLabel{ "fineTuningSectionLabel", "FINE TUNING" };
 
-    // Opens the overlay holding the detector's expert controls; its text
-    // says when any of them is away from its default, so nothing tuned in
-    // there is ever invisible from the main panel.
-    juce::TextButton fineTuningButton{ "Fine tuning..." };
-    juce::TextButton fineTuningDoneButton{ "Done" };
-    juce::Label fineTuningHintLabel{ "fineTuningHintLabel",
-                                     "These shape how the crowd detector switches on and off. "
-                                     "The defaults suit most shows; Crowd Protection on the main "
-                                     "panel is the control to reach for first." };
-
-    // Paints the overlay's panel and hosts its controls. Added after every
-    // main-panel component, so it sits on top of columns 2 and 3 when shown.
-    struct FineTuningOverlay : public juce::Component {
-        void paint(juce::Graphics& g) override;
-        float scale = 1.0f;
-    };
-    FineTuningOverlay fineTuningOverlay;
+    // Puts Strength, Range and Time back to their defaults; the canceller's
+    // learned filter is untouched ("Reset" read as relearning). Greyed
+    // out when they already are, so it also answers "have I changed
+    // anything here?" at a glance.
+    juce::TextButton resetButton{ "Defaults" };
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };
     juce::ComboBox tailLengthCombo;
 
-    juce::Label suppressionStrengthLabel{ "suppressionStrengthLabel", "Suppression Strength" };
-    juce::ComboBox suppressionStrengthCombo;
+    // The bleed suppressor's controls (parameter IDs amount, maxReduction,
+    // response). All apply live and are cheap to change, so they commit on
+    // every value change like Mix. Range's slider runs 0..24 (more
+    // reduction to the right, like Strength) and shows the parameter's
+    // negative dB value.
+    juce::Label amountLabel{ "amountLabel", "Strength" };
+    juce::Slider amountSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
-    juce::ToggleButton limitHfGainToggle{ "Limit HF Gain" };
+    juce::Label maxReductionLabel{ "maxReductionLabel", "Range" };
+    juce::Slider maxReductionSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
-    // Which detector decides "this moment is genuine audience content" at
-    // all -- Classic (protects most of the time) vs the venue-measured
-    // Subband (protects specifically in PA gaps). An explicit A/B ComboBox
-    // rather than a toggle so both choices are visible by name; applies
-    // live like the other suppressor controls.
-    juce::Label nearendDetectorLabel{ "nearendDetectorLabel", "Near-end Detector" };
-    juce::ComboBox nearendDetectorCombo;
-
-    // Both apply live (see applySuppressorConfigLive in PluginProcessor.h),
-    // but still only commit their value -- via nearendSensitivitySliderChanged()/
-    // protectionHoldTimeSliderChanged() -- at drag-end or on a discrete text
-    // entry, never per-pixel mid-drag (see the onDragEnd/onValueChange
-    // wiring in the constructor): applying live avoids a rebuild, but
-    // reconstructing SuppressionGain on every pixel of a drag would still
-    // be wasteful and pointless.
-    juce::Label nearendSensitivityLabel{ "nearendSensitivityLabel", "Crowd Protection" };
-    juce::Slider nearendSensitivitySlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
-
-    juce::Label protectionHoldTimeLabel{ "protectionHoldTimeLabel", "Protection Hold Time" };
-    juce::Slider protectionHoldTimeSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
-
-    // How long AEC3 takes to crossfade between its two suppressor tunings
-    // when the near-end detector flips, rather than swapping them within a
-    // single 4ms block. 0ms is AEC3 stock (instant swap); the shipped 40ms
-    // rounds the transition off. Commits at drag-end only, like the two
-    // sliders above -- it rebuilds SuppressionGain via the live path.
-    juce::Label transitionSmoothingLabel{ "transitionSmoothingLabel", "Transition Smoothing" };
-    juce::Slider transitionSmoothingSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::Label responseLabel{ "responseLabel", "Time" };
+    juce::Slider responseSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     juce::Label hpfLabel{ "hpfLabel", "Input HPF" };
     juce::Slider hpfSlider{ juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
@@ -251,13 +215,12 @@ private:
     juce::Label inputMeterLabel{ "inputMeterLabel", "Mic" };
     juce::Label sidechainMeterLabel{ "sidechainMeterLabel", "PA ref" };
     juce::Label outputMeterLabel{ "outputMeterLabel", "Output" };
-    juce::Label suppressionMeterLabel{ "suppressionMeterLabel", "Suppression" };
+    juce::Label suppressionMeterLabel{ "suppressionMeterLabel", "Reduction" };
 
-    // AEC3's live echo-path delay estimate (see
+    // The canceller's echo-path delay estimate (see
     // getEstimatedEchoPathDelayMs() in PluginProcessor.h) -- the quickest
-    // possible answer to "is my sidechain actually wired?" and "is the
-    // delay estimate stable?", updated from the same 30Hz timer as the
-    // meters. Shows "--" when no estimate is available (no reference
+    // possible answer to "is my sidechain actually wired?", updated from the
+    // same 30Hz timer as the meters. Shows "--" when no estimate is available (no reference
     // routed, or transport stopped).
     juce::Label delayReadoutLabel{ "delayReadoutLabel", "PA delay: --" };
 

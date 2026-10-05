@@ -145,8 +145,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     versionLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
     addAndMakeVisible(versionLabel);
 
-    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel,
-                         &outputSectionLabel, &fineTuningSectionLabel }) {
+    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel, &suppressorSectionLabel, &outputSectionLabel }) {
         label->setJustificationType(juce::Justification::centredLeft);
         // Secondary text: a group header names the region, it isn't a control,
         // so it should sit behind the labels it groups in the reading order.
@@ -154,14 +153,14 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     }
     addAndMakeVisible(inputSectionLabel);
     addAndMakeVisible(cancellationSectionLabel);
+    addAndMakeVisible(suppressorSectionLabel);
     addAndMakeVisible(outputSectionLabel);
 
     // Left-aligned, not centred: every control below is either full-width or
     // column-width and starts at its panel's left edge, so a centred label
     // would sit visibly off from the thing it names -- and the sliders'
     // right-hand value boxes push their visual centre left of the row's.
-    for (auto* label : { &tailLengthLabel, &suppressionStrengthLabel, &nearendDetectorLabel,
-                         &nearendSensitivityLabel, &protectionHoldTimeLabel, &transitionSmoothingLabel,
+    for (auto* label : { &tailLengthLabel, &amountLabel, &maxReductionLabel, &responseLabel,
                          &hpfLabel, &referenceGainLabel, &dryWetLabel })
         label->setJustificationType(juce::Justification::centredLeft);
 
@@ -176,57 +175,33 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     tailLengthCombo.onChange = [this] { tailLengthComboChanged(); };
     addAndMakeVisible(tailLengthCombo);
 
-    addAndMakeVisible(suppressionStrengthLabel);
+    addAndMakeVisible(amountLabel);
+    amountSlider.setRange(0.0, 100.0);
+    amountSlider.setTextValueSuffix(" %");
+    amountSlider.setNumDecimalPlacesToDisplay(0);
+    amountSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
+    amountSlider.onValueChange = [this] { amountSliderChanged(); };
+    addAndMakeVisible(amountSlider);
 
-    suppressionStrengthCombo.addItem("Gentle", 1);
-    suppressionStrengthCombo.addItem("Moderate", 2);
-    suppressionStrengthCombo.addItem("Hard", 3);
-    suppressionStrengthCombo.onChange = [this] { suppressionStrengthComboChanged(); };
-    addAndMakeVisible(suppressionStrengthCombo);
-
-    limitHfGainToggle.onClick = [this] { limitHfGainToggleChanged(); };
-
-
-    nearendDetectorCombo.addItem("Classic", 1);
-    nearendDetectorCombo.addItem("Subband (2-4kHz)", 2);
-    nearendDetectorCombo.onChange = [this] { nearendDetectorComboChanged(); };
-
-    addAndMakeVisible(nearendSensitivityLabel);
-
-    nearendSensitivitySlider.setRange(0.0, 100.0);
-    nearendSensitivitySlider.setTextValueSuffix(" %");
-    nearendSensitivitySlider.setNumDecimalPlacesToDisplay(0);
-    nearendSensitivitySlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
-    // Applies live (see PluginProcessor.h) -- still only commit at drag-end
-    // or on a discrete text entry (guarded onValueChange, which also covers
-    // keyboard/text-box edits that never trigger onDragEnd), never
-    // per-pixel mid-drag: no rebuild either way now, but reconstructing
-    // SuppressionGain on every pixel of a drag would still be wasteful.
-    nearendSensitivitySlider.onDragEnd = [this] { nearendSensitivitySliderChanged(); };
-    nearendSensitivitySlider.onValueChange = [this] {
-        if (!nearendSensitivitySlider.isMouseButtonDown()) nearendSensitivitySliderChanged();
+    addAndMakeVisible(maxReductionLabel);
+    maxReductionSlider.setRange(0.0, 24.0);
+    maxReductionSlider.textFromValueFunction = [](double depth) {
+        return depth < 0.05 ? juce::String("0 dB") : "-" + juce::String(depth, 1) + " dB";
     };
-    addAndMakeVisible(nearendSensitivitySlider);
-
-
-    protectionHoldTimeSlider.setRange(40.0, 800.0);
-    protectionHoldTimeSlider.setTextValueSuffix(" ms");
-    protectionHoldTimeSlider.setNumDecimalPlacesToDisplay(0);
-    protectionHoldTimeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
-    protectionHoldTimeSlider.onDragEnd = [this] { protectionHoldTimeSliderChanged(); };
-    protectionHoldTimeSlider.onValueChange = [this] {
-        if (!protectionHoldTimeSlider.isMouseButtonDown()) protectionHoldTimeSliderChanged();
+    maxReductionSlider.valueFromTextFunction = [](const juce::String& text) {
+        return std::abs(text.retainCharacters("0123456789.-").getDoubleValue()); // "-12", "12 dB" both mean 12 dB
     };
+    maxReductionSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
+    maxReductionSlider.onValueChange = [this] { maxReductionSliderChanged(); };
+    addAndMakeVisible(maxReductionSlider);
 
-
-    transitionSmoothingSlider.setRange(0.0, 200.0);
-    transitionSmoothingSlider.setTextValueSuffix(" ms");
-    transitionSmoothingSlider.setNumDecimalPlacesToDisplay(0);
-    transitionSmoothingSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
-    transitionSmoothingSlider.onDragEnd = [this] { transitionSmoothingSliderChanged(); };
-    transitionSmoothingSlider.onValueChange = [this] {
-        if (!transitionSmoothingSlider.isMouseButtonDown()) transitionSmoothingSliderChanged();
-    };
+    responseSlider.setRange(3.0, 50.0);
+    responseSlider.setTextValueSuffix(" ms");
+    responseSlider.setNumDecimalPlacesToDisplay(0);
+    responseSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
+    responseSlider.onValueChange = [this] { responseSliderChanged(); };
+    addAndMakeVisible(responseLabel);
+    addAndMakeVisible(responseSlider);
 
     addAndMakeVisible(hpfLabel);
 
@@ -268,19 +243,18 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     // Horizontal rather than the component's default vertical: four
     // side-by-side vertical bars needed the whole window width to keep
-    // "PA-ref(sc)" and "Suppression" legible, and column 1 is a third of it.
+    // "PA-ref(sc)" and the reduction meter's name legible, and column 1 is a third of it.
     for (auto* meter : { &inputMeter, &sidechainMeter, &outputMeter, &suppressionMeter }) {
         meter->setOrientation(LevelMeterComponent::Orientation::horizontal);
         addAndMakeVisible(meter);
     }
 
-    // Peaks of about -36..-3 dBFS. Swept over reference peaks of -39..+6 dBFS on
-    // a real PA-heavy recording: below about -36 dBFS the high frequencies stop
-    // adapting well even with the lowered adaptation gate (see
-    // kAdaptationNoiseGate); above the zone nothing gates -- PA removal keeps
-    // rising -- but audience loss grows steadily (~1-2dB near 0 dBFS) and a feed
-    // that hot risks clipping upstream. The zone is deliberately wide because a
-    // PA feed is very dynamic and cannot be held to a narrow band.
+    // Peaks of about -36..-3 dBFS. The Kalman filter scales itself to the
+    // reference level, so the zone is about the edges: well below it the PA
+    // can drop under the canceller's "PA present" threshold (about -50 dBFS
+    // RMS, see KalmanEchoCanceller::startRefPower), and above it a feed risks
+    // clipping upstream. Deliberately wide because a PA feed is very dynamic
+    // and cannot be held to a narrow band.
     sidechainMeter.setTargetZone(-36.0f, -3.0f);
 
     // The canceller's state, in words, under the output meters.
@@ -291,21 +265,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     statusLabel.setColour(juce::Label::textColourId, LessPAColours::primaryText);
     addAndMakeVisible(statusLabel);
 
-    fineTuningButton.onClick = [this] { setFineTuningVisible(true); };
-    addAndMakeVisible(fineTuningButton);
-
-    // The detector's expert controls live on the overlay, which is added
-    // last so it covers columns 2 and 3 when shown.
-    fineTuningDoneButton.onClick = [this] { setFineTuningVisible(false); };
-    for (auto* component : std::initializer_list<juce::Component*>{
-             &fineTuningSectionLabel, &fineTuningDoneButton,
-             &nearendDetectorLabel, &nearendDetectorCombo, &limitHfGainToggle,
-             &protectionHoldTimeLabel, &protectionHoldTimeSlider,
-             &transitionSmoothingLabel, &transitionSmoothingSlider, &fineTuningHintLabel })
-        fineTuningOverlay.addAndMakeVisible(component);
-    fineTuningHintLabel.setJustificationType(juce::Justification::bottomLeft);
-    fineTuningHintLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
-    addChildComponent(fineTuningOverlay);
+    resetButton.onClick = [this] { resetSuppressorToDefaults(); };
+    addAndMakeVisible(resetButton);
 
     // A few words each, deliberately much shorter than the corresponding
     // section of showHelpDialog(): a tooltip answers "what is this?" while the
@@ -318,34 +279,23 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     helpButton.setTooltip("Full control reference");
     versionLabel.setTooltip("Less PA v" JucePlugin_VersionString);
     tailLengthCombo.setTooltip("Match to the venue's reverb");
-    suppressionStrengthCombo.setTooltip("Residual echo cleanup");
-    limitHfGainToggle.setTooltip("Clamp HF while converging");
-    nearendDetectorCombo.setTooltip("How audience is detected");
-    nearendSensitivitySlider.setTooltip("Higher keeps more crowd sound");
-    protectionHoldTimeSlider.setTooltip("How long protection lasts");
-    transitionSmoothingSlider.setTooltip("Anti-pump crossfade");
+    amountSlider.setTooltip("How hard the suppressor ducks leftover PA; 0% = bypassed");
+    maxReductionSlider.setTooltip("The deepest any frequency band can be ducked");
+    responseSlider.setTooltip("Attack and release time of the ducking");
     hpfSlider.setTooltip("Cutoff on mic + reference");
     referenceGainSlider.setTooltip("Reference gain only");
     dryWetSlider.setTooltip("Blend cancelled vs original");
-    fineTuningButton.setTooltip("Detector timing and HF clamp");
+    resetButton.setTooltip("Strength, Range and Time back to defaults; the canceller keeps what it learned");
     inputMeter.setTooltip("Mic, after the HPF");
     sidechainMeter.setTooltip("After HPF and trim; aim for the zone");
-    suppressionMeter.setTooltip("Reduction, in vs out");
+    suppressionMeter.setTooltip("Total reduction of both stages, in vs out");
     outputMeter.setTooltip("After cancellation");
     delayReadoutLabel.setTooltip("Echo path delay estimate");
     statusLabel.setTooltip("What the canceller is doing");
 
     updateTailLengthCombo();
-    updateSuppressionStrengthCombo();
-    updateLimitHfGainToggle();
-    updateNearendDetectorCombo();
-    updateNearendSensitivitySlider();
-    updateProtectionHoldTimeSlider();
-    updateTransitionSmoothingSlider();
-    updateHpfSlider();
-    updateReferenceGainSlider();
-    updateDryWetSlider();
-    updateFineTuningButton();
+    updateSliders();
+    updateResetButton();
     startTimerHz(30); // meter ballistics + keeps controls in sync with host automation
 }
 
@@ -390,7 +340,6 @@ PAEchoCancellerAudioProcessorEditor::computeSectionBounds() const
     // corner wordmark, aligned to the content edge.
     bounds.column3 = content;
 
-    bounds.fineTuning = bounds.column2.getUnion(bounds.column3);
     return bounds;
 }
 
@@ -406,18 +355,6 @@ juce::Rectangle<int> PAEchoCancellerAudioProcessorEditor::computeLogoBounds() co
     auto content = getLocalBounds().reduced(sc(outerMargin));
     const auto footer = content.removeFromBottom(sc(footerStripHeight));
     return { footer.getRight() - width, footer.getCentreY() - height / 2, width, height };
-}
-
-void PAEchoCancellerAudioProcessorEditor::FineTuningOverlay::paint(juce::Graphics& g)
-{
-    // Opaque, in the panel colour with an accent outline: it has to fully
-    // hide the panels underneath, and the outline marks it as a temporary
-    // layer rather than a fourth section.
-    const auto area = getLocalBounds().toFloat();
-    g.setColour(LessPAColours::panel);
-    g.fillRoundedRectangle(area, 6.0f * scale);
-    g.setColour(LessPAColours::accent.withAlpha(0.6f));
-    g.drawRoundedRectangle(area.reduced(0.5f), 6.0f * scale, 1.0f);
 }
 
 void PAEchoCancellerAudioProcessorEditor::paint(juce::Graphics& g)
@@ -476,12 +413,10 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     // stale text-box size would silently cap the value text at the default
     // size. Both are skipped when unchanged so the common
     // "same size, re-laid out" path doesn't rebuild the sliders' text boxes.
-    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel,
-                         &outputSectionLabel, &fineTuningSectionLabel })
+    for (auto* label : { &inputSectionLabel, &cancellationSectionLabel, &suppressorSectionLabel, &outputSectionLabel })
         label->setFont(juce::FontOptions(scale * 11.0f).withStyle("Bold"));
 
-    for (auto* label : { &tailLengthLabel, &suppressionStrengthLabel, &nearendDetectorLabel,
-                         &nearendSensitivityLabel, &protectionHoldTimeLabel, &transitionSmoothingLabel,
+    for (auto* label : { &tailLengthLabel, &amountLabel, &maxReductionLabel, &responseLabel,
                          &hpfLabel, &referenceGainLabel, &dryWetLabel })
         label->setFont(juce::FontOptions(scale * 12.5f));
 
@@ -489,15 +424,11 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                          &suppressionMeterLabel, &delayReadoutLabel })
         label->setFont(juce::FontOptions(scale * 12.0f));
     statusLabel.setFont(juce::FontOptions(scale * 12.5f).withStyle("Bold"));
-    fineTuningHintLabel.setFont(juce::FontOptions(scale * 12.0f));
-    for (auto* button : { &fineTuningButton, &fineTuningDoneButton }) {
-        button->getProperties().set("fontHeight", scale * 12.5f);
-        button->repaint(); // a property change alone doesn't invalidate it
-    }
+    resetButton.getProperties().set("fontHeight", scale * 12.0f);
+    resetButton.repaint(); // a property change alone doesn't invalidate it
 
-    juce::Slider* const sliders[] = { &nearendSensitivitySlider, &protectionHoldTimeSlider,
-                                      &transitionSmoothingSlider, &hpfSlider,
-                                      &referenceGainSlider, &dryWetSlider };
+    juce::Slider* const sliders[] = { &amountSlider, &maxReductionSlider, &responseSlider,
+                                      &hpfSlider, &referenceGainSlider, &dryWetSlider };
     const int textBoxWidth = sc(60);
     const int textBoxHeight = sc(24);
     for (auto* slider : sliders)
@@ -550,17 +481,25 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                      inputMeterLabel, inputMeter, sidechainMeterLabel, sidechainMeter);
     }
 
-    // COLUMN 2 -- CANCELLATION: the three decisions that matter for a show,
-    // then the door to the expert controls.
+    // COLUMN 2 -- the two processing stages in signal order: the
+    // canceller with its Tail Length, then the bleed suppressor's three
+    // controls, with their Reset in the suppressor's header row.
     {
+        auto body = panelBody(sections.column2);
         SectionGrid grid(1, scale, 0);
         grid.row(sectionHeaderRow, cancellationSectionLabel);
         addLabelled(grid, headerGap, tailLengthLabel, tailLengthCombo, comboRow);
-        addLabelled(grid, controlGap, suppressionStrengthLabel, suppressionStrengthCombo, comboRow);
-        addLabelled(grid, controlGap, nearendSensitivityLabel, nearendSensitivitySlider, sliderRow);
-        grid.gap(controlGap);
-        grid.row(buttonRow, fineTuningButton);
-        grid.performLayout(panelBody(sections.column2));
+        grid.gap(stageGap);
+        grid.row(sectionHeaderRow, suppressorSectionLabel);
+        addLabelled(grid, stageHeaderGap, amountLabel, amountSlider, sliderRow);
+        addLabelled(grid, stageControlGap, maxReductionLabel, maxReductionSlider, sliderRow);
+        addLabelled(grid, stageControlGap, responseLabel, responseSlider, sliderRow);
+        grid.performLayout(body);
+
+        auto header = suppressorSectionLabel.getBounds();
+        resetButton.setBounds(header.removeFromRight(sc(resetButtonWidth))
+                                  .withSizeKeepingCentre(sc(resetButtonWidth), sc(buttonRow - 4)));
+        suppressorSectionLabel.setBounds(header);
     }
 
     // COLUMN 3 -- OUTPUT: what the canceller is doing, then the mix.
@@ -580,59 +519,36 @@ void PAEchoCancellerAudioProcessorEditor::resized()
                      suppressionMeterLabel, suppressionMeter, outputMeterLabel, outputMeter);
     }
 
-    // FINE TUNING overlay across columns 2 and 3: the detector's choice and
-    // HF clamp on the left, its two timing controls on the right.
-    {
-        fineTuningOverlay.scale = scale;
-        fineTuningOverlay.setBounds(sections.fineTuning);
-        auto body = panelBody(fineTuningOverlay.getLocalBounds());
+}
 
-        auto header = body.removeFromTop(sc(sectionHeaderRow));
-        fineTuningDoneButton.setBounds(header.removeFromRight(sc(fineTuningDoneWidth))
-                                           .withSizeKeepingCentre(sc(fineTuningDoneWidth), sc(buttonRow)));
-        fineTuningSectionLabel.setBounds(header);
+void PAEchoCancellerAudioProcessorEditor::updateResetButton()
+{
+    // Greyed out when there is nothing to reset, so the button also answers
+    // "have I changed how much is removed?" at a glance.
+    bool modified = false;
+    for (auto* param : getSuppressorParameters())
+        modified = modified || std::abs(param->getValue() - param->getDefaultValue()) >= 1.0e-4f;
+    if (resetButton.isEnabled() != modified)
+        resetButton.setEnabled(modified);
+}
 
-        auto left = body.removeFromLeft((body.getWidth() - sc(columnGap)) / 2);
-        body.removeFromLeft(sc(columnGap));
-        auto right = body;
+std::array<juce::RangedAudioParameter*, 3> PAEchoCancellerAudioProcessorEditor::getSuppressorParameters() const
+{
+    return { processor.getAmountParameter(), processor.getMaxReductionParameter(), processor.getResponseParameter() };
+}
 
-        SectionGrid leftGrid(1, scale, 0);
-        addLabelled(leftGrid, headerGap, nearendDetectorLabel, nearendDetectorCombo, comboRow);
-        leftGrid.gap(controlGap);
-        leftGrid.row(toggleRow, limitHfGainToggle);
-        leftGrid.performLayout(left);
-
-        fineTuningHintLabel.setBounds(left.getUnion(right).removeFromBottom(sc(3 * statusRow)));
-
-        SectionGrid rightGrid(1, scale, 0);
-        addLabelled(rightGrid, headerGap, protectionHoldTimeLabel, protectionHoldTimeSlider, sliderRow);
-        addLabelled(rightGrid, controlGap, transitionSmoothingLabel, transitionSmoothingSlider, sliderRow);
-        rightGrid.performLayout(right);
+void PAEchoCancellerAudioProcessorEditor::resetSuppressorToDefaults()
+{
+    // One gesture per parameter, like any other control edit, so hosts record
+    // the reset as ordinary automation/undo steps. The controls themselves
+    // pick the new values up from the 30Hz timer sync, and the processor
+    // applies them live like any other change.
+    for (auto* param : getSuppressorParameters()) {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost(param->getDefaultValue());
+        param->endChangeGesture();
     }
-}
-
-void PAEchoCancellerAudioProcessorEditor::setFineTuningVisible(bool shouldShow)
-{
-    fineTuningOverlay.setVisible(shouldShow);
-    if (shouldShow)
-        fineTuningOverlay.toFront(false);
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateFineTuningButton()
-{
-    // Says so on the main panel when anything behind it has been moved off
-    // its default, so a tweak made weeks ago in the overlay can't silently
-    // explain why one session sounds different from another.
-    const auto isDefault = [](juce::RangedAudioParameter* param) {
-        return std::abs(param->getValue() - param->getDefaultValue()) < 1.0e-4f;
-    };
-    const bool modified = !isDefault(processor.getNearendDetectorParameter())
-                          || !isDefault(processor.getProtectionHoldTimeParameter())
-                          || !isDefault(processor.getTransitionSmoothingParameter())
-                          || !isDefault(processor.getLimitHfGainParameter());
-    const juce::String text = modified ? "Fine tuning (adjusted)..." : "Fine tuning...";
-    if (fineTuningButton.getButtonText() != text)
-        fineTuningButton.setButtonText(text);
+    updateResetButton();
 }
 
 void PAEchoCancellerAudioProcessorEditor::tailLengthComboChanged()
@@ -652,177 +568,71 @@ void PAEchoCancellerAudioProcessorEditor::updateTailLengthCombo()
         tailLengthCombo.setSelectedId(currentId, juce::dontSendNotification);
 }
 
-void PAEchoCancellerAudioProcessorEditor::suppressionStrengthComboChanged()
+namespace {
+
+// One host gesture per committed slider value, so hosts record an edit as an
+// ordinary automation/undo step.
+void setParameterFromUi(juce::RangedAudioParameter& param, float value)
 {
-    const int index = suppressionStrengthCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
-    auto* param = processor.getSuppressionStrengthParameter();
-    const float normalized = static_cast<float>(index) / 2.0f; // 3 choices: 0, 0.5, 1
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
+    param.beginChangeGesture();
+    param.setValueNotifyingHost(param.convertTo0to1(value));
+    param.endChangeGesture();
 }
 
-void PAEchoCancellerAudioProcessorEditor::updateSuppressionStrengthCombo()
+void syncSlider(juce::Slider& slider, double value, double tolerance)
 {
-    const int currentId = processor.getSuppressionStrengthParameter()->getIndex() + 1;
-    if (suppressionStrengthCombo.getSelectedId() != currentId)
-        suppressionStrengthCombo.setSelectedId(currentId, juce::dontSendNotification);
+    if (std::abs(slider.getValue() - value) > tolerance)
+        slider.setValue(value, juce::dontSendNotification);
 }
 
-void PAEchoCancellerAudioProcessorEditor::limitHfGainToggleChanged()
+} // namespace
+
+void PAEchoCancellerAudioProcessorEditor::amountSliderChanged()
 {
-    auto* param = processor.getLimitHfGainParameter();
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(limitHfGainToggle.getToggleState() ? 1.0f : 0.0f);
-    param->endChangeGesture();
+    setParameterFromUi(*processor.getAmountParameter(), static_cast<float>(amountSlider.getValue()));
 }
 
-void PAEchoCancellerAudioProcessorEditor::updateLimitHfGainToggle()
+void PAEchoCancellerAudioProcessorEditor::maxReductionSliderChanged()
 {
-    const bool current = processor.getLimitHfGainParameter()->get();
-    if (limitHfGainToggle.getToggleState() != current)
-        limitHfGainToggle.setToggleState(current, juce::dontSendNotification);
+    setParameterFromUi(*processor.getMaxReductionParameter(), -static_cast<float>(maxReductionSlider.getValue()));
 }
 
-void PAEchoCancellerAudioProcessorEditor::nearendDetectorComboChanged()
+void PAEchoCancellerAudioProcessorEditor::responseSliderChanged()
 {
-    const int index = nearendDetectorCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
-    auto* param = processor.getNearendDetectorParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(index));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateNearendDetectorCombo()
-{
-    const int currentId = processor.getNearendDetectorParameter()->getIndex() + 1;
-    if (nearendDetectorCombo.getSelectedId() != currentId)
-        nearendDetectorCombo.setSelectedId(currentId, juce::dontSendNotification);
-}
-
-void PAEchoCancellerAudioProcessorEditor::nearendSensitivitySliderChanged()
-{
-    auto* param = processor.getNearendSensitivityParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(nearendSensitivitySlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateNearendSensitivitySlider()
-{
-    // Skip while actively dragging: the parameter is deliberately not
-    // updated until drag-end (see the constructor wiring), so syncing from
-    // it mid-drag would snap the slider back to the pre-drag value 30
-    // times a second, fighting the user's own gesture.
-    if (nearendSensitivitySlider.isMouseButtonDown())
-        return;
-    const double currentPercent = static_cast<double>(processor.getNearendSensitivityParameter()->get());
-    if (std::abs(nearendSensitivitySlider.getValue() - currentPercent) > 0.05)
-        nearendSensitivitySlider.setValue(currentPercent, juce::dontSendNotification);
-}
-
-void PAEchoCancellerAudioProcessorEditor::protectionHoldTimeSliderChanged()
-{
-    auto* param = processor.getProtectionHoldTimeParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(protectionHoldTimeSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateProtectionHoldTimeSlider()
-{
-    // See the same guard in updateNearendSensitivitySlider() -- avoids
-    // fighting an in-progress drag whose value hasn't committed yet.
-    if (protectionHoldTimeSlider.isMouseButtonDown())
-        return;
-    const double currentMs = static_cast<double>(processor.getProtectionHoldTimeParameter()->get());
-    if (std::abs(protectionHoldTimeSlider.getValue() - currentMs) > 0.5)
-        protectionHoldTimeSlider.setValue(currentMs, juce::dontSendNotification);
-}
-
-void PAEchoCancellerAudioProcessorEditor::transitionSmoothingSliderChanged()
-{
-    auto* param = processor.getTransitionSmoothingParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(transitionSmoothingSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateTransitionSmoothingSlider()
-{
-    // See the same guard in updateNearendSensitivitySlider().
-    if (transitionSmoothingSlider.isMouseButtonDown())
-        return;
-    const double currentMs = static_cast<double>(processor.getTransitionSmoothingParameter()->get());
-    if (std::abs(transitionSmoothingSlider.getValue() - currentMs) > 0.5)
-        transitionSmoothingSlider.setValue(currentMs, juce::dontSendNotification);
+    setParameterFromUi(*processor.getResponseParameter(), static_cast<float>(responseSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::hpfSliderChanged()
 {
-    auto* param = processor.getHpfFrequencyParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(hpfSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateHpfSlider()
-{
-    const double currentHz = static_cast<double>(processor.getHpfFrequencyParameter()->get());
-    if (std::abs(hpfSlider.getValue() - currentHz) > 0.05)
-        hpfSlider.setValue(currentHz, juce::dontSendNotification);
+    setParameterFromUi(*processor.getHpfFrequencyParameter(), static_cast<float>(hpfSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::referenceGainSliderChanged()
 {
-    auto* param = processor.getReferenceGainParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(referenceGainSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
-}
-
-void PAEchoCancellerAudioProcessorEditor::updateReferenceGainSlider()
-{
-    const double currentDb = static_cast<double>(processor.getReferenceGainParameter()->get());
-    if (std::abs(referenceGainSlider.getValue() - currentDb) > 0.05)
-        referenceGainSlider.setValue(currentDb, juce::dontSendNotification);
+    setParameterFromUi(*processor.getReferenceGainParameter(), static_cast<float>(referenceGainSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::dryWetSliderChanged()
 {
-    auto* param = processor.getDryWetMixParameter();
-    const float normalized = param->convertTo0to1(static_cast<float>(dryWetSlider.getValue()));
-    param->beginChangeGesture();
-    param->setValueNotifyingHost(normalized);
-    param->endChangeGesture();
+    setParameterFromUi(*processor.getDryWetMixParameter(), static_cast<float>(dryWetSlider.getValue()));
 }
 
-void PAEchoCancellerAudioProcessorEditor::updateDryWetSlider()
+void PAEchoCancellerAudioProcessorEditor::updateSliders()
 {
-    const double currentPercent = static_cast<double>(processor.getDryWetMixParameter()->get());
-    if (std::abs(dryWetSlider.getValue() - currentPercent) > 0.05)
-        dryWetSlider.setValue(currentPercent, juce::dontSendNotification);
+    // Keeps every slider in step with host automation and session loads.
+    syncSlider(amountSlider, processor.getAmountParameter()->get(), 0.05);
+    syncSlider(maxReductionSlider, -processor.getMaxReductionParameter()->get(), 0.05);
+    syncSlider(responseSlider, processor.getResponseParameter()->get(), 0.05);
+    syncSlider(hpfSlider, processor.getHpfFrequencyParameter()->get(), 0.05);
+    syncSlider(referenceGainSlider, processor.getReferenceGainParameter()->get(), 0.05);
+    syncSlider(dryWetSlider, processor.getDryWetMixParameter()->get(), 0.05);
 }
 
 void PAEchoCancellerAudioProcessorEditor::timerCallback()
 {
     updateTailLengthCombo();
-    updateSuppressionStrengthCombo();
-    updateLimitHfGainToggle();
-    updateNearendDetectorCombo();
-    updateNearendSensitivitySlider();
-    updateProtectionHoldTimeSlider();
-    updateTransitionSmoothingSlider();
-    updateHpfSlider();
-    updateReferenceGainSlider();
-    updateDryWetSlider();
-    updateFineTuningButton();
+    updateSliders();
+    updateResetButton();
 
     // Two different ways "nothing is happening" can look, both of which
     // need catching:
@@ -857,24 +667,16 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
         return;
     }
 
-    // AEC3's live echo-path delay estimate. A steady value = the delay
-    // estimator has a solid lock on the PA-to-mic relationship; "--" with
-    // signal present = the reference likely isn't reaching the plugin at
-    // all (e.g. sidechain pins not routed); a value that keeps jumping =
-    // the reference/mic timing itself is unstable. The median (1s
-    // aggregation) is shown alongside the instantaneous value so a
-    // momentary excursion is distinguishable from a genuine change.
+    // The filter's echo-path delay readout (already held steady over ~2 s
+    // in the canceller). "--" with signal present = the reference likely
+    // isn't reaching the plugin at all (e.g. sidechain pins not routed).
     {
         const int delayMs = processor.getEstimatedEchoPathDelayMs();
-        const int medianMs = processor.getEchoPathDelayMedianMs();
         juce::String text("PA delay: ");
         if (delayMs < 0)
             text << "--";
-        else {
+        else
             text << delayMs << " ms";
-            if (medianMs >= 0)
-                text << "  (median " << medianMs << ")";
-        }
         delayReadoutLabel.setText(text, juce::dontSendNotification);
 
         // The same facts, as the sentence an operator needs: is there a PA
@@ -899,22 +701,15 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     outputMeter.setLevel(displayedOutputLevel);
 
     // Suppression is measured directly from peak levels (dB reduction from
-    // input to output), rather than AEC3's own ERLE statistic. ERLE only
-    // reflects the linear adaptive filter's internal echo reduction -- it
-    // doesn't account for the nonlinear suppression stage that runs after it
-    // (the stage Suppression Strength/Near-end Sensitivity tune) -- so it
-    // never lined up with what Input/Output actually showed. Measuring it
-    // directly makes it sum correctly by construction, at the cost of also
-    // picking up any level change from Dry/Wet Mix or plain near-end
-    // dynamics, not only echo removal.
+    // input to output), so it matches what Input/Output show by
+    // construction, at the cost of also picking up any level change from
+    // Mix or plain near-end dynamics, not only echo removal.
     //
-    // The Input side uses the post-HPF, delay-compensated reading -- Output always reflects Input from getLatencySamples()
-    // earlier (the internal frame-buffering latency plus AEC3's own
-    // internal processing delay -- getLatencySamples() reports the true
-    // total, see that getter's comment), so comparing it against the
-    // *live* Input peak makes fast transients (kick/snare) look heavily
-    // suppressed when they simply haven't reached the output yet. See
-    // getInputPeakLevelPostDelayed()'s comment.
+    // The Input side uses the post-HPF, delay-compensated reading -- Output
+    // always reflects Input from getLatencySamples() earlier, so comparing
+    // it against the *live* Input peak makes fast transients (kick/snare)
+    // look heavily suppressed when they simply haven't reached the output
+    // yet. See getInputPeakLevelPostDelayed()'s comment.
     constexpr float levelFloorLinear = 1.0e-6f; // -120dB, matches the silence threshold above
     constexpr float suppressionJitterFloorDb = 0.5f;
     const float delayCompensatedInputLevel =
@@ -934,18 +729,53 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 
 void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
 {
-    // Mirrors the panel exactly: the three columns left to right, then the
-    // Fine tuning overlay, then how to use it live and in post. The order is
-    // the thing that has to match the panel, and does.
+    // How the two stages work first, then the panel exactly: the columns
+    // left to right (the middle one as its two stages), then how to use it
+    // live and in post. The order is the thing that has to match the
+    // panel, and does.
     static const juce::String helpText =
         "LESS PA removes PA speaker bleed from an audience microphone, using "
         "the PA feed itself as a reference -- wire the PA signal into the "
-        "Reference sidechain input. It works by acoustic echo cancellation "
-        "(AEC), the same technique phones and conferencing systems use to "
-        "remove speaker bleed.\n"
+        "Reference sidechain input. It is built on acoustic echo cancellation "
+        "(AEC), the technique phones and conferencing systems use to remove "
+        "speaker bleed.\n"
         "\n"
         "The panel follows the signal, left to right: what reaches the "
-        "canceller, how it cancels, and what comes out.\n"
+        "processing, the two processing stages, and what comes out.\n"
+        "\n"
+        "\n"
+        "=== HOW IT WORKS: TWO STAGES ===\n"
+        "\n"
+        "STAGE 1: PA CANCELLER (LINEAR SUBTRACTION)\n"
+        "An adaptive filter learns the path from the PA feed to the mic: the "
+        "delay, the room's reflections and reverb tail, and the colouring of "
+        "speakers and room. Tail Length sets how long a response it models. "
+        "It is a frequency-domain Kalman filter, so each frequency band "
+        "adapts at its own rate: quickly while it is still unsure, slowly "
+        "once it has settled. It produces a modelled copy of the PA as it "
+        "arrives at the mic and subtracts it from the mic signal. Because "
+        "this is subtraction, not EQ or gating, the crowd and anything else "
+        "that isn't the PA passes through untouched.\n"
+        "What it cannot remove is anything that is not a linear copy of the "
+        "PA feed: speaker and amp distortion, a room that changes (people "
+        "moving, wind), reverb longer than the Tail Length, and sound that "
+        "never appears on the reference, such as stage monitors, backline "
+        "and acoustic drums.\n"
+        "\n"
+        "STAGE 2: BLEED SUPPRESSOR (PER-BAND DUCKING)\n"
+        "This stage works on what is left after the subtraction, in "
+        "frequency bands about 170-190 Hz wide. For each band it estimates "
+        "how much PA is still there, from the filter's own uncertainty plus "
+        "a share of the modelled PA (which covers distortion and modelling "
+        "error), and compares that with the band's actual output. The band "
+        "is then ducked in proportion: a band that is mostly leftover PA is "
+        "turned down, a band that is mostly crowd is left alone. Think of it "
+        "as a multiband ducker keyed from the estimated leftover PA. The "
+        "band gains are applied through a linear-phase filter.\n"
+        "Unlike stage 1, this stage turns down everything in a ducked band, "
+        "crowd included, so it trades a little crowd for less PA. Strength, "
+        "Range and Time set this stage. At 0% Strength it is bypassed and "
+        "you hear stage 1 only.\n"
         "\n"
         "\n"
         "=== INPUT ===\n"
@@ -953,13 +783,11 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "PA REFERENCE TRIM\n"
         "A plain gain trim on the reference signal. The PA ref meter has a "
         "wide marked zone (peaks of about -36 to -3dBFS) because a PA feed "
-        "is very dynamic: keep the loud parts inside it. A feed that sits "
-        "below the zone adapts slowly and unevenly, especially at high "
-        "frequencies, so raise the trim. Above the zone nothing breaks, but "
-        "a hotter reference also suppresses a little more of the audience "
-        "(about 1-2dB near 0dBFS) and risks clipping, so there is no "
-        "benefit in going further. Not a substitute for Suppression "
-        "Strength.\n"
+        "is very dynamic: keep the loud parts inside it. Well below the "
+        "zone the canceller may not register the feed as PA, so raise the "
+        "trim. Above the zone nothing breaks, but "
+        "a feed that hot risks clipping, so there is no benefit in going "
+        "further. Not a substitute for Strength.\n"
         "\n"
         "INPUT HPF\n"
         "A 24dB/octave high-pass filter (80-300Hz), applied identically to "
@@ -973,38 +801,57 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "zone, red means above it.\n"
         "\n"
         "\n"
-        "=== CANCELLATION ===\n"
+        "=== PA CANCELLER ===\n"
         "\n"
         "TAIL LENGTH\n"
-        "How long a reverb tail the canceller models. Pick by venue: 50 ms "
-        "for a small room, up to 800 ms for an arena or outdoor rig. Longer "
-        "costs a little more CPU. This is the one control that restarts the "
-        "canceller when changed, so set it before the show rather than "
-        "during it.\n"
+        "How long a room response stage 1 models. Pick by venue: 50 ms for "
+        "a small room, up to 800 ms for an arena or outdoor rig. Longer "
+        "costs a little more CPU. Applies live.\n"
         "\n"
-        "SUPPRESSION STRENGTH\n"
-        "Gentle / Moderate / Hard. How hard leftover bleed is cleaned up "
-        "after the main cancellation. Hard removes the most but can sound "
-        "processed on crowd noise; Gentle is the most natural but lets a "
-        "little more PA through. Applies live.\n"
         "\n"
-        "CROWD PROTECTION\n"
-        "How readily the plugin decides a moment is real audience sound to "
-        "keep rather than PA bleed to remove. Raise it if the crowd sounds "
-        "gated or pumpy; lower it if PA bleed comes through when the crowd "
-        "is loud. Applies live.\n"
+        "=== BLEED SUPPRESSOR ===\n"
+        "\n"
+        "STRENGTH\n"
+        "How hard the bleed suppressor ducks. It scales both the estimate of "
+        "leftover PA and how hard a band is ducked for it. 0% bypasses stage "
+        "2. Raise it if PA still comes through after the cancellation. Lower "
+        "it if the crowd sounds thin, underwater or swirly (\"musical "
+        "noise\"), a sign that crowd is being ducked along with the PA. 80% "
+        "is a good start. Applies live.\n"
+        "\n"
+        "RANGE\n"
+        "The most any one band can be ducked. It works like a gate's range: "
+        "a floor no band goes below, however much PA the suppressor thinks "
+        "is in it. A smaller range keeps more room and crowd under the PA "
+        "and makes artefacts less obvious; a bigger range removes more where "
+        "the PA dominates. Has no effect at 0% Strength. Applies live.\n"
+        "\n"
+        "TIME\n"
+        "The time constant of the ducking, the same for attack and release. "
+        "It smooths both the level measurement and the gain, so the audible "
+        "reaction is somewhat slower than the number. Shorter follows "
+        "transients (kick, snare) more tightly but can make the crowd "
+        "flutter; longer is smoother but lets a little PA through on fast "
+        "changes. One processing block is about 2.7 ms at 48kHz, so 3 ms is "
+        "essentially unsmoothed. Applies live.\n"
+        "\n"
+        "DEFAULTS\n"
+        "Puts Strength, Range and Time back to their defaults (80%, -12 dB, "
+        "30 ms). It does not reset the canceller, which keeps what it has "
+        "learned. Greyed out when they already are.\n"
         "\n"
         "\n"
         "=== OUTPUT ===\n"
         "\n"
-        "SUPPRESSION / OUTPUT METERS\n"
-        "Suppression is the dB difference between mic in and output, so it "
+        "REDUCTION / OUTPUT METERS\n"
+        "Reduction is the dB difference between mic in and output -- the "
+        "combined effect of both stages -- so it "
         "always matches what you hear: near 0dB with no PA to remove, higher "
         "when there is.\n"
         "\n"
         "MIX\n"
-        "Blends the cancelled output with the original mic. 100% is fully "
-        "cancelled; lower it to bring some of the original back.\n"
+        "Blends the processed output (both stages) with the original mic. "
+        "100% is fully processed; lower it to bring some of the original back.\n"
         "\n"
         "STATUS AND PA DELAY\n"
         "\"No PA signal\" means nothing is arriving on the Reference input -- "
@@ -1015,38 +862,13 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "and mic timing is unstable.\n"
         "\n"
         "\n"
-        "=== FINE TUNING ===\n"
-        "Behind the Fine tuning button. The defaults suit most shows; the "
-        "button says \"adjusted\" when anything in here is off its default.\n"
-        "\n"
-        "NEAR-END DETECTOR\n"
-        "How audience sound is recognised. Classic watches the overall "
-        "low-frequency balance and protects most of the time. Subband "
-        "(2-4kHz) compares bass against the range where crowd sound lives, "
-        "so it protects less often but more precisely. Different "
-        "characters, not better/worse -- A/B them on your material.\n"
-        "\n"
-        "PROTECTION HOLD TIME\n"
-        "How long protection lasts once triggered. Longer is smoother but "
-        "can let some PA through just after the crowd quiets; shorter can "
-        "pulse on intermittent crowd noise.\n"
-        "\n"
-        "TRANSITION SMOOTHING\n"
-        "How gradually the plugin moves between protecting the crowd and "
-        "suppressing the PA. 0 ms switches instantly, which can pump; higher "
-        "rounds the switch off.\n"
-        "\n"
-        "LIMIT HF GAIN\n"
-        "An extra clamp on high-frequency gain. Usually off; try it if you "
-        "hear excess high-end bleed.\n"
-        "\n"
-        "\n"
         "=== LIVE AND IN POST ===\n"
         "\n"
-        "Live (e.g. LiveProfessor, MainStage): the plugin adds about 20 ms "
-        "of latency and reports it to the host. Give it a few seconds of PA "
-        "signal to lock on before relying on it. Avoid changing Tail Length "
-        "mid-show; everything else applies without interruption.\n"
+        "Live (e.g. LiveProfessor, MainStage): the plugin adds about 4 ms "
+        "of latency (192 samples at 44.1/48kHz: 128 for the canceller's "
+        "processing block and 64 for the suppressor's linear-phase filter; "
+        "320 at 96kHz) and reports it to the host. Give it a few seconds of PA signal to lock on "
+        "before relying on it. Every control applies without interruption.\n"
         "\n"
         "In post: insert it on the mic track with the PA feed on the "
         "sidechain. An offline bounce sounds the same as playing back from "

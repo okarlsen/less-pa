@@ -1,31 +1,22 @@
 # Building Less PA from source
 
 Less PA builds on macOS (Apple Silicon) and produces an AU component and a
-VST3 bundle. It is a two-stage build: Meson builds the patched WebRTC audio
-processing library, then CMake builds the JUCE plugin against it.
+VST3 bundle. It is a single CMake build of the JUCE plugin; the echo
+canceller is the plugin's own code (`plugin/Source/KalmanEchoCanceller.h`),
+with no external DSP library to build first.
 
 ## Prerequisites
 
 - **Xcode Command Line Tools** — `xcode-select --install`
-- **CMake** 3.22 or newer, **Meson** 0.63 or newer, **Ninja**, and
-  **pkg-config**:
+- **CMake** 3.22 or newer:
 
   ```sh
-  brew install cmake meson ninja pkgconf
+  brew install cmake
   ```
-
-Nothing else needs installing. In particular you do **not** need Homebrew's
-`abseil` — see [A note on Abseil](#a-note-on-abseil) below for why that
-matters.
-
-An internet connection is needed the first time you configure Meson: it
-downloads the Abseil source tarball declared in
-`webrtc-audio-processing/subprojects/abseil-cpp.wrap`.
 
 ## Get the source
 
-Both dependencies (`JUCE/` and `webrtc-audio-processing/`) are git submodules,
-so clone recursively:
+JUCE is a git submodule, so clone recursively:
 
 ```sh
 git clone --recurse-submodules https://github.com/okarlsen/less-pa.git
@@ -38,53 +29,18 @@ If you already cloned without `--recurse-submodules`:
 git submodule update --init --recursive
 ```
 
-## Stage 1 — build the WebRTC audio processing library
+A checkout from before 1.1.0 also has a `webrtc-audio-processing/` directory
+from the old two-stage build. Nothing uses it any more; it can be deleted.
+
+## Build the plugin
 
 ```sh
-cd webrtc-audio-processing
-meson setup build \
-    --default-library=static \
-    --force-fallback-for=abseil-cpp \
-    -Dc_args=-mmacosx-version-min=13.0 \
-    -Dcpp_args=-mmacosx-version-min=13.0 \
-    -Dc_link_args=-mmacosx-version-min=13.0 \
-    -Dcpp_link_args=-mmacosx-version-min=13.0
-meson compile -C build
-```
-
-Every option there is load-bearing:
-
-- `--default-library=static` and `--force-fallback-for=abseil-cpp` keep the
-  plugin self-contained — see [A note on Abseil](#a-note-on-abseil).
-- The four `-mmacosx-version-min=13.0` options match the plugin's own
-  deployment target (macOS 13, set in `plugin/CMakeLists.txt`). Meson
-  otherwise builds for whatever macOS the build machine runs, which produces
-  a plugin that silently refuses to load on anything older. Setting them as
-  Meson options rather than via a `MACOSX_DEPLOYMENT_TARGET` environment
-  variable means they are recorded in the build directory and apply to
-  `meson compile` and to the Abseil subproject too.
-
-This produces `build/webrtc/modules/audio_processing/libwebrtc-audio-processing-2.a`
-plus an uninstalled pkg-config file under `build/meson-uninstalled/`, which is
-what the CMake stage consumes — there is no `meson install` step.
-
-## Stage 2 — build the plugin
-
-```sh
-cd ../plugin
+cd plugin
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target PAEchoCanceller_AU PAEchoCanceller_VST3 -j8
 ```
 
-Configure output should include:
-
-```
--- Less PA: linking statically against the vendored Abseil subproject
-```
-
-If instead you get a warning that no vendored Abseil was found, stage 1 was
-configured without `--force-fallback-for=abseil-cpp`. Delete
-`webrtc-audio-processing/build` and redo stage 1.
+The deployment target is macOS 13, set in `plugin/CMakeLists.txt`.
 
 The build products land in:
 
@@ -98,22 +54,8 @@ plugin/build/PAEchoCanceller_artefacts/Release/VST3/Less PA.vst3
 automatically at the end of the build. A DAW may need a rescan to pick up a
 newly built version.
 
-## A note on Abseil
-
-`webrtc-audio-processing` resolves its Abseil dependency (`absl_base`,
-`absl_flags`, `absl_strings`, …) through pkg-config. On a machine that happens
-to have Homebrew's `abseil` formula installed, plain `meson setup build` will
-silently pick that up and link the plugin against roughly fifty dynamic
-libraries under `/opt/homebrew/opt/abseil/lib`. That builds and runs fine
-locally, but the resulting `.component`/`.vst3` will fail to load on any Mac
-without that exact Homebrew installation — Homebrew's Abseil is shipped
-dylib-only, so there is no static-linking escape hatch.
-
-`--force-fallback-for=abseil-cpp` makes Meson ignore any system Abseil and
-build the pinned `abseil-cpp` subproject as static archives instead, and
-`--default-library=static` does the same for the WebRTC library itself. The
-result is a plugin binary with no non-system dynamic dependencies at all,
-which you can check with:
+The plugin links nothing outside the system frameworks, which you can check
+with:
 
 ```sh
 otool -L "plugin/build/PAEchoCanceller_artefacts/Release/AU/Less PA.component/Contents/MacOS/Less PA" \
@@ -121,11 +63,6 @@ otool -L "plugin/build/PAEchoCanceller_artefacts/Release/AU/Less PA.component/Co
 ```
 
 That should print only the file's own name.
-
-In the Abseil-subproject case upstream's `meson.build` deliberately generates
-a pkg-config file with an empty `Requires:`, so `plugin/CMakeLists.txt` picks
-the subproject's `libabsl_*.a` archives up by glob and adds them to the link
-line itself.
 
 ## Verifying a build
 
@@ -137,9 +74,18 @@ cmake --build build --target PAEchoCancellerVerify -j8
 ./build/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify
 ```
 
-It must report 49 individual `PASS` results and end with `ALL TESTS PASS`.
-(`grep -c PASS` reports 50, because it counts the closing `ALL TESTS PASS`
-line as well — that 50 is the figure earlier release notes quoted.)
+It must report 46 individual `PASS` results and end with `ALL TESTS PASS`.
+(`grep -c PASS` reports 47, because it counts the closing `ALL TESTS PASS`
+line as well.)
+
+To check the plugin's real delay against what it reports to the host across
+every sample rate (44.1 to 192 kHz), buffer sizes from 16 to 2048 samples,
+Mix settings, bypass and offline rendering, run the full latency sweep (a
+few minutes):
+
+```sh
+./build/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify --latency-matrix
+```
 
 For the AU, Apple's own validation tool should also succeed:
 
@@ -203,8 +149,7 @@ scripts.
 `packaging/signing.sh` holds the shared logic; both packaging scripts source
 it. Running either one will:
 
-1. Verify the bundles link nothing outside `/System/Library` and `/usr/lib`
-   (see [A note on Abseil](#a-note-on-abseil)).
+1. Verify the bundles link nothing outside `/System/Library` and `/usr/lib`.
 2. Sign both bundles with the Developer ID Application certificate, with the
    hardened runtime (`--options runtime`) and a secure timestamp.
 3. Submit both bundles to Apple in a **single** notarization submission —

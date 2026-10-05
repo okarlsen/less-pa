@@ -3,6 +3,48 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0]
+
+### Changed
+
+- **New canceller.** Less PA now uses a full-band Kalman adaptive filter
+  followed by a per-band bleed suppressor, in place of the WebRTC AEC3 engine of 1.0.x.
+  Latency drops from about 19 ms to 192 samples (4.0 ms) at 44.1/48 kHz and
+  320 samples (3.3 ms) at 96 kHz. It starts from the mic/PA level ratio,
+  so it locks on within a few seconds of PA, and every control applies
+  live with no dropout.
+- **Two stages on the panel.** The middle column now shows the **PA Canceller**
+  (Tail Length stays) and the **Bleed Suppressor**, which ducks each
+  frequency band by the PA left after cancellation. Suppression Strength
+  and Crowd Protection are replaced by its three controls: **Strength**
+  (0-100%, default 80%; 0% bypasses it), **Range** (0 to -24 dB, default
+  -12 dB: the most any band can be ducked) and **Time** (3-50 ms, default
+  30 ms: attack and release). A **Defaults** button puts them back to
+  their defaults. The Fine tuning page is gone, and the help explains both
+  stages.
+- The Suppression meter is now called Reduction, since it shows the total
+  of both stages.
+- The PA delay readout comes from the filter itself and holds steady.
+
+### Removed
+
+- The Classic (AEC3) engine and its controls: Near-end Detector,
+  Protection Hold Time, Transition Smoothing and Limit HF Gain. The WebRTC
+  library is no longer part of the build.
+
+### Upgrading
+
+- Sessions saved by 1.0.x keep their Tail Length, PA Reference Trim, Input
+  HPF and Mix. Strength, Range and Time start at their defaults;
+  saved values of the removed controls are ignored.
+
+### Fixed
+
+- The delay the plugin reports to the host now matches the delay it adds at
+  every host buffer size. Previously, buffer sizes that are a multiple of
+  the internal frame could make the audio arrive earlier than reported, and
+  the first frame after a reset could drop out briefly.
+
 ## [1.0.4]
 
 ### Changed

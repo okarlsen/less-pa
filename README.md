@@ -9,8 +9,9 @@ and conferencing software use to remove speaker bleed — using the actual
 PA feed as a reference signal (wired into the plugin's Reference sidechain
 input), not a guess at the room's acoustics.
 
-Built by SGTM on top of [JUCE](https://juce.com) and a patched fork of
-[WebRTC's AEC3](https://github.com/okarlsen/webrtc-audio-processing).
+The canceller is a full-band frequency-domain Kalman adaptive filter followed
+by a per-band bleed suppressor, adding about 4 ms of latency. Built by SGTM on top of
+[JUCE](https://juce.com).
 
 ## Requirements
 
@@ -46,16 +47,37 @@ input. Click the **?** button in the plugin for the full control reference.
 
 ### Level the PA feed
 
-The canceller adapts best when the PA feed is not recorded very quietly. The
-**PA-ref** meter has a wide marked target zone — peaks of about −36 to −3 dBFS —
-and its bar is amber below the zone, green inside it and red above it. A PA
-feed is very dynamic, so the zone is wide: keep the loud parts inside it. If
-the feed sits below the zone, raise **PA Reference Trim**; a quiet feed makes
-the canceller adapt slowly and unevenly, especially at high frequencies, so a
-bounce can end up with noticeably less PA removed than the same audio played
-back after the plugin has settled. Above the zone nothing breaks, but a hotter
-reference also suppresses a little more of the audience (about 1–2 dB near
-0 dBFS), so there is no benefit in going further.
+The **PA-ref** meter has a wide marked target zone — peaks of about −36 to
+−3 dBFS — and its bar is amber below the zone, green inside it and red above
+it. A PA feed is very dynamic, so the zone is wide: keep the loud parts inside
+it. If the feed sits well below the zone, raise **PA Reference Trim** so the
+canceller registers it as PA. Above the zone nothing breaks, but a feed that
+hot risks clipping, so there is no benefit in going further.
+
+### Set how much is removed
+
+Less PA works in two stages. **Stage 1, the PA Canceller**, is an adaptive
+filter that learns the path from the PA feed to the mic (delay, reflections,
+reverb tail, speaker and room colouring), builds a copy of the PA as it
+arrives at the mic and subtracts it. Subtraction leaves the crowd untouched,
+but it cannot remove what isn't a linear copy of the PA feed: distortion, a
+changing room, reverb longer than the **Tail Length**, or sound that never
+reaches the reference, such as stage monitors and backline.
+
+**Stage 2, the Bleed Suppressor**, works on what is left, in frequency bands
+about 170–190 Hz wide. It estimates how much PA is still in each band and
+ducks the band in proportion, like a multiband ducker keyed from the
+estimated leftover PA. It turns down everything in a ducked band, crowd
+included, so it trades a little crowd for less PA.
+
+- **Strength** (0–100%, default 80%): how hard the suppressor ducks. 0%
+  bypasses stage 2. Lower it if the crowd sounds thin or swirly.
+- **Range** (0 to −24 dB, default −12 dB): the most any band can be ducked,
+  like a gate's range.
+- **Time** (3–50 ms, default 30 ms): attack and release of the ducking.
+
+**Defaults** puts these three back to their defaults; the canceller keeps
+what it has learned. Start at the defaults and adjust by ear.
 
 It also helps to start a bounce a few seconds early. The plugin keeps
 adapting for as long as it runs, and a lead-in of about 10 seconds before the

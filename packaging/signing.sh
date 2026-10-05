@@ -26,9 +26,9 @@
 : "${LESSPA_INSTALLER_IDENTITY:=Developer ID Installer: Sounds Good To Me AS (ZVP9U3LWAJ)}"
 : "${LESSPA_NOTARY_PROFILE:=notarytool}"
 
-# Refuse to ship a plugin that drags in dylibs the end user will not have.
-# This is the exact failure mode a locally-installed Homebrew Abseil causes;
-# see the 'A note on Abseil' section of BUILDING.md.
+# Refuse to ship a plugin that drags in dylibs the end user will not have
+# (as a locally-installed Homebrew library once did, back when the build
+# linked an external DSP library).
 lesspa_check_no_stray_dylibs() {
     local bundle binary strays
     for bundle in "$@"; do
