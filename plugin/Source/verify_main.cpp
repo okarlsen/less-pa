@@ -2066,8 +2066,6 @@ bool testHighPassFilterResponse() {
     return pass;
 }
 
-} // namespace
-
 static void printDefaultBusLayout() {
     PAEchoCancellerAudioProcessor proc; // freshly constructed, no layout negotiation yet
     printf("=== Default bus layout (as declared, before any host negotiation) ===\n");
@@ -2581,6 +2579,8 @@ bool testLatencyMatrix() {
     printf("  %s\n", pass ? "PASS" : "CHECK -- measured delay differs from getLatencySamples()");
     return pass;
 }
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     // --latency-matrix: the full latency sweep (all rates and block sizes),

@@ -143,7 +143,7 @@ private:
     // sound-shaping setting someone would want undone with it.
     std::array<juce::RangedAudioParameter*, 3> getSuppressorParameters() const;
 
-    PAEchoCancellerAudioProcessor& processor;
+    PAEchoCancellerAudioProcessor& pluginProcessor;
 
     // Declared before every component below on purpose: members are destroyed
     // in reverse declaration order, so this outlives the components that are

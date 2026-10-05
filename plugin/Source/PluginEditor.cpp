@@ -105,7 +105,7 @@ private:
 } // namespace
 
 PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoCancellerAudioProcessor& p)
-    : AudioProcessorEditor(&p), processor(p)
+    : AudioProcessorEditor(&p), pluginProcessor(p)
 {
     setLookAndFeel(&lookAndFeel);
 
@@ -167,7 +167,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // The room a length suits is part of the item text: choosing by venue is
     // the decision someone actually makes at a show. Taken from the
     // parameter, so the panel and the host's automation lane agree.
-    tailLengthCombo.addItemList(processor.getTailLengthParameter()->choices, 1);
+    tailLengthCombo.addItemList(pluginProcessor.getTailLengthParameter()->choices, 1);
     tailLengthCombo.onChange = [this] { tailLengthComboChanged(); };
     addAndMakeVisible(tailLengthCombo);
 
@@ -527,7 +527,7 @@ void PAEchoCancellerAudioProcessorEditor::updateResetButton()
 
 std::array<juce::RangedAudioParameter*, 3> PAEchoCancellerAudioProcessorEditor::getSuppressorParameters() const
 {
-    return { processor.getAmountParameter(), processor.getMaxReductionParameter(), processor.getResponseParameter() };
+    return { pluginProcessor.getAmountParameter(), pluginProcessor.getMaxReductionParameter(), pluginProcessor.getResponseParameter() };
 }
 
 void PAEchoCancellerAudioProcessorEditor::resetSuppressorToDefaults()
@@ -547,7 +547,7 @@ void PAEchoCancellerAudioProcessorEditor::resetSuppressorToDefaults()
 void PAEchoCancellerAudioProcessorEditor::tailLengthComboChanged()
 {
     const int index = tailLengthCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
-    auto* param = processor.getTailLengthParameter();
+    auto* param = pluginProcessor.getTailLengthParameter();
     const float normalized = param->convertTo0to1(static_cast<float>(index));
     param->beginChangeGesture();
     param->setValueNotifyingHost(normalized);
@@ -556,7 +556,7 @@ void PAEchoCancellerAudioProcessorEditor::tailLengthComboChanged()
 
 void PAEchoCancellerAudioProcessorEditor::updateTailLengthCombo()
 {
-    const int currentId = processor.getTailLengthParameter()->getIndex() + 1;
+    const int currentId = pluginProcessor.getTailLengthParameter()->getIndex() + 1;
     if (tailLengthCombo.getSelectedId() != currentId)
         tailLengthCombo.setSelectedId(currentId, juce::dontSendNotification);
 }
@@ -582,43 +582,43 @@ void syncSlider(juce::Slider& slider, double value, double tolerance)
 
 void PAEchoCancellerAudioProcessorEditor::amountSliderChanged()
 {
-    setParameterFromUi(*processor.getAmountParameter(), static_cast<float>(amountSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getAmountParameter(), static_cast<float>(amountSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::maxReductionSliderChanged()
 {
-    setParameterFromUi(*processor.getMaxReductionParameter(), -static_cast<float>(maxReductionSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getMaxReductionParameter(), -static_cast<float>(maxReductionSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::responseSliderChanged()
 {
-    setParameterFromUi(*processor.getResponseParameter(), static_cast<float>(responseSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getResponseParameter(), static_cast<float>(responseSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::hpfSliderChanged()
 {
-    setParameterFromUi(*processor.getHpfFrequencyParameter(), static_cast<float>(hpfSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getHpfFrequencyParameter(), static_cast<float>(hpfSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::referenceGainSliderChanged()
 {
-    setParameterFromUi(*processor.getReferenceGainParameter(), static_cast<float>(referenceGainSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getReferenceGainParameter(), static_cast<float>(referenceGainSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::dryWetSliderChanged()
 {
-    setParameterFromUi(*processor.getDryWetMixParameter(), static_cast<float>(dryWetSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getDryWetMixParameter(), static_cast<float>(dryWetSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::updateSliders()
 {
     // Keeps every slider in step with host automation and session loads.
-    syncSlider(amountSlider, processor.getAmountParameter()->get(), 0.05);
-    syncSlider(maxReductionSlider, -processor.getMaxReductionParameter()->get(), 0.05);
-    syncSlider(responseSlider, processor.getResponseParameter()->get(), 0.05);
-    syncSlider(hpfSlider, processor.getHpfFrequencyParameter()->get(), 0.05);
-    syncSlider(referenceGainSlider, processor.getReferenceGainParameter()->get(), 0.05);
-    syncSlider(dryWetSlider, processor.getDryWetMixParameter()->get(), 0.05);
+    syncSlider(amountSlider, pluginProcessor.getAmountParameter()->get(), 0.05);
+    syncSlider(maxReductionSlider, -pluginProcessor.getMaxReductionParameter()->get(), 0.05);
+    syncSlider(responseSlider, pluginProcessor.getResponseParameter()->get(), 0.05);
+    syncSlider(hpfSlider, pluginProcessor.getHpfFrequencyParameter()->get(), 0.05);
+    syncSlider(referenceGainSlider, pluginProcessor.getReferenceGainParameter()->get(), 0.05);
+    syncSlider(dryWetSlider, pluginProcessor.getDryWetMixParameter()->get(), 0.05);
 }
 
 void PAEchoCancellerAudioProcessorEditor::timerCallback()
@@ -635,15 +635,15 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     //  - the host keeps calling processBlock with silence even when the
     //    transport is stopped (common -- the audio engine keeps running),
     //    so the counter keeps advancing, but there's no real signal.
-    const uint32_t currentCount = processor.getProcessBlockCallCount();
+    const uint32_t currentCount = pluginProcessor.getProcessBlockCallCount();
     const bool callbackAdvanced = (currentCount != lastSeenProcessBlockCount);
     lastSeenProcessBlockCount = currentCount;
 
     // Silence detection always uses the pre-filter level, regardless of
     // what the meters are currently displaying -- an aggressive HPF cutoff
     // shouldn't be able to make real signal look like "nothing happening".
-    const float inputLevelPre = processor.getInputPeakLevelPre();
-    const float sidechainLevelPre = processor.getSidechainPeakLevelPre();
+    const float inputLevelPre = pluginProcessor.getInputPeakLevelPre();
+    const float sidechainLevelPre = pluginProcessor.getSidechainPeakLevelPre();
     constexpr float silenceThreshold = 1.0e-6f;
     const bool signalPresent = inputLevelPre > silenceThreshold || sidechainLevelPre > silenceThreshold;
 
@@ -664,7 +664,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     // in the canceller). "--" with signal present = the reference likely
     // isn't reaching the plugin at all (e.g. sidechain pins not routed).
     {
-        const int delayMs = processor.getEstimatedEchoPathDelayMs();
+        const int delayMs = pluginProcessor.getEstimatedEchoPathDelayMs();
         juce::String text("PA delay: ");
         if (delayMs < 0)
             text << "--";
@@ -686,9 +686,9 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 
     // Always post-HPF (and, for the PA ref, post-trim): the meters sit next
     // to those two controls so their effect is what the meters should show.
-    const float displayedInputLevel = processor.getInputPeakLevelPost();
-    const float displayedOutputLevel = processor.getOutputPeakLevel();
-    const float displayedSidechainLevel = processor.getSidechainPeakLevelPost();
+    const float displayedInputLevel = pluginProcessor.getInputPeakLevelPost();
+    const float displayedOutputLevel = pluginProcessor.getOutputPeakLevel();
+    const float displayedSidechainLevel = pluginProcessor.getSidechainPeakLevelPost();
     inputMeter.setLevel(displayedInputLevel);
     sidechainMeter.setLevel(displayedSidechainLevel);
     outputMeter.setLevel(displayedOutputLevel);
@@ -706,7 +706,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     constexpr float levelFloorLinear = 1.0e-6f; // -120dB, matches the silence threshold above
     constexpr float suppressionJitterFloorDb = 0.5f;
     const float delayCompensatedInputLevel =
-        processor.getInputPeakLevelPostDelayed(processor.getLatencySamples());
+        pluginProcessor.getInputPeakLevelPostDelayed(pluginProcessor.getLatencySamples());
     const float suppressionDb =
         juce::Decibels::gainToDecibels(juce::jmax(delayCompensatedInputLevel, levelFloorLinear))
         - juce::Decibels::gainToDecibels(juce::jmax(displayedOutputLevel, levelFloorLinear));
