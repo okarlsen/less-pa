@@ -21,18 +21,17 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
     addParameter(tailLengthParam = new juce::AudioParameterChoice(
         "tailLength", "Tail Length",
         juce::StringArray{ "50 ms - small room", "200 ms - club / theatre", "400 ms - hall", "800 ms - arena / outdoor" }, 3));
-    // 25%: on the LS26 recordings this removed ~1.7 dB more PA than the
-    // bare filter and took ~1 dB less of the crowd than the earlier fixed
-    // Moderate setting, which was judged too strong by ear.
+    // Defaults 80% / -12 dB / 30 ms, chosen by ear on the LS26 and Oslo
+    // recordings in Logic (the -12 dB Range caps how far it goes).
     addParameter(amountParam = new juce::AudioParameterFloat(
         "amount", "Suppressor Strength",
-        juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 25.0f));
+        juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 80.0f));
     addParameter(maxReductionParam = new juce::AudioParameterFloat(
         "maxReduction", "Suppressor Range",
         juce::NormalisableRange<float>(-24.0f, 0.0f, 0.1f), -12.0f));
     addParameter(responseParam = new juce::AudioParameterFloat(
         "response", "Suppressor Time",
-        juce::NormalisableRange<float>(3.0f, 50.0f, 0.1f), 20.0f));
+        juce::NormalisableRange<float>(3.0f, 50.0f, 0.1f), 30.0f));
     auto hpfRange = juce::NormalisableRange<float>(80.0f, 300.0f, 0.1f);
     hpfRange.setSkewForCentre(150.0f);
     addParameter(hpfFrequencyParam = new juce::AudioParameterFloat(

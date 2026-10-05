@@ -1951,7 +1951,7 @@ bool testSuppressorControls(int sampleRate) {
 
     const auto filterOnly = runWith(0.0f, -12.0f, 20.0f);
     const auto noFloor = runWith(80.0f, 0.0f, 20.0f);
-    const auto defaults = runWith(25.0f, -12.0f, 20.0f);
+    const auto mid = runWith(25.0f, -12.0f, 20.0f);
     const auto full = runWith(100.0f, -12.0f, 20.0f);
     const auto fullShallow = runWith(100.0f, -3.0f, 20.0f);
     const auto fullDeep = runWith(100.0f, -24.0f, 20.0f);
@@ -1965,7 +1965,7 @@ bool testSuppressorControls(int sampleRate) {
     const auto red = [&](const std::vector<float>& out) { return mic - rmsDbfs(out, sampleRate, picS0, picS1); };
     printf("  PA-only reduction: filter only %.1f dB, Amount 25%% %.1f dB, 100%% %.1f dB; "
            "100%% at -3 dB %.1f dB, at -24 dB %.1f dB\n",
-           red(filterOnly), red(defaults), red(full), red(fullShallow), red(fullDeep));
+           red(filterOnly), red(mid), red(full), red(fullShallow), red(fullDeep));
     printf("  Max difference, Amount 0%% vs Max Reduction 0 dB: %.3g\n", maxDiff);
 
     // Live changes of all three, mid-stream.
@@ -2008,7 +2008,7 @@ bool testSuppressorControls(int sampleRate) {
            outputPeak, inputPeak, longestZeroRunAfterStart);
 
     const bool zeroIsFilterOnly = maxDiff < 1e-7;
-    const bool amountWorks = red(full) > red(defaults) + 1.0 && red(defaults) > red(filterOnly);
+    const bool amountWorks = red(full) > red(mid) + 1.0 && red(mid) > red(filterOnly);
     const bool floorWorks = red(fullDeep) > red(fullShallow) + 1.0;
     const bool liveClean = outputPeak < inputPeak * 1.5f && longestZeroRunAfterStart < sampleRate / 200;
     const bool pass = zeroIsFilterOnly && amountWorks && floorWorks && liveClean;
@@ -2529,7 +2529,7 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     // Reduction and Response at 50% Amount, where they have room to act),
     // then the defaults at a shorter tail.
     const Config configs[] = {
-        { 3, 25.0f, -12.0f, 20.0f, "default" },
+        { 3, 80.0f, -12.0f, 30.0f, "default" },
         { 3, 0.0f, -12.0f, 20.0f, "amount0" },
         { 3, 50.0f, -12.0f, 20.0f, "amount50" },
         { 3, 100.0f, -12.0f, 20.0f, "amount100" },
@@ -2537,7 +2537,7 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
         { 3, 50.0f, -24.0f, 20.0f, "amount50_maxred24" },
         { 3, 50.0f, -12.0f, 5.0f, "amount50_resp5" },
         { 3, 50.0f, -12.0f, 50.0f, "amount50_resp50" },
-        { 1, 25.0f, -12.0f, 20.0f, "tail200_default" },
+        { 1, 80.0f, -12.0f, 30.0f, "tail200_default" },
     };
 
     // The irregular run writes its aggregate report to a separate file so a
@@ -2774,9 +2774,9 @@ bool testBasicCancellation(int rate, double durationS) {
         printf("  PA-only window: mic=%.1f dBFS cleaned=%.1f dBFS reduction=%.1f dB\n", mic_pa, cleaned_pa, reductionDb);
         printf("  Voice window:   ground_truth=%.1f dBFS cleaned=%.1f dBFS error=%.1f dB\n", voice_gt, cleaned_voice, voiceErrDb);
 
-        // 8 dB rather than the 10 dB the 1.0.x engine was held to: the
-        // default Amount (25%) is deliberately gentler than 1.0.x's Moderate,
-        // and this window (0-2 s) includes the canceller's start-up.
+        // 8 dB rather than the 10 dB the 1.0.x engine was held to: this
+        // window (0-2 s) includes the canceller's start-up, and the default
+        // Range (-12 dB) caps the suppressor.
         // testSuppressorControls covers what the stronger settings reach.
         bool pass = reductionDb > 8.0 && std::abs(voiceErrDb) < 6.0;
         printf("  %s\n", pass ? "PASS" : "CHECK");
@@ -2870,7 +2870,8 @@ int main(int argc, char* argv[]) {
     allPass = testClickFreeRoomChange(48000) && allPass;
     allPass = testLargeRoomBenefit(48000) && allPass;
     allPass = testSuppressionMeterAfterReferenceMute(48000, 0.0f, "Amount 0%") && allPass;
-    allPass = testSuppressionMeterAfterReferenceMute(48000, 25.0f, "Amount 25%, default") && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 25.0f, "Amount 25%") && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 80.0f, "Amount 80%, default") && allPass;
     allPass = testSuppressionMeterAfterReferenceMute(48000, 100.0f, "Amount 100%") && allPass;
     allPass = testSuppressionMeterTransientAlignment(48000) && allPass;
     allPass = testOfflineVsLiveDynamicHfContent(48000) && allPass;

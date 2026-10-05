@@ -32,10 +32,10 @@
 class KalmanEchoCanceller {
 public:
     struct SuppressorSettings {
-        float beta = 0.15f;        // residual-echo share of the echo estimate (model mismatch, PA distortion)
-        float overSub = 0.75f;     // over-subtraction of the residual-echo estimate; 0 = filter only
+        float beta = 0.48f;        // residual-echo share of the echo estimate (model mismatch, PA distortion)
+        float overSub = 2.4f;      // over-subtraction of the residual-echo estimate; 0 = filter only
         float floorDb = -12.0f;    // deepest per-bin cut
-        float responseMs = 20.0f;  // time constant of the suppressor's power and gain smoothing
+        float responseMs = 30.0f;  // time constant of the suppressor's power and gain smoothing
     };
 
     // The panel's Amount (0..1) as suppressor settings: 0 is the bare

@@ -70,11 +70,11 @@ ducks the band in proportion, like a multiband ducker keyed from the
 estimated leftover PA. It turns down everything in a ducked band, crowd
 included, so it trades a little crowd for less PA.
 
-- **Strength** (0–100%, default 25%): how hard the suppressor ducks. 0%
+- **Strength** (0–100%, default 80%): how hard the suppressor ducks. 0%
   bypasses stage 2. Lower it if the crowd sounds thin or swirly.
 - **Range** (0 to −24 dB, default −12 dB): the most any band can be ducked,
   like a gate's range.
-- **Time** (3–50 ms, default 20 ms): attack and release of the ducking.
+- **Time** (3–50 ms, default 30 ms): attack and release of the ducking.
 
 **Defaults** puts these three back to their defaults; the canceller keeps
 what it has learned. Start at the defaults and adjust by ear.

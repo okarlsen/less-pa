@@ -74,8 +74,8 @@ cmake --build build --target PAEchoCancellerVerify -j8
 ./build/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify
 ```
 
-It must report 44 individual `PASS` results and end with `ALL TESTS PASS`.
-(`grep -c PASS` reports 45, because it counts the closing `ALL TESTS PASS`
+It must report 45 individual `PASS` results and end with `ALL TESTS PASS`.
+(`grep -c PASS` reports 46, because it counts the closing `ALL TESTS PASS`
 line as well.)
 
 For the AU, Apple's own validation tool should also succeed:

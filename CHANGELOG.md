@@ -19,9 +19,9 @@ Planned as 1.1.0.
   (Tail Length stays) and the **Bleed Suppressor**, which ducks each
   frequency band by the PA left after cancellation. Suppression Strength
   and Crowd Protection are replaced by its three controls: **Strength**
-  (0-100%, default 25%; 0% bypasses it), **Range** (0 to -24 dB, default
+  (0-100%, default 80%; 0% bypasses it), **Range** (0 to -24 dB, default
   -12 dB: the most any band can be ducked) and **Time** (3-50 ms, default
-  20 ms: attack and release). A **Defaults** button puts them back to
+  30 ms: attack and release). A **Defaults** button puts them back to
   their defaults. The Fine tuning page is gone, and the help explains both
   stages.
 - The Suppression meter is now called Reduction, since it shows the total
