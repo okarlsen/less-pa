@@ -29,9 +29,6 @@ If you already cloned without `--recurse-submodules`:
 git submodule update --init --recursive
 ```
 
-A checkout from before 1.1.0 also has a `webrtc-audio-processing/` directory
-from the old two-stage build. Nothing uses it any more; it can be deleted.
-
 ## Build the plugin
 
 ```sh
@@ -49,10 +46,25 @@ plugin/build/PAEchoCanceller_artefacts/Release/AU/Less PA.component
 plugin/build/PAEchoCanceller_artefacts/Release/VST3/Less PA.vst3
 ```
 
-`COPY_PLUGIN_AFTER_BUILD` is enabled, so both are also copied into
-`~/Library/Audio/Plug-Ins/Components` and `~/Library/Audio/Plug-Ins/VST3`
-automatically at the end of the build. A DAW may need a rescan to pick up a
-newly built version.
+Both are also copied into `~/Library/Audio/Plug-Ins/Components` and
+`~/Library/Audio/Plug-Ins/VST3` automatically at the end of the build. A DAW
+may need a rescan to pick up a newly built version. For a scratch or test
+build that must not replace the installed plugins, configure with
+`-DLESSPA_INSTALL_AFTER_BUILD=OFF`.
+
+### AAX (Pro Tools)
+
+JUCE includes the AAX SDK, so an AAX build needs nothing extra:
+
+```sh
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DLESSPA_BUILD_AAX=ON
+cmake --build build --target PAEchoCanceller_AAX -j8
+```
+
+It is off by default. Pro Tools only loads an AAX plugin that has been
+signed with PACE's wraptool, which the packaging scripts don't do yet. With
+`LESSPA_INSTALL_AFTER_BUILD` on, the build also copies the plugin into
+`/Library/Application Support/Avid/Audio/Plug-Ins`.
 
 The plugin links nothing outside the system frameworks, which you can check
 with:
@@ -223,7 +235,7 @@ stapled individually, they load with no quarantine-clearing step either.
 The two scripts can be run in either order; neither disturbs the other's
 output.
 
-Note that `COPY_PLUGIN_AFTER_BUILD` copies the plugins to
+Note that the build copies the plugins to
 `~/Library/Audio/Plug-Ins` at *build* time, which means those installed
 copies are the ad-hoc signed ones. Re-copy them from
 `plugin/build/PAEchoCanceller_artefacts/Release/` after running a packaging
@@ -231,5 +243,5 @@ script if you want to test against the signed build locally.
 
 ## Not currently supported
 
-Intel/universal builds, Windows, Linux, and AAX. The plugin is Apple Silicon,
-AU + VST3 only.
+Intel/universal builds, Windows and Linux. The released plugin is Apple
+Silicon, AU + VST3; AAX builds but is not signed or shipped yet.

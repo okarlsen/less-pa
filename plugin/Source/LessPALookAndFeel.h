@@ -58,9 +58,6 @@ public:
     juce::Font getComboBoxFont(juce::ComboBox&) override;
     juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override;
 
-    void drawToggleButton(juce::Graphics&, juce::ToggleButton&,
-                          bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
-
     void drawLabel(juce::Graphics&, juce::Label&) override;
     juce::Font getLabelFont(juce::Label&) override;
 
@@ -79,10 +76,10 @@ public:
 
     // Both halves of the tooltip are overridden, and both have to be.
     // LookAndFeel_V2::getTooltipBounds lays the text out at up to 400px wide
-    // and only *then* constrains the result into the parent -- and the
-    // TooltipWindow is parented to a ~340px editor, so a long tip was measured
-    // too wide and then squeezed, losing text off the end. LookAndFeel_V4
-    // overrides only drawTooltip, so that behaviour was inherited.
+    // and only *then* constrains the result into the parent -- so in a
+    // window narrower than that, a long tip is measured too wide and then
+    // squeezed, losing text off the end. LookAndFeel_V4
+    // overrides only drawTooltip, so that behaviour would be inherited.
     //
     // drawTooltip is not optional here: it re-lays the text out itself, again
     // at the stock 400px, so overriding the bounds alone would give a

@@ -79,10 +79,8 @@ struct TestSignals {
 // filtering (higher alpha, more stages) makes the reference more
 // autocorrelated at short lags -- fine for a simple direct-path test, but
 // it lets even a short adaptive filter "cheat" at matching a long tail via
-// local self-similarity rather than truly modeling it (the same reason
-// pure tones are pathological for AEC3 -- see the offline AEC3 test).
-// Tests that actually want to distinguish filter lengths should use a
-// lighter/broader reference.
+// local self-similarity rather than truly modeling it. Tests that actually
+// want to distinguish filter lengths should use a lighter/broader reference.
 TestSignals makeSignals(int sampleRate, double durationS,
                          const std::vector<std::pair<double, float>>& taps = { { 5.0, 0.5f } },
                          float lowpassAlpha = 0.90f, int lowpassStages = 2) {
@@ -139,16 +137,15 @@ TestSignals makeSignals(int sampleRate, double durationS,
 }
 
 // Runs the processor over the given signals using an irregular, cycling
-// block-size pattern designed to land off the 10ms frame boundary. If
-// roomChangeAtSample >= 0, the Room Size parameter is switched to
-// roomChangeToIndex at that point in the stream (mid-processing, as a user
-// turning the knob live would trigger), and changeSampleIndex receives the
-// output sample index at which the change was actually applied.
+// block-size pattern that never lines up with the canceller's frame. If
+// tailChangeAtSample >= 0, Tail Length is switched to tailChangeToIndex at
+// that point in the stream (mid-processing, as a user turning the knob live
+// would trigger), and changeSampleIndex receives the output sample index at
+// which the change was actually applied.
 std::vector<float> runThroughProcessor(PAEchoCancellerAudioProcessor& proc, int sampleRate,
                                         const std::vector<float>& reference, const std::vector<float>& mic,
-                                        int roomChangeAtSample = -1, int roomChangeToIndex = -1,
-                                        int* changeSampleIndex = nullptr, bool nonRealtime = false,
-                                        int paramIndexToChange = 0) {
+                                        int tailChangeAtSample = -1, int tailChangeToIndex = -1,
+                                        int* changeSampleIndex = nullptr, bool nonRealtime = false) {
     static const int blockPattern[] = { 512, 37, 129, 1, 4096, 256, 7 };
     const int patternLen = static_cast<int>(sizeof(blockPattern) / sizeof(blockPattern[0]));
     int maxBlock = 0;
@@ -158,16 +155,13 @@ std::vector<float> runThroughProcessor(PAEchoCancellerAudioProcessor& proc, int 
     proc.prepareToPlay(sampleRate, maxBlock);
 
     const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
-    printf("  [debug] totalIn=%d totalOut=%d totalChannels=%d mainInCh=%d refInCh=%d mainOutCh=%d\n",
-           proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels(), totalChannels,
-           proc.getChannelCountOfBus(true, 0), proc.getChannelCountOfBus(true, 1), proc.getChannelCountOfBus(false, 0));
     juce::AudioBuffer<float> buffer(totalChannels, maxBlock);
 
     const int n = static_cast<int>(mic.size());
     std::vector<float> output(static_cast<size_t>(n), 0.0f);
     juce::MidiBuffer midi;
 
-    bool roomChangeApplied = false;
+    bool tailChangeApplied = false;
 
     int pos = 0;
     int patternIdx = 0;
@@ -176,14 +170,12 @@ std::vector<float> runThroughProcessor(PAEchoCancellerAudioProcessor& proc, int 
         patternIdx++;
         if (blockSize <= 0) continue;
 
-        if (!roomChangeApplied && roomChangeAtSample >= 0 && pos >= roomChangeAtSample) {
+        if (!tailChangeApplied && tailChangeAtSample >= 0 && pos >= tailChangeAtSample) {
             // Mimic what a real host does when the user turns the knob:
             // go through the public parameter API, not a test backdoor.
-            auto* param = proc.getParameters()[paramIndexToChange];
-            const float normalized =
-                static_cast<float>(roomChangeToIndex) / static_cast<float>(param->getNumSteps() - 1);
-            param->setValueNotifyingHost(normalized);
-            roomChangeApplied = true;
+            auto* param = proc.getTailLengthParameter();
+            param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(tailChangeToIndex)));
+            tailChangeApplied = true;
             if (changeSampleIndex != nullptr) *changeSampleIndex = pos;
         }
 
@@ -197,18 +189,6 @@ std::vector<float> runThroughProcessor(PAEchoCancellerAudioProcessor& proc, int 
             mainIn.copyFrom(ch, 0, mic.data() + pos, blockSize);
         for (int ch = 0; ch < refIn.getNumChannels(); ++ch)
             refIn.copyFrom(ch, 0, reference.data() + pos, blockSize);
-
-        if (patternIdx < 3) {
-            double micSumSq = 0.0, refSumSq = 0.0;
-            for (int s = 0; s < blockSize; ++s) {
-                micSumSq += static_cast<double>(mainIn.getSample(0, s)) * mainIn.getSample(0, s);
-                if (refIn.getNumChannels() > 0)
-                    refSumSq += static_cast<double>(refIn.getSample(0, s)) * refIn.getSample(0, s);
-            }
-            printf("  [debug] block#%d size=%d mainIn RMS=%.4f refIn RMS=%.4f (refCh=%d)\n",
-                   patternIdx, blockSize, std::sqrt(micSumSq / blockSize),
-                   refIn.getNumChannels() > 0 ? std::sqrt(refSumSq / blockSize) : -1.0, refIn.getNumChannels());
-        }
 
         proc.processBlock(buffer, midi);
 
@@ -243,16 +223,14 @@ bool setMonoLayout(PAEchoCancellerAudioProcessor& proc) {
     return proc.setBusesLayout(layout);
 }
 
-// User report: muting the reference track (so no PA signal reaches the
-// sidechain) still shows gain reduction on the Suppression meter, even
-// though far more audio is audibly getting through. Reproduces that exact
-// scenario -- converge on real leak+audience material, then zero the
-// reference while audience content continues -- and polls the *editor's*
-// measured-suppression formula (getInputPeakLevelPostDelayed() minus
-// getOutputPeakLevel(), floored, matching PluginEditor.cpp's timerCallback)
-// to see how long any residual reading actually persists post-mute.
+// Muting the reference (no PA reaching the sidechain) must bring the
+// Reduction meter back to ~0 dB. Converges on leak+audience material, then
+// zeroes the reference while the audience continues, and polls the
+// *editor's* measured-reduction formula (getInputPeakLevelPostDelayed()
+// minus getOutputPeakLevel(), floored, matching PluginEditor.cpp's
+// timerCallback) to see how long any residual reading persists.
 bool testSuppressionMeterAfterReferenceMute(int sampleRate, float amountPercent, const char* amountName) {
-    printf("\n=== Suppression meter after reference mute test (%d Hz, %s) ===\n",
+    printf("\n=== Reduction meter after reference mute test (%d Hz, %s) ===\n",
            sampleRate, amountName);
     const double totalDurationS = 10.0;
     const double muteAtS = 6.0; // longer pre-mute run so a long reverberant tail actually converges
@@ -279,14 +257,9 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, float amountPercent,
     for (float v : audience) audiencePeak = std::max(audiencePeak, std::abs(v));
     for (auto& v : audience) v = 0.4f * v / audiencePeak; // present throughout, before and after the mute
 
-    // A single 5ms tap (as used in earlier tests) is a dry, direct path with
-    // no reverberant tail, so it can't exercise the mechanism this test is
-    // actually after. This uses the same spread-out, decaying multi-tap room
-    // response as testLargeRoomBenefit (5ms direct plus reflections out to
-    // 320ms) so the adaptive filter has a genuine decaying tail to learn, the
-    // same way a real hall recording would (see the Oslo Spektrum test
-    // material notes on why short synthetic taps can miss real-material
-    // behavior).
+    // A spread-out, decaying multi-tap room response (5ms direct plus
+    // reflections out to 320ms, as testLongTailBenefit) so the adaptive
+    // filter has a genuine reverberant tail to learn, as in a real hall.
     const std::vector<std::pair<double, float>> roomTaps = {
         { 5.0, 0.5f }, { 80.0, 0.3f }, { 180.0, 0.2f }, { 320.0, 0.15f }
     };
@@ -306,9 +279,8 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, float amountPercent,
         printf("  FAILED to set mono layout\n");
         return false;
     }
-    // Everything else stays at its plugin default (Tail Length 800ms, Max
-    // Reduction -12 dB, Response 20 ms) -- exactly what a user hears out of
-    // the box.
+    // Everything else stays at its plugin default (Tail Length 800ms, Range
+    // -12 dB, Time 30 ms) -- exactly what a user hears out of the box.
     proc.getAmountParameter()->setValueNotifyingHost(proc.getAmountParameter()->convertTo0to1(amountPercent));
 
     const int blockSize = sampleRate / 100; // 10ms
@@ -347,7 +319,7 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, float amountPercent,
                 juce::jmax(0.0f, juce::Decibels::gainToDecibels(juce::jmax(inputLevel, levelFloorLinear)) -
                                      juce::Decibels::gainToDecibels(juce::jmax(outputLevel, levelFloorLinear)));
             suppressionAtCheckpoint.push_back(suppressionDb);
-            printf("  t=mute+%.2fs  input=%.4f output=%.4f  measured suppression=%.1f dB\n",
+            printf("  t=mute+%.2fs  input=%.4f output=%.4f  measured reduction=%.1f dB\n",
                    elapsedSincemuteS, inputLevel, outputLevel, suppressionDb);
             ++nextCheckpoint;
         }
@@ -356,24 +328,19 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, float amountPercent,
 
     const float finalDb = suppressionAtCheckpoint.empty() ? -1.0f : suppressionAtCheckpoint.back();
     const bool pass = finalDb >= 0.0f && finalDb < 3.0f;
-    printf("  %s\n", pass ? "PASS -- measured suppression converges back to ~0dB after the reference goes silent"
-                           : "CHECK -- measured suppression stays elevated well after the reference is silent");
+    printf("  %s\n", pass ? "PASS -- measured reduction converges back to ~0dB after the reference goes silent"
+                           : "CHECK -- measured reduction stays elevated well after the reference is silent");
     return pass;
 }
 
-// User report: a fast near-end transient (kick/snare) makes the Suppression
-// meter show significant activity even with no real echo to remove.
-// Mechanism: Output at any instant reflects Input from getLatencySamples()
-// earlier (one frame of buffering plus the suppressor FIR's delay) --
-// comparing it against
-// the *live* Input peak means a sharp attack sitting in the current Input
-// block hasn't reached the Output yet, and looks "suppressed" purely from
-// that timing gap. Confirms getInputPeakLevelPostDelayed() fixes it: a
-// steady near-end bed (no leak, nothing to genuinely suppress) gets one
-// short, loud click injected, and both the naive (live-input) and the
-// delay-compensated formula are polled at fine (128-sample) resolution
-// through the click to show the naive one spiking while the compensated one
-// stays flat.
+// A fast transient (kick/snare) with no PA to remove must not show on the
+// Reduction meter. Output at any instant reflects Input from
+// getLatencySamples() earlier, so comparing it against the *live* Input
+// peak makes a sharp attack that hasn't reached the Output yet look
+// "reduced" purely from that timing gap. A steady crowd bed (no leak) gets
+// one short, loud click injected, and both the naive (live-input) and the
+// delay-compensated formula are polled at 128-sample resolution through
+// the click: the naive one must spike, the compensated one stay flat.
 bool testSuppressionMeterTransientAlignment(int sampleRate) {
     printf("\n=== Suppression meter transient alignment test (%d Hz) ===\n", sampleRate);
     const double totalDurationS = 3.0;
@@ -385,9 +352,9 @@ bool testSuppressionMeterTransientAlignment(int sampleRate) {
     std::mt19937 audienceRng(33), clickRng(34);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
-    // Steady near-end bed, no PA leak at all -- nothing here should ever
-    // register as "suppressed"; this isolates the transient-alignment
-    // artifact from any real echo-cancellation activity.
+    // Steady crowd bed, no PA leak at all -- nothing here should ever
+    // register as reduced; this isolates the transient-alignment artifact
+    // from any real cancellation.
     std::vector<float> mic(static_cast<size_t>(n), 0.0f);
     for (auto& v : mic) v = dist(audienceRng);
     HighPassFilterChain audienceHpf;
@@ -452,11 +419,11 @@ bool testSuppressionMeterTransientAlignment(int sampleRate) {
     }
     proc.releaseResources();
 
-    printf("  Worst apparent suppression through the click: naive(live input)=%.1f dB  delay-compensated=%.1f dB\n",
+    printf("  Worst apparent reduction through the click: naive(live input)=%.1f dB  delay-compensated=%.1f dB\n",
            worstNaiveDb, worstCompensatedDb);
 
     const bool pass = worstNaiveDb > 6.0f && worstCompensatedDb < 2.0f;
-    printf("  %s\n", pass ? "PASS -- delay compensation removes the transient's false suppression reading"
+    printf("  %s\n", pass ? "PASS -- delay compensation removes the transient's false reduction reading"
                            : "CHECK -- transient alignment fix isn't behaving as expected");
     return pass;
 }
@@ -464,7 +431,7 @@ bool testSuppressionMeterTransientAlignment(int sampleRate) {
 // Confirms that changing Tail Length mid-stream never produces a spike, and
 // that it applies live: the canceller keeps the near part of its filter, so
 // the output must not drop out either.
-bool testClickFreeRoomChange(int sampleRate) {
+bool testClickFreeTailLengthChange(int sampleRate) {
     printf("\n=== Click-free Tail Length change test (%d Hz) ===\n", sampleRate);
     const double durationS = 6.0;
     auto signals = makeSignals(sampleRate, durationS);
@@ -493,9 +460,8 @@ bool testClickFreeRoomChange(int sampleRate) {
         if (a > inputPeak * 1.5f && spikeIndex < 0) spikeIndex = static_cast<int>(i);
     }
 
-    // A dropout would show as a run of exact zeros (the old AEC3 engine
-    // restarted with zero-padded FIFO reads here); the Kalman filter must
-    // carry on without one.
+    // A dropout would show as a run of exact zeros; the filter must carry
+    // on without one.
     const int minZeroRun = sampleRate / 200; // ~5ms
     int zeroRunStart = -1, zeroRun = 0, foundZeroRunAt = -1;
     for (size_t i = static_cast<size_t>(std::max(0, changeSampleIndex)); i < output.size(); ++i) {
@@ -520,71 +486,61 @@ bool testClickFreeRoomChange(int sampleRate) {
     return pass;
 }
 
-// Confirms the Large preset actually earns its CPU cost: a room with echo
-// energy spread out to ~320ms should cancel much better with a 400ms filter
-// than with the 52ms Small default.
-bool testLargeRoomBenefit(int sampleRate) {
-    printf("\n=== Large room tail benefit test (%d Hz) ===\n", sampleRate);
+// Confirms a longer Tail Length earns its CPU cost: a room with echo energy
+// spread out to ~320ms should cancel better with a 400ms filter than with a
+// 50ms one.
+bool testLongTailBenefit(int sampleRate) {
+    printf("\n=== Long Tail Length benefit test (%d Hz) ===\n", sampleRate);
     const double durationS = 6.0;
     const std::vector<std::pair<double, float>> roomTaps = {
         { 5.0, 0.5f }, { 80.0, 0.3f }, { 180.0, 0.2f }, { 320.0, 0.15f }
     };
-    // Lightly-filtered (broadband) reference: distinguishing a 52ms filter
+    // Lightly-filtered (broadband) reference: distinguishing a 50ms filter
     // from a 400ms one requires a reference that a short filter can't
     // "cheat" on via short-lag self-correlation (see makeSignals comment).
     auto signals = makeSignals(sampleRate, durationS, roomTaps, /*lowpassAlpha*/ 0.3f, /*lowpassStages*/ 1);
 
-    auto runWithRoomSize = [&](int roomSizeIndex) {
+    auto runWithTail = [&](int tailIndex) {
         PAEchoCancellerAudioProcessor proc;
         setMonoLayout(proc);
-        auto* param = proc.getParameters()[0];
-        param->setValueNotifyingHost(static_cast<float>(roomSizeIndex) / static_cast<float>(param->getNumSteps() - 1));
+        auto* param = proc.getTailLengthParameter();
+        param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(tailIndex)));
         return runThroughProcessor(proc, sampleRate, signals.reference, signals.mic);
     };
 
-    auto smallOutput = runWithRoomSize(0);
-    auto largeOutput = runWithRoomSize(2);
+    auto shortOutput = runWithTail(0); // 50ms
+    auto longOutput = runWithTail(2);  // 400ms
 
     // Voice occupies 2.0-4.0s here, so measure the PA-only tail (4.0-6.0s):
     // past both the canceller's start-up and the voice burst.
     const double picS0 = durationS * (4.0 / 6.0), picS1 = durationS;
     const double mic_pa = rmsDbfs(signals.mic, sampleRate, picS0, picS1);
-    const double small_pa = rmsDbfs(smallOutput, sampleRate, picS0, picS1);
-    const double large_pa = rmsDbfs(largeOutput, sampleRate, picS0, picS1);
+    const double short_pa = rmsDbfs(shortOutput, sampleRate, picS0, picS1);
+    const double long_pa = rmsDbfs(longOutput, sampleRate, picS0, picS1);
 
-    printf("  PA-only window: mic=%.1f dBFS  Small=%.1f dBFS (%.1f dB reduction)  Large=%.1f dBFS (%.1f dB reduction)\n",
-           mic_pa, small_pa, mic_pa - small_pa, large_pa, mic_pa - large_pa);
+    printf("  PA-only window: mic=%.1f dBFS  50ms=%.1f dBFS (%.1f dB reduction)  400ms=%.1f dBFS (%.1f dB reduction)\n",
+           mic_pa, short_pa, mic_pa - short_pa, long_pa, mic_pa - long_pa);
 
     // The suppressor after the filter compensates somewhat for a too-short
     // filter, so a dramatic dB gap isn't the right bar. What matters is
-    // that Large is consistently better, never worse, on a tail the Small
-    // filter physically can't reach (echo taps out to 320ms vs its 50ms).
-    const bool pass = (large_pa < small_pa);
-    printf("  %s\n", pass ? "PASS -- Large outperforms Small on a long room tail (as expected)" : "CHECK");
+    // that 400ms is better, never worse, on a tail the 50ms filter
+    // physically can't reach (echo taps out to 320ms).
+    const bool pass = (long_pa < short_pa);
+    printf("  %s\n", pass ? "PASS -- 400ms outperforms 50ms on a long room tail (as expected)" : "CHECK");
     return pass;
 }
 
-// User report: an offline Reaper render of the same material sounds
-// different from live playback -- more HF content coming through,
-// throughout the *whole* rendered file, not just the start. Root-caused
-// 2026-07-28 (see testOfflineVsLiveSpectralShiftAfterWarmup below) to the
-// warm-up/priming mechanism that used to live in PluginProcessor.cpp, since
-// removed. With that mechanism gone, offline and live run the identical
-// code path unconditionally, so this should now show exact parity
-// regardless of material -- kept as a regression test against either the
-// warm-up mechanism, or any other realtime/non-realtime special-casing,
-// ever coming back. Builds PA content that turns on and off in segments
-// (simulating songs separated by quiet gaps, with continuous audience/crowd
-// noise underneath throughout) and measures HF content in several windows
-// spread across the *whole* file for both modes.
+// An offline bounce must sound the same as playback. Offline and live run
+// the identical code path, so this guards against any realtime/non-realtime
+// special-casing creeping in. Builds PA content that turns on and off in
+// segments (songs separated by quiet gaps, with continuous crowd noise
+// underneath) and measures HF content in windows across the *whole* file
+// for both modes.
 bool testOfflineVsLiveDynamicHfContent(int sampleRate) {
     printf("\n=== Offline vs live HF content on dynamic material test (%d Hz) ===\n", sampleRate);
     // Long enough (a few minutes, like a real recording, not a short clip)
     // to expose any *slow-accumulating* divergence between the live and
-    // offline adaptation paths that a short test would miss entirely --
-    // the offline path's 3s priming head-start could leave the filter on a
-    // permanently different trajectory for a long file even if a 24s test
-    // shows nothing.
+    // offline paths that a short test would miss entirely.
     const double durationS = 180.0;
     const int n = static_cast<int>(sampleRate * durationS);
 
@@ -610,8 +566,8 @@ bool testOfflineVsLiveDynamicHfContent(int sampleRate) {
         if (phase >= onS) reference[static_cast<size_t>(s)] = 0.0f;
     }
 
-    // Full-bandwidth, like testLimitHfGainToggle's ambient bed -- real crowd
-    // noise/clapping/cymbals have genuine HF energy, so this gives the
+    // Full-bandwidth -- real crowd noise/clapping/cymbals have genuine HF
+    // energy, so this gives the
     // suppressor's HF-band decisions something to actually act on. Present
     // continuously (crowd noise doesn't stop between songs).
     std::vector<float> ambient(static_cast<size_t>(n));
@@ -656,7 +612,7 @@ bool testOfflineVsLiveDynamicHfContent(int sampleRate) {
         return count > 0 ? std::sqrt(sumSq / count) : 0.0;
     };
 
-    // One window per 10s slice across the whole (now several-minute) file,
+    // One window per 10s slice across the whole several-minute file,
     // so both an immediate discrepancy and a slow-building one (growing
     // worse deeper into the file) would show up, not just a single late
     // snapshot.
@@ -688,46 +644,19 @@ bool testOfflineVsLiveDynamicHfContent(int sampleRate) {
     printf("  Early-file avg offset: %.1f dB, late-file avg offset: %.1f dB (drift: %.1f dB)\n",
            earlyAvg, lateAvg, lateAvg - earlyAvg);
 
-    // Live and offline now run the exact same code path unconditionally, so
-    // this should be near-exact (tiny residual is just measurement/floating-
-    // point noise) -- a real gap here would mean some new realtime/non-
-    // realtime special-casing crept back in.
+    // Live and offline run the exact same code path, so this should be
+    // near-exact -- a real gap here would mean some realtime/non-realtime
+    // special-casing crept in.
     const bool pass = std::abs(worstOffsetDb) < 0.2 && std::abs(lateAvg - earlyAvg) < 0.2;
     printf("  %s\n", pass ? "PASS -- live and offline are behaviorally identical, no drift"
                            : "CHECK -- offline and live diverge on HF content, or drift apart over the file");
     return pass;
 }
 
-// Real user-provided offline/online renders of actual PA material (not
-// synthetic) showed a large, broadband (not HF-specific) residual-leakage
-// gap between the two -- offline much worse specifically in the first
-// several seconds, converging (but not fully vanishing) over roughly the
-// following 5s. testOfflineVsLiveDynamicHfContent above (180s) found
-// nothing despite its length: its reference was stationary noise (same
-// spectral statistics, just gated fully on/off), and a first synthetic
-// attempt here with a one-time spectral-shape change at the old 3s priming
-// boundary *also* found nothing -- if anything, priming made offline's
-// first few seconds dramatically *better* than live (near-perfect
-// cancellation immediately, since the filter had already converged during
-// priming, vs. live's genuine cold-start ramp-up), the opposite of what the
-// real renders showed. Both of those used an unrealistically easy echo path
-// (a single dry delay tap) and unrealistically simple dynamics (one
-// amplitude level, or one step change). Real PA-in-a-hall leakage is a
-// multi-tap reverberant path (see testLargeRoomBenefit's roomTaps) with
-// genuinely continuous musical dynamics (loud/quiet passages throughout,
-// not one on/off step) -- retrying the same question under those more
-// realistic conditions *did* reproduce it: a linear adaptive filter re-fed
-// the *exact same* 3-second reverberant clip twice in a row (priming, then
-// replay) measurably overfit to that specific segment, showing up as a
-// worse-than-live residual for several seconds right after the priming
-// window ended, before reconverging -- confirming the root cause. The
-// priming/replay mechanism has since been removed entirely (2026-07-28,
-// user's explicit choice: offline now converges naturally like live, same
-// as it always did before the warm-up feature existed) -- this test is kept
-// as-is (same realistic room+dynamics construction) to confirm the fix: it
-// should now show no divergence at all, including in what used to be the
-// 0-3s priming window and the following few seconds.
-bool testOfflineVsLiveSpectralShiftAfterWarmup(int sampleRate) {
+// The same live/offline parity on harder material: a multi-tap reverberant
+// echo path with continuously varying musical dynamics, compared in 1s
+// windows from the very start, where the filter is still converging.
+bool testOfflineVsLiveReverberantRoom(int sampleRate) {
     printf("\n=== Offline vs live, realistic room + dynamics regression test (%d Hz) ===\n", sampleRate);
     const double durationS = 20.0;
     const int n = static_cast<int>(sampleRate * durationS);
@@ -737,7 +666,7 @@ bool testOfflineVsLiveSpectralShiftAfterWarmup(int sampleRate) {
 
     // Broadband-ish reference (lightly filtered, single stage) so a short
     // filter can't "cheat" via short-lag self-correlation -- same rationale
-    // as testLargeRoomBenefit.
+    // as testLongTailBenefit.
     std::vector<float> reference(static_cast<size_t>(n));
     for (auto& v : reference) v = dist(refRng);
     reference = onePoleLowpass(reference, 0.3f);
@@ -761,15 +690,14 @@ bool testOfflineVsLiveSpectralShiftAfterWarmup(int sampleRate) {
     }
     for (int s = 0; s < n; ++s) reference[static_cast<size_t>(s)] *= envelope[static_cast<size_t>(s)];
 
-    // Multi-tap reverberant room response, matching testLargeRoomBenefit's
-    // model -- extended slightly further to actually stress an 800ms Tail
-    // Length (the plugin's current default).
+    // Multi-tap reverberant room response, matching testLongTailBenefit's
+    // model -- extended slightly further to stress the default 800ms Tail
+    // Length.
     const std::vector<std::pair<double, float>> roomTaps = {
         { 5.0, 0.5f }, { 80.0, 0.3f }, { 180.0, 0.2f }, { 320.0, 0.15f }, { 500.0, 0.1f }
     };
 
-    // Leak only, no ambient/voice -- isolates the leak-cancellation residual
-    // cleanly rather than mixing in near-end content.
+    // Leak only, no crowd -- isolates the leak-cancellation residual.
     std::vector<float> mic(static_cast<size_t>(n), 0.0f);
     std::uniform_real_distribution<float> noiseFloorDist(-0.0005f, 0.0005f);
     for (int s = 0; s < n; ++s) {
@@ -820,30 +748,20 @@ bool testOfflineVsLiveSpectralShiftAfterWarmup(int sampleRate) {
     }
 
     printf("  Worst live/offline residual gap (either direction): %+.1f dB\n", worstOffsetDb);
-    // With the warm-up/priming mechanism removed, live and offline run the
-    // identical code path unconditionally -- this should now be near-zero
-    // everywhere, including in what used to be the 0-3s priming window
-    // (where this same test previously measured offline as dramatically
-    // *better*, and the following few seconds (where it measured offline as
-    // up to +2.1dB *worse* -- the confirmed root cause of the user-reported
-    // divergence). A real gap here would mean the regression (or something
-    // like it) came back.
+    // Live and offline run the identical code path, so this must be
+    // near-zero everywhere, including the first seconds.
     const bool pass = std::abs(worstOffsetDb) < 0.2;
-    printf("  %s\n", pass ? "PASS -- offline and live are identical throughout, including around the old priming boundary"
-                           : "CHECK -- offline and live diverge -- the warm-up regression (or similar) may have returned");
+    printf("  %s\n", pass ? "PASS -- offline and live are identical throughout, including the start"
+                           : "CHECK -- offline and live diverge");
     return pass;
 }
 
-// User's next hypothesis: does the offline/warm-up render path actually
-// pick up the *current* (non-default) parameter values, or could it end up
-// using constructor defaults instead? None of the tests above actually
-// checked this -- both offline comparisons so far left every parameter at
-// its default for both runs. This sets two deliberately different,
-// non-default settings (Amount 0% -- the filter alone -- vs. Amount 100%
-// with Max Reduction -24 dB) *before* prepareToPlay ever runs, then renders
-// the same material offline both ways -- if the settings were being
-// ignored, both renders would come out at the defaults and match; if
-// they're correctly applied, the strongest setting shows clearly less HF.
+// An offline render must use the *current* (non-default) parameter values,
+// not constructor defaults. Sets two deliberately different settings
+// (Strength 0% -- the filter alone -- vs. Strength 100% with Range -24 dB)
+// *before* prepareToPlay runs, then renders the same material offline both
+// ways: if the settings were ignored, both would come out at the defaults
+// and match; applied, the strongest setting shows clearly less HF.
 bool testOfflineRenderUsesCurrentSettingsNotDefaults(int sampleRate) {
     printf("\n=== Offline render respects current (non-default) settings test (%d Hz) ===\n", sampleRate);
     const double durationS = 24.0;
@@ -913,7 +831,7 @@ bool testOfflineRenderUsesCurrentSettingsNotDefaults(int sampleRate) {
     const double hfStrongest = measureHfRms(strongestOfflineOutput);
     const double reducedByDb = 20.0 * std::log10(hfFilterOnly / std::max(hfStrongest, 1e-12));
 
-    printf("  Offline HF (>6kHz) content: Amount 0%%=%.6f  Amount 100%%/-24dB=%.6f  (%.1f dB less)\n",
+    printf("  Offline HF (>6kHz) content: Strength 0%%=%.6f  Strength 100%%/-24dB=%.6f  (%.1f dB less)\n",
            hfFilterOnly, hfStrongest, reducedByDb);
 
     const bool pass = reducedByDb > 3.0;
@@ -922,16 +840,13 @@ bool testOfflineRenderUsesCurrentSettingsNotDefaults(int sampleRate) {
     return pass;
 }
 
-// Confirms the Dry/Wet blend's dry path is correctly delay-matched against
-// the wet (cancelled) path. This is the critical risk in any dry/wet design: if
-// the two paths are misaligned by even a few samples, blending them would
-// comb-filter the content they share (mostly voice) instead of cleanly
-// mixing. Checked by setting the mix to 0% (fully dry) and confirming the
-// output matches an independently-computed delayed-HPF'd copy of the mic
-// signal almost exactly -- any misalignment would show up as a large
-// difference here, not a small one.
+// Confirms Mix's dry path is delay-matched against the wet (cancelled)
+// path: misaligned by even a few samples, blending them would comb-filter
+// the content they share. At Mix 0% (fully dry) the output must equal an
+// independently computed HPF'd copy of the mic delayed by exactly
+// getLatencySamples(), under runThroughProcessor's irregular block sizes.
 bool testDryWetAlignment(int sampleRate) {
-    printf("\n=== Dry/Wet alignment test (%d Hz) ===\n", sampleRate);
+    printf("\n=== Mix dry-path alignment test (%d Hz) ===\n", sampleRate);
     const double durationS = 6.0;
     auto signals = makeSignals(sampleRate, durationS);
 
@@ -957,38 +872,11 @@ bool testDryWetAlignment(int sampleRate) {
 
     const int n = static_cast<int>(signals.mic.size());
 
-    // getLatencySamples() is an accurate estimate (it now includes AEC3's
-    // own precisely-measured internal processing delay -- see
-    // aec3InternalDelaySamples), but not necessarily exact to the sample:
-    // the FIFO's frame-accumulation wait still has some phase-dependent
-    // slop against this test's irregular host block-size pattern. Rather
-    // than assume the nominal figure is exact, search a window around it
-    // (coarse then fine) for the delay that actually minimizes the
-    // difference -- this test cares whether the HPF shape is right, not
-    // whether getLatencySamples() is sample-perfect (testDryWetCombFiltering
-    // already covers exact alignment directly, against the wet path).
-    // makeSignals' default taps heavily lowpass the reference (2-stage
-    // one-pole, alpha=0.9) before leaking it into mic -- almost all of that
-    // energy sits below the HPF's ~150Hz cutoff, so the "PA-leak-only"
-    // portion of the file (before voice.first joins at durationS*2/6) is
-    // very nearly silent *after* the HPF removes it. Comparing two
-    // near-silent signals via a relative-dB ratio is numerically
-    // ill-conditioned regardless of alignment (tiny denominators amplify
-    // any residual noise into large, meaningless dB swings) -- confirmed
-    // directly: an isolated-click delay measurement through this exact
-    // adversarial block pattern shows a stable ~850-875 sample delay
-    // throughout the whole file (matching nominal within the same slop
-    // already documented above), yet this correlation search reported wildly
-    // bad matches specifically in the pre-voice region at 44.1kHz. Starting
-    // the comparison once voice is present avoids that ill-conditioned
-    // region without touching what's actually being tested (the HPF shape).
-    // Skip a bit further than voice's own onset (durationS*2/6): voice
-    // bursts on/off (0.25s on, 0.15s off), so the first second or so after
-    // onset still mixes in enough low-energy "off" gaps that the average
-    // stays numerically marginal at 44.1kHz specifically (confirmed by
-    // scanning short sub-windows through this region directly) -- by
-    // durationS*3/6 enough on/off cycles have accumulated for a stable
-    // average.
+    // Compared from the middle of the file, once the voice bursts are in:
+    // makeSignals' default reference is heavily lowpassed, so most of the
+    // PA-only part sits below the HPF cutoff and is near-silent after it,
+    // where a relative-dB comparison is ill-conditioned. A search around the
+    // nominal latency reports where the best match actually is.
     const int voiceStartSample = static_cast<int>(durationS * (3.0 / 6.0) * sampleRate);
     auto relativeDiffDbAtLatency = [&](int latency) {
         const int compareStart = std::max({ std::max(latency, 0) + sampleRate / 2, voiceStartSample });
@@ -1015,63 +903,32 @@ bool testDryWetAlignment(int sampleRate) {
         const double db = relativeDiffDbAtLatency(nominalLatency + offset);
         if (db < bestDb) { bestDb = db; bestLatency = nominalLatency + offset; }
     }
-    // Fixed base for the fine pass -- iterating with "bestLatency + offset"
-    // while also updating bestLatency mid-loop would shift the window being
-    // scanned out from under itself instead of exploring a fixed range
-    // around the coarse result.
+    // Fixed base for the fine pass, so updating bestLatency doesn't move
+    // the window being scanned.
     const int coarseBestLatency = bestLatency;
     for (int offset = -coarseStep; offset <= coarseStep; ++offset) {
         const double db = relativeDiffDbAtLatency(coarseBestLatency + offset);
         if (db < bestDb) { bestDb = db; bestLatency = coarseBestLatency + offset; }
     }
 
-    printf("  Nominal latency=%d, best-matching latency=%d (%+d samples), difference at best: %.1f dB (expect < -20dB)\n",
+    printf("  Nominal latency=%d, best-matching latency=%d (%+d samples), difference at best: %.1f dB (expect < -60dB)\n",
            nominalLatency, bestLatency, bestLatency - nominalLatency, bestDb);
 
-    // Confirms the HPF shape is correct (the actual thing this test is
-    // for) and that the discovered delay isn't wildly off from the
-    // nominal estimate (a sanity check against a genuine alignment bug,
-    // not just phase-dependent slop).
-    //
-    // -20dB rather than -40dB: this test's block-size *cycling* pattern
-    // (runThroughProcessor's {512,37,129,1,4096,256,7}, changing every
-    // call, deliberately adversarial -- no real host does this) means the
-    // FIFO's phase relationship never settles into the single stable delay
-    // a constant or slowly-varying block size gets. Confirmed directly: at
-    // a *fixed* block size (512 or 128 samples), this same comparison
-    // measures effectively perfect alignment (no measurable difference at
-    // all) -- testDryWetCombFiltering below covers exactly that realistic
-    // case. -20dB here still fails hard on a genuine alignment regression
-    // (which showed as -4.7dB before this fix), just not as strict as a
-    // fixed-block-size measurement could be.
-    const bool pass = bestDb < -20.0 && std::abs(bestLatency - nominalLatency) < sampleRate / 20; // < 50ms
-    printf("  %s\n", pass ? "PASS -- dry path's HPF shape is correct and close to the expected latency"
-                           : "CHECK -- misalignment would show up as a much larger difference here");
+    // The dry path must match at exactly the reported latency.
+    const bool pass = bestDb < -60.0 && bestLatency == nominalLatency;
+    printf("  %s\n", pass ? "PASS -- dry path is the HPF'd input at exactly the reported latency"
+                           : "CHECK -- dry path is misaligned or differs from the HPF'd input");
     return pass;
 }
 
 
-// User report: audible comb filtering with Dry/Wet Mix at 50%. Suspected
-// root cause: dryDelayFifos is pre-filled with a *fixed* silence amount
-// (reportedLatencySamples, i.e. one AEC3 frame) meant to approximate the
-// wet path's buffering delay -- but the wet path's *actual* delay (samples
-// in micInFifos waiting for a full 480-sample frame, plus samples in
-// micOutFifos waiting to be drained at the host's block rate) depends on
-// the phase between the host's block size and AEC3's fixed frame size, and
-// was already measured (see the Suppression meter transient-alignment
-// work) to exceed the nominal one-frame estimate by a wide margin at some
-// block sizes. testDryWetAlignment above can't catch this: it only checks
-// the dry path against an externally-computed delay using the *same*
-// reportedLatencySamples value being tested, entirely self-referential.
-// This instead measures where an isolated click actually lands in a
-// fully-wet run vs. a fully-dry run of the exact same material, with no
-// reference signal at all (so AEC3 stays transparent -- gain near 1 -- and
-// the "wet" path is essentially just HPF + FIFO latency, isolating the
-// timing question from anything AEC3-decision-specific), using a small,
-// non-frame-aligned host block size like a real low-latency live rig would
-// use, rather than the mixed block-size pattern testDryWetAlignment uses.
+// Mix at 50% must not comb-filter: an isolated click must land at the same
+// sample in a fully wet and a fully dry run. With no reference signal the
+// canceller passes the click through, so the "wet" path is just HPF plus
+// buffering, isolating the timing question. Uses a small, non-frame-aligned
+// host block size like a low-latency live rig.
 bool testDryWetCombFiltering(int sampleRate) {
-    printf("\n=== Dry/Wet comb-filtering test (%d Hz) ===\n", sampleRate);
+    printf("\n=== Mix comb-filtering test (%d Hz) ===\n", sampleRate);
     const double durationS = 3.0;
     const int n = static_cast<int>(sampleRate * durationS);
     const int clickSample = n / 2;
@@ -1145,58 +1002,27 @@ bool testDryWetCombFiltering(int sampleRate) {
     printf("  Click peak position (block=%d): wet-only=%d  dry-only=%d  (mismatch: %d samples, %.2fms)\n",
            blockSize, wetPeakPos, dryPeakPos, mismatchSamples, 1000.0 * mismatchSamples / sampleRate);
 
-    // A residual few samples (well under 1ms) is expected: it's peak-
-    // detection granularity, not the ~400+ sample structural misalignment
-    // this test was built to catch. 20 samples (~0.4ms at 48kHz) is a
-    // generous margin that would still fail hard if the real bug came back.
-    const bool pass = std::abs(mismatchSamples) <= 20;
+    const bool pass = mismatchSamples == 0;
     printf("  %s\n", pass ? "PASS -- wet and dry paths are sample-accurately aligned"
                           : "CHECK -- wet/dry misalignment found -- this is exactly what causes comb filtering");
     return pass;
 }
 
-// Confirms getLatencySamples() reports the TRUE, accurate input-to-output
-// delay at all three required sample rates -- not a re-derived estimate
-// from a separate calibration harness (which would risk a methodology
-// mismatch, as happened once already with mismatched click shapes/tail-
-// length configs between the plugin's own calibration and a diagnostic
-// harness), but a direct end-to-end measurement through the real
-// PAEchoCancellerAudioProcessor itself: an isolated click through the mic
-// input, silent reference (so AEC3 stays transparent, gain ~1, isolating
-// pure buffering/processing delay from any echo-removal decision), 100%
-// wet, small non-frame-aligned block size like a real low-latency rig.
-// Wherever the click's peak actually lands in the output is the true
-// delay -- compared directly against what getLatencySamples() reported.
+// Confirms getLatencySamples() is the true input-to-output delay at each
+// sample rate, measured end to end: an isolated click through the mic,
+// silent reference (so the canceller passes it through), 100% wet, small
+// non-frame-aligned block size. Where the click lands is the true delay.
+// testLatencyMatrix covers the full sweep of rates, block sizes and modes.
 bool testGetLatencySamplesAccuracyAllRates() {
     bool allPass = true;
     for (int sampleRate : { 44100, 48000, 96000 }) {
         printf("\n=== getLatencySamples() accuracy test (%d Hz) ===\n", sampleRate);
 
-        // The click must land well past AEC3's own ~2.5s initial-state
-        // bootstrap (it behaves differently -- and reports a different
-        // internal delay -- while still converging), matching how
-        // measureAec3InternalDelaySamples primes 300 frames (3s) of silence
-        // before its own calibration click. An earlier version of this test
-        // placed the click at just 1.0s in (durationS/2 with durationS=2.0),
-        // still inside that bootstrap window, which showed up as a false
-        // ~0.55ms divergence at 48/96kHz (but not 44.1kHz, apparently not
-        // enough to move the needle there) -- not a real getLatencySamples()
-        // bug, just an apples-to-oranges comparison against a calibration
-        // that measures its own delay only after settling.
         const double durationS = 5.0;
         const int n = static_cast<int>(sampleRate * durationS);
         const int clickSample = static_cast<int>(sampleRate * 3.5);
         const int clickLenSamples = std::max(1, static_cast<int>(sampleRate * 0.001)); // ~1ms sharp click
 
-        // Seed 81, matching measureAec3InternalDelaySamples's own calibration
-        // click exactly (same formula too): a decaying-*random*-noise click's
-        // true peak sample lands at a seed-dependent position somewhere
-        // within its envelope, not deterministically at sample 0, so
-        // comparing against a *differently*-seeded click here would measure
-        // that peak-position difference as if it were a getLatencySamples()
-        // error. Matching the seed cancels that ambiguity out, the same way
-        // testDryWetCombFiltering's wet-vs-dry comparison stays exact by
-        // reusing one click for both of its measurements.
         std::mt19937 clickRng(81);
         std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
         std::vector<float> mic(static_cast<size_t>(n), 0.0f);
@@ -1206,7 +1032,7 @@ bool testGetLatencySamplesAccuracyAllRates() {
             const float envelope = 1.0f - static_cast<float>(i) / static_cast<float>(clickLenSamples);
             mic[static_cast<size_t>(s)] = 0.8f * envelope * dist(clickRng);
         }
-        const std::vector<float> reference(static_cast<size_t>(n), 0.0f); // silent: AEC3 stays transparent
+        const std::vector<float> reference(static_cast<size_t>(n), 0.0f); // silent: nothing to cancel
 
         PAEchoCancellerAudioProcessor proc;
         if (!setMonoLayout(proc)) {
@@ -1243,19 +1069,9 @@ bool testGetLatencySamplesAccuracyAllRates() {
         }
         proc.releaseResources();
 
-        // Ground truth is where an *independently* HPF-filtered copy of this
-        // exact click shows its own peak, not the raw click's own position:
-        // the plugin's input HPF (a sharp 4th-order 150Hz Butterworth)
-        // reshapes a short decaying-noise click enough that the single
-        // loudest sample can land tens of samples away from where it sat in
-        // the unfiltered click, entirely separate from any real processing
-        // delay. Comparing raw-click-position to HPF'd-and-AEC3'd output
-        // measures that reshaping as if it were a getLatencySamples() error
-        // (confirmed: real, and reproducible, at 48/96kHz specifically).
-        // Filtering the same click the same way the plugin does (matching
-        // its default cutoff) and finding *that* copy's own peak cancels the
-        // reshaping out, the same way testDryWetAlignment's expectedChain
-        // does for the dry-path HPF comparison.
+        // Ground truth is where an independently HPF'd copy of this exact
+        // click peaks, not the raw click: the 4th-order input HPF reshapes a
+        // short noise click enough to move its loudest sample.
         HighPassFilterChain groundTruthHpf;
         groundTruthHpf.setCutoff(sampleRate, proc.getHpfFrequencyParameter()->get());
         std::vector<float> expectedClick(mic.size());
@@ -1285,48 +1101,17 @@ bool testGetLatencySamplesAccuracyAllRates() {
                reportedLatency, 1000.0 * reportedLatency / sampleRate,
                measuredDelay, 1000.0 * measuredDelay / sampleRate);
 
-        // getLatencySamples() is a worst-case bound on the FIFO's frame-
-        // accumulation wait, not an exact figure -- the true instantaneous
-        // delay depends on the phase between the host's block size and
-        // frameSize, and can legitimately land anywhere from that worst
-        // case down to noticeably less for a favorable phase. Confirmed
-        // directly: re-running this same measurement at several different
-        // fixed block sizes (128/200/333/512/63) at 48kHz gave 872/864/901/
-        // 872/901 -- varying with block size, as expected for a phase
-        // effect, but never once exceeding the reported 910. So the
-        // contract to check is one-sided: reported must never
-        // UNDER-estimate the real delay (that's the actual safety property
-        // a host's delay compensation depends on), and shouldn't over-
-        // estimate by more than about one frame's worth of legitimate
-        // phase-dependent slack.
-        const int frameSizeForCheck = static_cast<int>(std::round(sampleRate / 100.0));
-        const bool pass = measuredDelay <= reportedLatency && reportedLatency - measuredDelay <= frameSizeForCheck;
-        printf("  %s\n", pass ? "PASS -- getLatencySamples() is a safe, accurate upper bound on the real delay"
-                              : "CHECK -- getLatencySamples() under-reports, or over-reports by more than a frame");
+        const bool pass = measuredDelay == reportedLatency;
+        printf("  %s\n", pass ? "PASS -- getLatencySamples() equals the real delay"
+                              : "CHECK -- getLatencySamples() differs from the real delay");
         allPass = allPass && pass;
     }
     return allPass;
 }
 
-// Confirms the HPF is a genuine 4th-order (24dB/octave) Butterworth
-// response -- not, say, a single 2nd-order (12dB/octave) section or two
-// identical (non-Butterworth-aligned) stages -- by checking measured
-// attenuation against the textbook Butterworth formula
-// |H|^2 = 1 / (1 + (fc/f)^(2n)) at a few key points relative to cutoff.
-// PA Reference Trim applies a plain linear gain to the reference before
-// AEC3 ever sees it (see the comment on referenceGainParam in
-// PluginProcessor.h for why this is our own code rather than AEC3's
-// render_levels.render_power_gain_db). This does NOT verify it fixes
-// over-suppression of correlated content -- an earlier attempt at that
-// test showed no measurable effect: AEC3's absolute-level gates
-// (echo_audibility, render_levels) sit around -70dBFS-equivalent, so a
-// reference that's merely too loud (not clipping, not near-silent) never
-// crosses them, and the masking-threshold ratios that actually decide
-// suppression strength are computed from quantities that rescale together
-// with the reference, cancelling out a pure gain change. So this control
-// is a straightforward gain-staging utility (for a reference that's
-// clipping or too quiet to give AEC3 a usable signal), not an artifact
-// fix -- this test just confirms the gain is applied correctly.
+// PA Reference Trim is a plain linear gain on the reference before the
+// canceller sees it, for a feed that is clipping or too quiet. Confirms the
+// gain is applied correctly.
 bool testReferenceGainTrim() {
     printf("\n=== PA Reference Trim test ===\n");
     const int sampleRate = 48000;
@@ -1412,21 +1197,13 @@ bool testReferenceMeterIncludesTrim() {
     return ok;
 }
 
-// Confirms getStateInformation/setStateInformation actually round-trip
-// every parameter. These were empty no-ops for a while -- harmless in this
-// standalone harness (which never calls them), but in a real host it means
-// every parameter silently resets to its constructor default on every
-// project reload or plugin reinsert, discarding whatever the user tuned.
 // JUCE documents prepareToPlay's samplesPerBlock as the *expected* block
-// size, not a hard ceiling, and hosts genuinely exceed it -- most relevant
-// here, when switching between live playback and an offline render, which is
-// exactly this plugin's workflow. Every scratch buffer and FIFO is sized
-// against that promised figure, so an oversized block used to index straight
-// past the end of them: a confirmed segfault (SIGSEGV), reproduced with
-// prepared=256 / actual=4096, not a theoretical concern. processBlock now
-// splits oversized blocks into chunks of at most preparedBlockSize. Checks
-// both that it survives AND that the audio is actually right afterwards --
-// silently emitting zeros would "pass" a crash-only test.
+// size, not a hard ceiling, and hosts genuinely exceed it -- notably when
+// switching between playback and an offline render. Every scratch buffer
+// and FIFO is sized against that figure, so processBlock splits oversized
+// blocks into chunks (an overrun here was once a real segfault). Checks
+// both that it survives AND that the audio is right afterwards -- silently
+// emitting zeros would "pass" a crash-only test.
 bool testOversizedHostBlock(int sampleRate) {
     printf("\n=== Oversized host block test (%d Hz) ===\n", sampleRate);
     const int preparedBlock = 256;
@@ -1486,8 +1263,8 @@ bool testOversizedHostBlock(int sampleRate) {
 
 // An IIR's feedback state latches non-finite values permanently: one NaN
 // entering the delay line keeps recirculating, so every later output is NaN
-// too, and AEC3's adaptive filter downstream latches it as well. Measured
-// before the guard in HighPassFilterChain existed: a 5ms NaN burst left the
+// too, and the canceller's adaptive filter downstream would latch it as
+// well. Without the guard in HighPassFilterChain a 5ms NaN burst left the
 // output 100% non-finite for the whole rest of the run, with no recovery.
 // For live use that means one glitched frame from anything upstream silently
 // kills an audience mic for the rest of the show. Confirms the plugin both
@@ -1511,7 +1288,7 @@ bool testNonFiniteInputRecovery(int sampleRate) {
     for (int s = 0; s < n; ++s)
         mic[static_cast<size_t>(s)] = (s - leakDelay >= 0) ? 0.6f * reference[static_cast<size_t>(s - leakDelay)] : 0.0f;
 
-    // A burst of both NaN and Inf at t=6s -- 5ms, i.e. well under one AEC3 frame.
+    // A 5ms burst of both NaN and Inf at t=6s.
     const int burstStart = static_cast<int>(sampleRate * 6.0);
     const int burstLen = static_cast<int>(sampleRate * 0.005);
     for (int i = 0; i < burstLen && burstStart + i < n; ++i)
@@ -1607,12 +1384,10 @@ bool testLatencyInvariantAcrossTailLengths() {
     return pass;
 }
 
-// Changing Tail Length mid-stream must never stall the audio callback (the
-// AEC3 engine of 1.0.x once rebuilt inside processBlock, ~150ms+ of blocking
-// work, a guaranteed live-rig dropout). The Kalman filter only drops or adds
-// partitions, so no single callback may take longer than a generous
-// "something is very wrong" threshold, and the reported latency must not
-// move.
+// Changing Tail Length mid-stream must never stall the audio callback: the
+// filter only drops or adds partitions, so no single callback may take
+// longer than a generous "something is very wrong" threshold, and the
+// reported latency must not move.
 bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
     printf("\n=== Live Tail Length change is non-blocking test (%d Hz) ===\n", sampleRate);
     const double durationS = 10.0;
@@ -1666,15 +1441,14 @@ bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
     proc.releaseResources();
 
     // 80ms: far above any sane per-block cost (the steady-state cost of a
-    // 512-sample block is well under 1ms even at 96kHz) but far below the
-    // ~150ms+ the old inline rebuild burned -- loose enough to not flake on
-    // a loaded machine, tight enough that a reintroduced inline rebuild
-    // fails it every time.
+    // 512-sample block is well under 1ms even at 96kHz) -- loose enough not
+    // to flake on a loaded machine, tight enough to catch a rebuild or an
+    // allocation on the audio thread.
     const bool noStall = maxBlockMsAfterChange < 80.0;
     const bool latencyStable = (latencyAfter == latencyBefore);
 
     printf("  Change requested at sample %d\n", changeAtSample);
-    printf("  Max single processBlock after change: %.2f ms (limit 80ms; old inline rebuild: ~150ms+)\n",
+    printf("  Max single processBlock after change: %.2f ms (limit 80ms)\n",
            maxBlockMsAfterChange);
     printf("  Reported latency: %d -> %d samples (%s)\n", latencyBefore, latencyAfter,
            latencyStable ? "unchanged, as designed" : "CHANGED");
@@ -1685,11 +1459,9 @@ bool testLiveTailLengthChangeNonBlocking(int sampleRate) {
 }
 
 // A host may apply a session's saved Tail Length after prepareToPlay (or
-// re-prepare with defaults before a bounce). With the 1.0.x AEC3 engine that
-// went through a background rebuild polled on wall-clock time, so at bounce
-// speed seconds of audio ran on the wrong filter. The Kalman filter applies
-// Tail Length at the next block, so a bounce with the tail set after
-// prepareToPlay must match one with it set before, from the start.
+// re-prepare with defaults before a bounce). The filter applies Tail Length
+// at the next block, so a bounce with the tail set after prepareToPlay must
+// match one with it set before, from the start.
 bool testFastBounceTailLengthAppliedPromptly(int sampleRate) {
     printf("\n=== Fast-bounce Tail Length applied promptly test (%d Hz) ===\n", sampleRate);
     const double durationS = 14.0; // makeSignals puts the voice burst at ~4.7-9.3s
@@ -1797,6 +1569,8 @@ bool testDelayStatsExposed(int sampleRate) {
     return pass;
 }
 
+// Confirms getStateInformation/setStateInformation round-trip every
+// parameter, so a session reload restores what the user dialed in.
 bool testStateSaveRestore() {
     printf("\n=== State save/restore round-trip test ===\n");
 
@@ -1827,7 +1601,7 @@ bool testStateSaveRestore() {
         std::abs(restored.getReferenceGainParameter()->get() + 4.0f) < 0.05f &&
         std::abs(restored.getDryWetMixParameter()->get() - 37.0f) < 0.5f;
 
-    printf("  Tail Length=%d Amount=%.1f%% MaxReduction=%.1fdB Response=%.1fms HPF=%.1fHz Trim=%.1fdB DryWet=%.1f%%\n",
+    printf("  Tail Length=%d Strength=%.1f%% Range=%.1fdB Time=%.1fms HPF=%.1fHz Trim=%.1fdB Mix=%.1f%%\n",
            restored.getTailLengthParameter()->getIndex(),
            static_cast<double>(restored.getAmountParameter()->get()),
            static_cast<double>(restored.getMaxReductionParameter()->get()),
@@ -1911,7 +1685,7 @@ bool testOldSessionRestore() {
                                && atDefault(restored.getResponseParameter());
     const bool sameParameterCount = restored.getParameters().size() == fresh.getParameters().size();
 
-    printf("  Tail=%d HPF=%.1fHz Trim=%.1fdB Mix=%.1f%% | Amount=%.1f%% MaxReduction=%.1fdB Response=%.1fms\n",
+    printf("  Tail=%d HPF=%.1fHz Trim=%.1fdB Mix=%.1f%% | Strength=%.1f%% Range=%.1fdB Time=%.1fms\n",
            restored.getTailLengthParameter()->getIndex(),
            static_cast<double>(restored.getHpfFrequencyParameter()->get()),
            static_cast<double>(restored.getReferenceGainParameter()->get()),
@@ -1925,17 +1699,17 @@ bool testOldSessionRestore() {
     return pass;
 }
 
-// Amount, Max Reduction and Response are the suppressor's whole interface,
-// so pin down what each one means on the synthetic material:
-//  - Amount 0% is the adaptive filter alone, and so is Max Reduction 0 dB
-//    at any Amount (the suppressor may not cut anywhere): the two outputs
-//    must be identical.
-//  - More Amount removes more PA (25% < 100% in the PA-only window).
-//  - A deeper Max Reduction lets 100% go further than a shallow one.
+// Strength, Range and Time are the suppressor's whole interface, so pin
+// down what each one means on the synthetic material:
+//  - Strength 0% is the adaptive filter alone, and so is Range 0 dB at any
+//    Strength (the suppressor may not cut anywhere): the two outputs must be
+//    identical.
+//  - More Strength removes more PA (25% < 100% in the PA-only window).
+//  - A deeper Range lets 100% go further than a shallow one.
 //  - Every setting applies live: changing all three mid-stream must not
 //    produce a spike or a dropout.
 bool testSuppressorControls(int sampleRate) {
-    printf("\n=== Amount / Max Reduction / Response test (%d Hz) ===\n", sampleRate);
+    printf("\n=== Bleed suppressor Strength / Range / Time test (%d Hz) ===\n", sampleRate);
     const double durationS = 6.0;
     auto signals = makeSignals(sampleRate, durationS);
 
@@ -1963,10 +1737,10 @@ bool testSuppressorControls(int sampleRate) {
     const double picS0 = 0.5, picS1 = durationS * (2.0 / 6.0); // PA-only window, as testBasicCancellation
     const double mic = rmsDbfs(signals.mic, sampleRate, picS0, picS1);
     const auto red = [&](const std::vector<float>& out) { return mic - rmsDbfs(out, sampleRate, picS0, picS1); };
-    printf("  PA-only reduction: filter only %.1f dB, Amount 25%% %.1f dB, 100%% %.1f dB; "
+    printf("  PA-only reduction: filter only %.1f dB, Strength 25%% %.1f dB, 100%% %.1f dB; "
            "100%% at -3 dB %.1f dB, at -24 dB %.1f dB\n",
            red(filterOnly), red(mid), red(full), red(fullShallow), red(fullDeep));
-    printf("  Max difference, Amount 0%% vs Max Reduction 0 dB: %.3g\n", maxDiff);
+    printf("  Max difference, Strength 0%% vs Range 0 dB: %.3g\n", maxDiff);
 
     // Live changes of all three, mid-stream.
     PAEchoCancellerAudioProcessor live;
@@ -2013,16 +1787,15 @@ bool testSuppressorControls(int sampleRate) {
     const bool liveClean = outputPeak < inputPeak * 1.5f && longestZeroRunAfterStart < sampleRate / 200;
     const bool pass = zeroIsFilterOnly && amountWorks && floorWorks && liveClean;
     printf("  %s%s%s%s%s\n", pass ? "PASS" : "CHECK", zeroIsFilterOnly ? "" : " -- 0 dB/0% DIFFER",
-           amountWorks ? "" : " -- AMOUNT NOT MONOTONIC", floorWorks ? "" : " -- MAX REDUCTION HAS NO EFFECT",
+           amountWorks ? "" : " -- STRENGTH NOT MONOTONIC", floorWorks ? "" : " -- RANGE HAS NO EFFECT",
            liveClean ? "" : " -- LIVE CHANGE GLITCHED");
     return pass;
 }
 
 // Bypass check (a): with bypass engaged, the output must be the TRULY raw
 // input -- HPF included in "unmodified", so content below the 150Hz cutoff
-// must survive -- delayed by exactly the latency-matched amount, while an
-// actively-cancelling AEC3 (live reference, real leakage in the mic) runs
-// underneath. The dry-path tap can't provide this (it's post-HPF), which
+// must survive -- delayed by exactly the reported latency, while the
+// canceller (live reference, real leakage in the mic) runs underneath. The dry-path tap can't provide this (it's post-HPF), which
 // is exactly what this test would catch if the bypass were wired there: the
 // comparison against the raw signal fails loudly on the missing 40Hz
 // content, while the post-HPF control comparison below confirms the test
@@ -2033,7 +1806,7 @@ bool testBypassRawPassthrough(int sampleRate) {
     const int n = static_cast<int>(sampleRate * durationS);
 
     // Reference: broadband-ish noise, leaked into the mic at 5ms/0.5 so
-    // AEC3 has genuine echo to chase -- bypass must pass the input through
+    // the canceller has genuine echo to chase -- bypass must pass the input through
     // regardless of how hard the canceller is working. Plus a 40Hz
     // component the HPF would strip (the "truly raw" sentinel) and
     // independent noise standing in for audience content.
@@ -2091,11 +1864,10 @@ bool testBypassRawPassthrough(int sampleRate) {
     // what was actually processed.
     const int processedEnd = pos;
 
-    // The bypass path moves samples through FIFOs by plain copy, so at SOME
-    // integer delay the match should be exact (not merely close) once the
-    // pipeline has settled. Find that delay by direct search around the
-    // nominal figure, then measure the residual at it.
-    const int frameSize = sampleRate / 100;
+    // The bypass path moves samples through FIFOs by plain copy, so at the
+    // reported delay the match must be exact, not merely close. A search
+    // around it reports where the best match actually is.
+    const int searchMargin = 512;
     const int compareStart = 2 * sampleRate; // well past startup fill
     auto rmsDiffAtDelay = [&](const std::vector<float>& expected, int delay) {
         double sumSq = 0.0;
@@ -2112,7 +1884,7 @@ bool testBypassRawPassthrough(int sampleRate) {
     };
     int bestDelay = nominalLatency;
     double bestRms = rmsDiffAtDelay(mic, nominalLatency);
-    for (int d = std::max(0, nominalLatency - frameSize); d <= nominalLatency + frameSize; ++d) {
+    for (int d = std::max(0, nominalLatency - searchMargin); d <= nominalLatency + searchMargin; ++d) {
         const double r = rmsDiffAtDelay(mic, d);
         if (r < bestRms) { bestRms = r; bestDelay = d; }
     }
@@ -2129,28 +1901,10 @@ bool testBypassRawPassthrough(int sampleRate) {
 
     printf("  Bypassed output vs raw input: best delay=%d (nominal %d, %+d), residual RMS=%.2e\n",
            bestDelay, nominalLatency, bestDelay - nominalLatency, bestRms);
-    {
-        // Where does any residual live? Isolated bad samples point at a
-        // glitch event; a contiguous mismatched region points at the stream
-        // delay changing mid-run (FIFO underrun inserting zeros).
-        int mismatches = 0, firstMismatch = -1, lastMismatch = -1;
-        for (int i = compareStart; i < processedEnd; ++i) {
-            const int src = i - bestDelay;
-            if (src < 0) continue;
-            if (std::abs(output[static_cast<size_t>(i)] - mic[static_cast<size_t>(src)]) > 1.0e-4f) {
-                if (firstMismatch < 0) firstMismatch = i;
-                lastMismatch = i;
-                ++mismatches;
-            }
-        }
-        if (mismatches > 0)
-            printf("  [debug] %d samples with |diff|>1e-4 in %d..%d (first=%d last=%d)\n",
-                   mismatches, compareStart, processedEnd, firstMismatch, lastMismatch);
-    }
     printf("  Same comparison vs post-HPF input (control, must be large): RMS=%.4f\n", hpfRms);
 
     const bool pass = bestRms < 1.0e-6                      // exact raw passthrough (float-copy exact)
-                       && std::abs(bestDelay - nominalLatency) <= frameSize // latency-matched, no wild offset
+                       && bestDelay == nominalLatency        // at exactly the reported latency
                        && hpfRms > 0.05;                     // and provably raw, not post-HPF
     printf("  %s\n", pass ? "PASS -- bypass is a latency-matched, truly-raw passthrough"
                           : "CHECK -- bypass output is not the raw input at the matched delay");
@@ -2159,7 +1913,7 @@ bool testBypassRawPassthrough(int sampleRate) {
 
 // Bypass check (b): toggling bypass mid-stream, both directions, produces
 // no click/spike -- same no-spike detection pattern as
-// testClickFreeRoomChange -- and actually takes effect (bypassed span
+// testClickFreeTailLengthChange -- and actually takes effect (bypassed span
 // matches the raw input; processed span doesn't).
 bool testBypassToggleClickFree(int sampleRate) {
     printf("\n=== Bypass toggle click-free test (%d Hz) ===\n", sampleRate);
@@ -2222,7 +1976,7 @@ bool testBypassToggleClickFree(int sampleRate) {
 
     // Effect checks, well clear of both toggles and their ~5ms ramps: mid-
     // bypass the output equals the raw input at the matched delay; after
-    // toggling back it must NOT (AEC3 + HPF are audibly at work again).
+    // toggling back it must NOT (canceller + HPF are at work again).
     auto rmsDiffVsRaw = [&](int startSample, int endSample, int delay) {
         double sumSq = 0.0;
         int count = 0;
@@ -2236,17 +1990,14 @@ bool testBypassToggleClickFree(int sampleRate) {
         }
         return count > 0 ? std::sqrt(sumSq / count) : 1e9;
     };
-    // The exact stream delay sits within a few samples of nominal but isn't
-    // guaranteed to equal it (the same block/frame phase slop
-    // testDryWetAlignment documents), and even a 3-sample offset makes the
-    // 1.2kHz voice content read as a large false diff -- so find the actual
-    // delay in the bypassed span the same way the raw-passthrough test
-    // does, then hold the processed-span comparison to that same delay.
-    const int frameSize = sampleRate / 100;
+    // Find the actual delay in the bypassed span the same way the
+    // raw-passthrough test does (it must be the reported latency), then hold
+    // the processed-span comparison to that same delay.
+    const int searchMargin = 512;
     const int bypSpanStart = 3 * sampleRate, bypSpanEnd = 4 * sampleRate - sampleRate / 10;
     int bestDelay = nominalLatency;
     double bypassedDiff = rmsDiffVsRaw(bypSpanStart, bypSpanEnd, nominalLatency);
-    for (int d = std::max(0, nominalLatency - frameSize); d <= nominalLatency + frameSize; ++d) {
+    for (int d = std::max(0, nominalLatency - searchMargin); d <= nominalLatency + searchMargin; ++d) {
         const double r = rmsDiffVsRaw(bypSpanStart, bypSpanEnd, d);
         if (r < bypassedDiff) { bypassedDiff = r; bestDelay = d; }
     }
@@ -2258,13 +2009,19 @@ bool testBypassToggleClickFree(int sampleRate) {
            bestDelay, nominalLatency, bypassedDiff, processedDiff);
 
     const bool noSpike = spikeIndex < 0;
-    const bool tookEffect = bypassedDiff < 0.02 && processedDiff > 10.0 * std::max(bypassedDiff, 1e-6);
+    const bool tookEffect = bestDelay == nominalLatency && bypassedDiff < 0.02
+                            && processedDiff > 10.0 * std::max(bypassedDiff, 1e-6);
     const bool pass = noSpike && tookEffect;
     printf("  %s%s%s\n", pass ? "PASS -- bypass toggles click-free and actually engages/disengages" : "CHECK",
            noSpike ? "" : " -- SPIKE DETECTED", tookEffect ? "" : " -- BYPASS DID NOT ENGAGE/DISENGAGE AS EXPECTED");
     return pass;
 }
 
+// Confirms the HPF is a genuine 4th-order (24dB/octave) Butterworth
+// response -- not, say, a single 2nd-order (12dB/octave) section or two
+// identical (non-Butterworth-aligned) stages -- by checking measured
+// attenuation against the textbook Butterworth formula
+// |H|^2 = 1 / (1 + (fc/f)^(2n)) at a few key points relative to cutoff.
 bool testHighPassFilterResponse() {
     printf("\n=== High-pass filter response test ===\n");
     const int sampleRate = 48000;
@@ -2308,8 +2065,6 @@ bool testHighPassFilterResponse() {
     printf("  %s\n", pass ? "PASS -- confirms a genuine 4th-order (24dB/oct) Butterworth response" : "CHECK");
     return pass;
 }
-
-} // namespace
 
 static void printDefaultBusLayout() {
     PAEchoCancellerAudioProcessor proc; // freshly constructed, no layout negotiation yet
@@ -2368,9 +2123,9 @@ static void benchmarkTailLengthCpuCost(int sampleRate) {
 // divergence was only ever audible on actual concert recordings). This mode
 // runs a real audience-mic recording and its matching PA reference feed
 // through the actual processor across a matrix of settings and reports
-// objective per-config metrics, so tuning experiments (Amount, Max
-// Reduction, Response, Tail Length) can be measured on the material that
-// matters instead of judged by ear alone.
+// objective per-config metrics, so tuning experiments (Strength, Range,
+// Time, Tail Length) can be measured on the material that matters instead
+// of judged by ear alone.
 //
 //   PAEchoCancellerVerify --real <mic.wav> <reference.wav> [--seconds N] [--write-outputs] [--irregular]
 //
@@ -2401,74 +2156,6 @@ bool loadWavMono(const juce::File& file, std::vector<float>& out, double& sample
     out.assign(buf.getReadPointer(0), buf.getReadPointer(0) + numSamples);
     sampleRateOut = reader->sampleRate;
     return true;
-}
-
-// Normalized autocorrelation of a (mean-removed) metric trace, for spotting
-// periodicity -- the same approach used for the earlier raw-AEC3 uniform-
-// cadence disproof of the ~1s dropout lead (that analysis found no peak near
-// 1s when driving AEC3 directly in clean 10ms frames; this reuses the method
-// on the full plugin path). Returns r(lag) for lag = 1..maxLag over the
-// trace with its first skipBins bins dropped (AEC3 bootstrap/convergence --
-// the settling ramp is itself a strong low-frequency trend that would
-// swamp any small periodic signature).
-static std::vector<double> normalizedAutocorrelation(const std::vector<double>& trace,
-                                                     int skipBins, int maxLag) {
-    std::vector<double> x(trace.begin() + std::min<size_t>(static_cast<size_t>(skipBins), trace.size()),
-                          trace.end());
-    const int n = static_cast<int>(x.size());
-    std::vector<double> r;
-    if (n < maxLag * 2)
-        return r;
-    double mean = 0.0;
-    for (double v : x) mean += v;
-    mean /= n;
-    for (auto& v : x) v -= mean;
-    double denom = 0.0;
-    for (double v : x) denom += v * v;
-    if (denom <= 0.0)
-        return r;
-    r.reserve(static_cast<size_t>(maxLag));
-    for (int lag = 1; lag <= maxLag; ++lag) {
-        double acc = 0.0;
-        for (int i = 0; i + lag < n; ++i)
-            acc += x[static_cast<size_t>(i)] * x[static_cast<size_t>(i + lag)];
-        r.push_back(acc / denom);
-    }
-    return r;
-}
-
-// Prints the autocorrelation verdict for one metric trace (binned at
-// binsPerSecond): the strongest lag overall, and how the ~1s region
-// (0.8s-1.2s) compares against the rest -- a genuine ~1s periodic dropout
-// would put a clear local peak there.
-static void reportPeriodicity(const char* label, const std::vector<double>& trace, int binsPerSecond) {
-    const int skipBins = 5 * binsPerSecond; // 5s, same span --real's metrics already skip
-    const int maxLag = 5 * binsPerSecond;   // look out to 5s
-    const auto r = normalizedAutocorrelation(trace, skipBins, maxLag);
-    if (r.empty()) {
-        printf("  %-14s trace too short for autocorrelation\n", label);
-        return;
-    }
-    int bestLag = 1;
-    for (int lag = 1; lag <= static_cast<int>(r.size()); ++lag)
-        if (r[static_cast<size_t>(lag - 1)] > r[static_cast<size_t>(bestLag - 1)]) bestLag = lag;
-    // The ~1s window of interest, and the max outside it for contrast.
-    const int oneSecLo = (8 * binsPerSecond) / 10, oneSecHi = (12 * binsPerSecond) / 10;
-    double oneSecMax = -2.0, elsewhereMax = -2.0;
-    int oneSecMaxLag = oneSecLo;
-    for (int lag = 1; lag <= static_cast<int>(r.size()); ++lag) {
-        const double v = r[static_cast<size_t>(lag - 1)];
-        if (lag >= oneSecLo && lag <= oneSecHi) {
-            if (v > oneSecMax) { oneSecMax = v; oneSecMaxLag = lag; }
-        } else if (v > elsewhereMax) {
-            elsewhereMax = v;
-        }
-    }
-    printf("  %-14s peak r=%.3f at %.2fs; ~1s region max r=%.3f at %.2fs (elsewhere max r=%.3f)%s\n",
-           label, r[static_cast<size_t>(bestLag - 1)], static_cast<double>(bestLag) / binsPerSecond,
-           oneSecMax, static_cast<double>(oneSecMaxLag) / binsPerSecond, elsewhereMax,
-           (oneSecMax > 0.3 && oneSecMax > elsewhereMax + 0.1)
-               ? "  <-- ~1s PERIODICITY CANDIDATE" : "");
 }
 
 int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeconds, bool writeOutputs,
@@ -2525,18 +2212,18 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     const double micHighRms = highBandRms(mic, skipS);
 
     struct Config { int tailIndex; float amount; float maxReductionDb; float responseMs; const char* name; };
-    // The defaults, then each suppressor control swept on its own (Max
-    // Reduction and Response at 50% Amount, where they have room to act),
-    // then the defaults at a shorter tail.
+    // The defaults, then each suppressor control swept on its own (Range
+    // and Time at 50% Strength, where they have room to act), then the
+    // defaults at a shorter tail.
     const Config configs[] = {
         { 3, 80.0f, -12.0f, 30.0f, "default" },
-        { 3, 0.0f, -12.0f, 20.0f, "amount0" },
-        { 3, 50.0f, -12.0f, 20.0f, "amount50" },
-        { 3, 100.0f, -12.0f, 20.0f, "amount100" },
-        { 3, 50.0f, -6.0f, 20.0f, "amount50_maxred6" },
-        { 3, 50.0f, -24.0f, 20.0f, "amount50_maxred24" },
-        { 3, 50.0f, -12.0f, 5.0f, "amount50_resp5" },
-        { 3, 50.0f, -12.0f, 50.0f, "amount50_resp50" },
+        { 3, 0.0f, -12.0f, 30.0f, "strength0" },
+        { 3, 50.0f, -12.0f, 30.0f, "strength50" },
+        { 3, 100.0f, -12.0f, 30.0f, "strength100" },
+        { 3, 50.0f, -6.0f, 30.0f, "strength50_range6" },
+        { 3, 50.0f, -24.0f, 30.0f, "strength50_range24" },
+        { 3, 50.0f, -12.0f, 5.0f, "strength50_time5" },
+        { 3, 50.0f, -12.0f, 50.0f, "strength50_time50" },
         { 1, 80.0f, -12.0f, 30.0f, "tail200_default" },
     };
 
@@ -2545,11 +2232,10 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     // compared against.
     juce::File csvFile(juce::File::getCurrentWorkingDirectory().getChildFile(
         irregularCadence ? "real_material_report_irregular.csv" : "real_material_report.csv"));
-    juce::String csv("config,tail_ms,amount_pct,max_reduction_db,response_ms,fullband_reduction_db,highband_reduction_db,delay_ms\n");
+    juce::String csv("config,tail_ms,strength_pct,range_db,time_ms,fullband_reduction_db,highband_reduction_db,delay_ms\n");
 
     printf("\n%-22s %14s %14s %10s\n", "config", "full-band red.", ">=2kHz red.", "delay est.");
     static constexpr int tailMs[] = { 50, 200, 400, 800 };
-    bool allRan = true;
     for (const auto& cfg : configs) {
         PAEchoCancellerAudioProcessor proc;
         if (!setMonoLayout(proc)) { printf("  FAILED to set mono layout\n"); return 1; }
@@ -2564,9 +2250,7 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
         }
 
         // Irregular cadence: the same deliberately off-frame-boundary cycling
-        // pattern runThroughProcessor uses for the synthetic suite -- the one
-        // host-realistic condition the ~1s-dropout investigation had never
-        // combined with real material and time-series state logging. Uniform
+        // pattern runThroughProcessor uses for the synthetic suite. Uniform
         // cadence (fixed 512) is the control: same material, same config,
         // only the block schedule differs.
         static const int blockPattern[] = { 512, 37, 129, 1, 4096, 256, 7 };
@@ -2579,14 +2263,6 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
         juce::AudioBuffer<float> buffer(totalChannels, maxBlock);
         juce::MidiBuffer midi;
         std::vector<float> output(n, 0.0f);
-
-        // The delay readout polled every ~100ms of material, on the same
-        // 100ms grid the RMS traces below use -- fine enough to resolve a
-        // ~1s periodicity (10 bins per cycle).
-        const int binSize = sampleRate / 10;
-        struct StatSample { size_t pos; int delayMs; };
-        std::vector<StatSample> statSamples;
-        size_t nextStatPoll = static_cast<size_t>(binSize);
 
         size_t pos = 0;
         int patternIdx = 0;
@@ -2607,63 +2283,10 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
             auto mainOut = proc.getBusBuffer(buffer, false, 0);
             std::copy_n(mainOut.getReadPointer(0), blockSize, output.data() + pos);
             pos += static_cast<size_t>(blockSize);
-
-            if (pos >= nextStatPoll) {
-                statSamples.push_back({ pos, proc.getEstimatedEchoPathDelayMs() });
-                while (nextStatPoll <= pos) nextStatPoll += static_cast<size_t>(binSize);
-            }
         }
 
         const int delayMs = proc.getEstimatedEchoPathDelayMs();
         proc.releaseResources();
-
-        // 100ms-binned RMS traces + the stat polls resampled onto the same
-        // grid, written per config for plotting and autocorrelated right here
-        // for the periodicity verdict.
-        const size_t numBins = n / static_cast<size_t>(binSize);
-        std::vector<double> outTraceDb(numBins), micTraceDb(numBins), delayTrace(numBins);
-        {
-            size_t statIdx = 0;
-            int lastDelay = -1;
-            for (size_t b = 0; b < numBins; ++b) {
-                const size_t binEnd = (b + 1) * static_cast<size_t>(binSize);
-                double outSumSq = 0.0, micSumSq = 0.0;
-                for (size_t i = b * static_cast<size_t>(binSize); i < binEnd; ++i) {
-                    outSumSq += static_cast<double>(output[i]) * output[i];
-                    micSumSq += static_cast<double>(mic[i]) * mic[i];
-                }
-                outTraceDb[b] = 10.0 * std::log10(std::max(1e-12, outSumSq / binSize));
-                micTraceDb[b] = 10.0 * std::log10(std::max(1e-12, micSumSq / binSize));
-                while (statIdx < statSamples.size() && statSamples[statIdx].pos <= binEnd) {
-                    lastDelay = statSamples[statIdx].delayMs;
-                    ++statIdx;
-                }
-                delayTrace[b] = lastDelay;
-            }
-        }
-        {
-            juce::String trace("t_s,mic_rms_db,out_rms_db,delay_ms\n");
-            for (size_t b = 0; b < numBins; ++b)
-                trace << juce::String(0.1 * static_cast<double>(b + 1), 1) << ","
-                      << juce::String(micTraceDb[b], 2) << "," << juce::String(outTraceDb[b], 2) << ","
-                      << static_cast<int>(delayTrace[b]) << "\n";
-            juce::File::getCurrentWorkingDirectory()
-                .getChildFile(juce::String("real_trace_") + (irregularCadence ? "irregular_" : "uniform_")
-                              + cfg.name + ".csv")
-                .replaceWithText(trace);
-        }
-        printf("%s periodicity (100ms bins, autocorrelation, 5s..end):\n", cfg.name);
-        reportPeriodicity("out RMS dB", outTraceDb, 10);
-        reportPeriodicity("out-mic dB", [&] {
-            // The output trace tracks the material's own level swings; the
-            // per-bin suppression depth (out minus mic, in dB) removes that
-            // shared component, which is where a periodic *suppression*
-            // artifact would show even if the material masks it in raw level.
-            std::vector<double> d(numBins);
-            for (size_t b = 0; b < numBins; ++b) d[b] = outTraceDb[b] - micTraceDb[b];
-            return d;
-        }(), 10);
-        reportPeriodicity("delay est ms", delayTrace, 10);
 
         const double outFullRms = fullBandRms(output, skipS);
         const double outHighRms = highBandRms(output, skipS);
@@ -2684,7 +2307,7 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
            writeOutputs ? " and real_out_<config>.wav files (16-bit, for listening comparison)" : "");
     printf("Note: 'reduction' compares mic vs output level over %.0fs..end -- bleed removal plus any\n"
            "wanted-content suppression together; compare configs against each other, not as absolutes.\n", skipS);
-    return allRan ? 0 : 1;
+    return 0;
 }
 
 // --screenshot <out.png> [--adjusted]: renders the editor to a PNG after
@@ -2774,15 +2397,11 @@ bool testBasicCancellation(int rate, double durationS) {
         printf("  PA-only window: mic=%.1f dBFS cleaned=%.1f dBFS reduction=%.1f dB\n", mic_pa, cleaned_pa, reductionDb);
         printf("  Voice window:   ground_truth=%.1f dBFS cleaned=%.1f dBFS error=%.1f dB\n", voice_gt, cleaned_voice, voiceErrDb);
 
-        // 8 dB rather than the 10 dB the 1.0.x engine was held to: this
-        // window (0-2 s) includes the canceller's start-up, and the default
-        // Range (-12 dB) caps the suppressor.
+        // 8 dB: this window (0-2 s) includes the canceller's start-up, and
+        // the default Range (-12 dB) caps the suppressor.
         // testSuppressorControls covers what the stronger settings reach.
         bool pass = reductionDb > 8.0 && std::abs(voiceErrDb) < 6.0;
         printf("  %s\n", pass ? "PASS" : "CHECK");
-
-        writeWav16("plugin_verify_" + std::to_string(rate) + "_mic.wav", signals.mic, rate);
-        writeWav16("plugin_verify_" + std::to_string(rate) + "_cleaned.wav", output, rate);
         return pass;
     }
 }
@@ -2961,6 +2580,8 @@ bool testLatencyMatrix() {
     return pass;
 }
 
+} // namespace
+
 int main(int argc, char* argv[]) {
     // --latency-matrix: the full latency sweep (all rates and block sizes),
     // one line per case.
@@ -3017,15 +2638,15 @@ int main(int argc, char* argv[]) {
     for (int rate : rates) allPass = testBasicCancellation(rate, durationS) && allPass;
 
     allPass = testSuppressorControls(48000) && allPass;
-    allPass = testClickFreeRoomChange(48000) && allPass;
-    allPass = testLargeRoomBenefit(48000) && allPass;
-    allPass = testSuppressionMeterAfterReferenceMute(48000, 0.0f, "Amount 0%") && allPass;
-    allPass = testSuppressionMeterAfterReferenceMute(48000, 25.0f, "Amount 25%") && allPass;
-    allPass = testSuppressionMeterAfterReferenceMute(48000, 80.0f, "Amount 80%, default") && allPass;
-    allPass = testSuppressionMeterAfterReferenceMute(48000, 100.0f, "Amount 100%") && allPass;
+    allPass = testClickFreeTailLengthChange(48000) && allPass;
+    allPass = testLongTailBenefit(48000) && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 0.0f, "Strength 0%") && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 25.0f, "Strength 25%") && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 80.0f, "Strength 80%, default") && allPass;
+    allPass = testSuppressionMeterAfterReferenceMute(48000, 100.0f, "Strength 100%") && allPass;
     allPass = testSuppressionMeterTransientAlignment(48000) && allPass;
     allPass = testOfflineVsLiveDynamicHfContent(48000) && allPass;
-    allPass = testOfflineVsLiveSpectralShiftAfterWarmup(48000) && allPass;
+    allPass = testOfflineVsLiveReverberantRoom(48000) && allPass;
     allPass = testOfflineRenderUsesCurrentSettingsNotDefaults(48000) && allPass;
     allPass = testHighPassFilterResponse() && allPass;
     for (int rate : rates) allPass = testDryWetAlignment(rate) && allPass;

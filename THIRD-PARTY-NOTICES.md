@@ -12,12 +12,6 @@ why Less PA itself is distributed under the AGPLv3 (see `LICENSE`). Full
 terms: https://juce.com/legal/juce-9-licence/, and `JUCE/LICENSE.md` in the
 submodule.
 
-## AAX SDK (not used in this build)
-
-Earlier development builds of Less PA linked against Avid's proprietary AAX
-SDK to support Pro Tools. The public 1.0.0 release does not include AAX and
-does not build against or redistribute any part of the AAX SDK.
-
 ## Earlier versions
 
 Less PA 1.0.x used Google's WebRTC audio processing module (AEC3, BSD-3-Clause)

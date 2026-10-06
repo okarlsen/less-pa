@@ -25,19 +25,34 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../JUCE JUCE)
 
+# AAX is opt-in: JUCE ships the AAX SDK, but a Pro Tools build is only
+# useful once it can be PACE-signed, and copying it after the build writes
+# to /Library/Application Support/Avid, which needs admin rights.
+option(LESSPA_BUILD_AAX "Also build the AAX plugin (Pro Tools)" OFF)
+
+# Copies the built plugins into ~/Library/Audio/Plug-Ins (and the AAX into
+# /Library/Application Support/Avid) so a DAW picks them up. Turn it off
+# for a scratch or test build that must not replace the installed plugins.
+option(LESSPA_INSTALL_AFTER_BUILD "Copy the built plugins into the system plug-in folders" ON)
+set(LESSPA_FORMATS AU VST3)
+if(LESSPA_BUILD_AAX)
+    list(APPEND LESSPA_FORMATS AAX)
+endif()
+
 juce_add_plugin(PAEchoCanceller
     COMPANY_NAME "SGTM"
     BUNDLE_ID com.sgtm.LessPA
     PLUGIN_MANUFACTURER_CODE Sgtm
     PLUGIN_CODE LesP
-    FORMATS AU VST3
+    FORMATS ${LESSPA_FORMATS}
+    AAX_CATEGORY NoiseReduction
     PRODUCT_NAME "Less PA"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    COPY_PLUGIN_AFTER_BUILD TRUE
+    COPY_PLUGIN_AFTER_BUILD ${LESSPA_INSTALL_AFTER_BUILD}
 )
 
 # The SGTM wordmark, compiled in as Assets::sgtm_logo_png. Underscores in the

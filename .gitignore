@@ -1,14 +1,10 @@
-# Build artifacts (regenerable via CMake/meson/pkgbuild)
+# Build artifacts (regenerable via CMake/pkgbuild)
 plugin/build/
 plugin/build-release/
 packaging/build/
-aec3-offline-test/*.o
-aec3-offline-test/aec3_offline_test
-aec3-offline-test/peaks/
 
-# JUCE and webrtc-audio-processing are git submodules (see .gitmodules) --
-# tracked via gitlink, not ignored. A public release needs both actually
-# buildable from a fresh clone, which a blanket ignore here would break.
+# Local Claude Code settings (per machine)
+.claude/settings.local.json
 
 # Real test recordings and generated harness/test outputs (WAVs, CSV
 # reports) -- large binary material, not source, and not something that

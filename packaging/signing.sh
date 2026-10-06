@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Shared Developer ID signing / notarization helpers for the Less PA
-# packaging scripts. Sourced by build_installer.sh and build_beta_zip.sh --
+# packaging scripts. Sourced by build_installer.sh and build_zip.sh --
 # not meant to be run directly.
 #
 # Both scripts need the identical "check the bundles, sign them, get them

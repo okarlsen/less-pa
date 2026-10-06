@@ -64,11 +64,13 @@ but it cannot remove what isn't a linear copy of the PA feed: distortion, a
 changing room, reverb longer than the **Tail Length**, or sound that never
 reaches the reference, such as stage monitors and backline.
 
-**Stage 2, the Bleed Suppressor**, works on what is left, in frequency bands
-about 170–190 Hz wide. It estimates how much PA is still in each band and
-ducks the band in proportion, like a multiband ducker keyed from the
-estimated leftover PA. It turns down everything in a ducked band, crowd
-included, so it trades a little crowd for less PA.
+**Stage 2, the Bleed Suppressor**, works on what is left. It estimates how
+much PA is still in each of the filter's frequency bins (about 170–190 Hz
+apart) and ducks in proportion, like a multiband ducker keyed from the
+estimated leftover PA. The gains are applied through a 128-tap linear-phase
+filter, so the ducking acts on bands a few hundred hertz wide. It turns down
+everything in a ducked band, crowd included, so it trades a little crowd for
+less PA.
 
 - **Strength** (0–100%, default 80%): how hard the suppressor ducks. 0%
   bypasses stage 2. Lower it if the crowd sounds thin or swirly.

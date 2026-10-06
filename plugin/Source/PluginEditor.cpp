@@ -10,9 +10,8 @@ namespace {
 
 // juce::Grid wants its templateRows list and every item's row index to agree,
 // and hand-written indices drift the instant a row is inserted or a spacer
-// changes height -- which is exactly the failure mode the old manual
-// removeFromTop() chain had. This builder appends the track and the item that
-// lives in it in one call, so indices are generated rather than maintained.
+// changes height. This builder appends the track and the item that lives in
+// it in one call, so indices are generated rather than maintained.
 //
 // Row spacing is expressed as explicit zero-item spacer tracks instead of
 // Grid::rowGap, because rowGap is uniform and this layout deliberately isn't:
@@ -106,7 +105,7 @@ private:
 } // namespace
 
 PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoCancellerAudioProcessor& p)
-    : AudioProcessorEditor(&p), processor(p)
+    : AudioProcessorEditor(&p), pluginProcessor(p)
 {
     setLookAndFeel(&lookAndFeel);
 
@@ -119,12 +118,11 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // reflow problem to solve -- no row has to decide whether to wrap.
     //
     // useBottomRightCornerResizer is false: JUCE's stock diagonal grip would
-    // draw over the bottom-right corner, which is exactly where the wordmark
-    // now sits. Hosts supply their own window handle for a resizable editor.
+    // draw over the bottom-right corner, which is where the wordmark sits.
+    // Hosts supply their own window handle for a resizable editor.
     setResizable(true, false);
     // Derived from the design size rather than picked, so the stated limits
-    // are the ones the aspect-ratio constrainer will actually allow (the old
-    // literals implied two different aspect ratios).
+    // are the ones the aspect-ratio constrainer will actually allow.
     const auto scaledHeight = [](int width) {
         return juce::roundToInt(static_cast<float>(width)
                                 * static_cast<float>(designHeight) / static_cast<float>(designWidth));
@@ -134,8 +132,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     static_assert(minWidth <= designWidth && designWidth <= maxWidth,
                   "the default design size must be inside its own resize limits");
     setResizeLimits(minWidth, scaledHeight(minWidth), maxWidth, scaledHeight(maxWidth));
-    if (auto* constrainer = getConstrainer())
-        constrainer->setFixedAspectRatio(static_cast<double>(designWidth) / static_cast<double>(designHeight));
+    if (auto* aspectConstrainer = getConstrainer())
+        aspectConstrainer->setFixedAspectRatio(static_cast<double>(designWidth) / static_cast<double>(designHeight));
 
     helpButton.onClick = [this] { showHelpDialog(); };
     addAndMakeVisible(helpButton);
@@ -167,11 +165,9 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     addAndMakeVisible(tailLengthLabel);
 
     // The room a length suits is part of the item text: choosing by venue is
-    // the decision someone actually makes at a show.
-    tailLengthCombo.addItem("50 ms - small room", 1);
-    tailLengthCombo.addItem("200 ms - club / theatre", 2);
-    tailLengthCombo.addItem("400 ms - hall", 3);
-    tailLengthCombo.addItem("800 ms - arena / outdoor", 4);
+    // the decision someone actually makes at a show. Taken from the
+    // parameter, so the panel and the host's automation lane agree.
+    tailLengthCombo.addItemList(pluginProcessor.getTailLengthParameter()->choices, 1);
     tailLengthCombo.onChange = [this] { tailLengthComboChanged(); };
     addAndMakeVisible(tailLengthCombo);
 
@@ -231,7 +227,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     dryWetSlider.onValueChange = [this] { dryWetSliderChanged(); };
     addAndMakeVisible(dryWetSlider);
 
-    // Left-aligned like the control labels: each meter name now sits to the
+    // Left-aligned like the control labels: each meter name sits to the
     // left of its own horizontal bar in a fixed-width column, so the four read
     // as a list. Font sizes for every label are set in resized(), so they
     // track the window scale.
@@ -241,9 +237,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
         addAndMakeVisible(label);
     }
 
-    // Horizontal rather than the component's default vertical: four
-    // side-by-side vertical bars needed the whole window width to keep
-    // "PA-ref(sc)" and the reduction meter's name legible, and column 1 is a third of it.
+    // Horizontal rather than the component's default vertical: labelled
+    // rows fit a column a third of the window wide.
     for (auto* meter : { &inputMeter, &sidechainMeter, &outputMeter, &suppressionMeter }) {
         meter->setOrientation(LevelMeterComponent::Orientation::horizontal);
         addAndMakeVisible(meter);
@@ -274,8 +269,6 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // it?". Duplicating the paragraphs here would make the tooltips too slow
     // to read to be any use mid-show -- and a sentence-length tip becomes a
     // multi-line block sitting over the controls it is meant to explain.
-    // (LessPALookAndFeel::getTooltipBounds now wraps rather than clips, so
-    // length is a readability choice here rather than a correctness one.)
     helpButton.setTooltip("Full control reference");
     versionLabel.setTooltip("Less PA v" JucePlugin_VersionString);
     tailLengthCombo.setTooltip("Match to the venue's reverb");
@@ -483,7 +476,7 @@ void PAEchoCancellerAudioProcessorEditor::resized()
 
     // COLUMN 2 -- the two processing stages in signal order: the
     // canceller with its Tail Length, then the bleed suppressor's three
-    // controls, with their Reset in the suppressor's header row.
+    // controls, with their Defaults button in the suppressor's header row.
     {
         auto body = panelBody(sections.column2);
         SectionGrid grid(1, scale, 0);
@@ -523,8 +516,8 @@ void PAEchoCancellerAudioProcessorEditor::resized()
 
 void PAEchoCancellerAudioProcessorEditor::updateResetButton()
 {
-    // Greyed out when there is nothing to reset, so the button also answers
-    // "have I changed how much is removed?" at a glance.
+    // Greyed out when the suppressor is at its defaults, so the button also
+    // answers "have I changed how much is removed?" at a glance.
     bool modified = false;
     for (auto* param : getSuppressorParameters())
         modified = modified || std::abs(param->getValue() - param->getDefaultValue()) >= 1.0e-4f;
@@ -534,7 +527,7 @@ void PAEchoCancellerAudioProcessorEditor::updateResetButton()
 
 std::array<juce::RangedAudioParameter*, 3> PAEchoCancellerAudioProcessorEditor::getSuppressorParameters() const
 {
-    return { processor.getAmountParameter(), processor.getMaxReductionParameter(), processor.getResponseParameter() };
+    return { pluginProcessor.getAmountParameter(), pluginProcessor.getMaxReductionParameter(), pluginProcessor.getResponseParameter() };
 }
 
 void PAEchoCancellerAudioProcessorEditor::resetSuppressorToDefaults()
@@ -554,7 +547,7 @@ void PAEchoCancellerAudioProcessorEditor::resetSuppressorToDefaults()
 void PAEchoCancellerAudioProcessorEditor::tailLengthComboChanged()
 {
     const int index = tailLengthCombo.getSelectedId() - 1; // JUCE item IDs are 1-based
-    auto* param = processor.getTailLengthParameter();
+    auto* param = pluginProcessor.getTailLengthParameter();
     const float normalized = param->convertTo0to1(static_cast<float>(index));
     param->beginChangeGesture();
     param->setValueNotifyingHost(normalized);
@@ -563,7 +556,7 @@ void PAEchoCancellerAudioProcessorEditor::tailLengthComboChanged()
 
 void PAEchoCancellerAudioProcessorEditor::updateTailLengthCombo()
 {
-    const int currentId = processor.getTailLengthParameter()->getIndex() + 1;
+    const int currentId = pluginProcessor.getTailLengthParameter()->getIndex() + 1;
     if (tailLengthCombo.getSelectedId() != currentId)
         tailLengthCombo.setSelectedId(currentId, juce::dontSendNotification);
 }
@@ -589,43 +582,43 @@ void syncSlider(juce::Slider& slider, double value, double tolerance)
 
 void PAEchoCancellerAudioProcessorEditor::amountSliderChanged()
 {
-    setParameterFromUi(*processor.getAmountParameter(), static_cast<float>(amountSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getAmountParameter(), static_cast<float>(amountSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::maxReductionSliderChanged()
 {
-    setParameterFromUi(*processor.getMaxReductionParameter(), -static_cast<float>(maxReductionSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getMaxReductionParameter(), -static_cast<float>(maxReductionSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::responseSliderChanged()
 {
-    setParameterFromUi(*processor.getResponseParameter(), static_cast<float>(responseSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getResponseParameter(), static_cast<float>(responseSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::hpfSliderChanged()
 {
-    setParameterFromUi(*processor.getHpfFrequencyParameter(), static_cast<float>(hpfSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getHpfFrequencyParameter(), static_cast<float>(hpfSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::referenceGainSliderChanged()
 {
-    setParameterFromUi(*processor.getReferenceGainParameter(), static_cast<float>(referenceGainSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getReferenceGainParameter(), static_cast<float>(referenceGainSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::dryWetSliderChanged()
 {
-    setParameterFromUi(*processor.getDryWetMixParameter(), static_cast<float>(dryWetSlider.getValue()));
+    setParameterFromUi(*pluginProcessor.getDryWetMixParameter(), static_cast<float>(dryWetSlider.getValue()));
 }
 
 void PAEchoCancellerAudioProcessorEditor::updateSliders()
 {
     // Keeps every slider in step with host automation and session loads.
-    syncSlider(amountSlider, processor.getAmountParameter()->get(), 0.05);
-    syncSlider(maxReductionSlider, -processor.getMaxReductionParameter()->get(), 0.05);
-    syncSlider(responseSlider, processor.getResponseParameter()->get(), 0.05);
-    syncSlider(hpfSlider, processor.getHpfFrequencyParameter()->get(), 0.05);
-    syncSlider(referenceGainSlider, processor.getReferenceGainParameter()->get(), 0.05);
-    syncSlider(dryWetSlider, processor.getDryWetMixParameter()->get(), 0.05);
+    syncSlider(amountSlider, pluginProcessor.getAmountParameter()->get(), 0.05);
+    syncSlider(maxReductionSlider, -pluginProcessor.getMaxReductionParameter()->get(), 0.05);
+    syncSlider(responseSlider, pluginProcessor.getResponseParameter()->get(), 0.05);
+    syncSlider(hpfSlider, pluginProcessor.getHpfFrequencyParameter()->get(), 0.05);
+    syncSlider(referenceGainSlider, pluginProcessor.getReferenceGainParameter()->get(), 0.05);
+    syncSlider(dryWetSlider, pluginProcessor.getDryWetMixParameter()->get(), 0.05);
 }
 
 void PAEchoCancellerAudioProcessorEditor::timerCallback()
@@ -642,15 +635,15 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     //  - the host keeps calling processBlock with silence even when the
     //    transport is stopped (common -- the audio engine keeps running),
     //    so the counter keeps advancing, but there's no real signal.
-    const uint32_t currentCount = processor.getProcessBlockCallCount();
+    const uint32_t currentCount = pluginProcessor.getProcessBlockCallCount();
     const bool callbackAdvanced = (currentCount != lastSeenProcessBlockCount);
     lastSeenProcessBlockCount = currentCount;
 
     // Silence detection always uses the pre-filter level, regardless of
     // what the meters are currently displaying -- an aggressive HPF cutoff
     // shouldn't be able to make real signal look like "nothing happening".
-    const float inputLevelPre = processor.getInputPeakLevelPre();
-    const float sidechainLevelPre = processor.getSidechainPeakLevelPre();
+    const float inputLevelPre = pluginProcessor.getInputPeakLevelPre();
+    const float sidechainLevelPre = pluginProcessor.getSidechainPeakLevelPre();
     constexpr float silenceThreshold = 1.0e-6f;
     const bool signalPresent = inputLevelPre > silenceThreshold || sidechainLevelPre > silenceThreshold;
 
@@ -671,7 +664,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     // in the canceller). "--" with signal present = the reference likely
     // isn't reaching the plugin at all (e.g. sidechain pins not routed).
     {
-        const int delayMs = processor.getEstimatedEchoPathDelayMs();
+        const int delayMs = pluginProcessor.getEstimatedEchoPathDelayMs();
         juce::String text("PA delay: ");
         if (delayMs < 0)
             text << "--";
@@ -693,17 +686,17 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 
     // Always post-HPF (and, for the PA ref, post-trim): the meters sit next
     // to those two controls so their effect is what the meters should show.
-    const float displayedInputLevel = processor.getInputPeakLevelPost();
-    const float displayedOutputLevel = processor.getOutputPeakLevel();
-    const float displayedSidechainLevel = processor.getSidechainPeakLevelPost();
+    const float displayedInputLevel = pluginProcessor.getInputPeakLevelPost();
+    const float displayedOutputLevel = pluginProcessor.getOutputPeakLevel();
+    const float displayedSidechainLevel = pluginProcessor.getSidechainPeakLevelPost();
     inputMeter.setLevel(displayedInputLevel);
     sidechainMeter.setLevel(displayedSidechainLevel);
     outputMeter.setLevel(displayedOutputLevel);
 
-    // Suppression is measured directly from peak levels (dB reduction from
-    // input to output), so it matches what Input/Output show by
-    // construction, at the cost of also picking up any level change from
-    // Mix or plain near-end dynamics, not only echo removal.
+    // Reduction is measured directly from peak levels (dB from input to
+    // output), so it matches what Mic/Output show by construction, at the
+    // cost of also picking up any level change from Mix or the crowd's own
+    // dynamics, not only PA removal.
     //
     // The Input side uses the post-HPF, delay-compensated reading -- Output
     // always reflects Input from getLatencySamples() earlier, so comparing
@@ -713,7 +706,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     constexpr float levelFloorLinear = 1.0e-6f; // -120dB, matches the silence threshold above
     constexpr float suppressionJitterFloorDb = 0.5f;
     const float delayCompensatedInputLevel =
-        processor.getInputPeakLevelPostDelayed(processor.getLatencySamples());
+        pluginProcessor.getInputPeakLevelPostDelayed(pluginProcessor.getLatencySamples());
     const float suppressionDb =
         juce::Decibels::gainToDecibels(juce::jmax(delayCompensatedInputLevel, levelFloorLinear))
         - juce::Decibels::gainToDecibels(juce::jmax(displayedOutputLevel, levelFloorLinear));
@@ -763,15 +756,17 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "and acoustic drums.\n"
         "\n"
         "STAGE 2: BLEED SUPPRESSOR (PER-BAND DUCKING)\n"
-        "This stage works on what is left after the subtraction, in "
-        "frequency bands about 170-190 Hz wide. For each band it estimates "
+        "This stage works on what is left after the subtraction. In each of "
+        "the filter's frequency bins (about 170-190 Hz apart) it estimates "
         "how much PA is still there, from the filter's own uncertainty plus "
         "a share of the modelled PA (which covers distortion and modelling "
-        "error), and compares that with the band's actual output. The band "
-        "is then ducked in proportion: a band that is mostly leftover PA is "
-        "turned down, a band that is mostly crowd is left alone. Think of it "
-        "as a multiband ducker keyed from the estimated leftover PA. The "
-        "band gains are applied through a linear-phase filter.\n"
+        "error), and compares that with the actual output. The gain is then "
+        "lowered in proportion: where it is mostly leftover PA it is turned "
+        "down, where it is mostly crowd it is left alone. Think of it as a "
+        "multiband ducker keyed from the estimated leftover PA. The gains "
+        "are applied through a 128-tap linear-phase filter, so the ducking "
+        "itself acts on bands a few hundred Hz wide (wider at 88.2 kHz and "
+        "above).\n"
         "Unlike stage 1, this stage turns down everything in a ducked band, "
         "crowd included, so it trades a little crowd for less PA. Strength, "
         "Range and Time set this stage. At 0% Strength it is bypassed and "
@@ -867,8 +862,9 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "Live (e.g. LiveProfessor, MainStage): the plugin adds about 4 ms "
         "of latency (192 samples at 44.1/48kHz: 128 for the canceller's "
         "processing block and 64 for the suppressor's linear-phase filter; "
-        "320 at 96kHz) and reports it to the host. Give it a few seconds of PA signal to lock on "
-        "before relying on it. Every control applies without interruption.\n"
+        "320 at 88.2kHz and above) and reports it to the host. Give it a few "
+        "seconds of PA signal to lock on before relying on it. Every control "
+        "applies without interruption.\n"
         "\n"
         "In post: insert it on the mic track with the PA feed on the "
         "sidechain. An offline bounce sounds the same as playing back from "
