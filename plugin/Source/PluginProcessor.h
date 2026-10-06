@@ -73,6 +73,15 @@ public:
     float getSidechainPeakLevelPost() const noexcept { return sidechainPeakLevelPost.load(std::memory_order_relaxed); }
     float getOutputPeakLevel() const noexcept { return outputPeakLevel.load(std::memory_order_relaxed); }
 
+    // True while the Reference bus is carrying a copy of the main input
+    // rather than a real PA feed. Logic and MainStage do this to an AU when
+    // the track's Side Chain menu is set to None: they keep the sidechain
+    // bus active and feed it the track's own input. A real PA reference is
+    // never sample-identical to the mic, so the plugin treats that case as
+    // no reference at all (see referenceDuplicatesMainInput). Safe from any
+    // thread.
+    bool isReferenceCopyOfMainInput() const noexcept { return referenceIsMainInput.load(std::memory_order_relaxed); }
+
     // The Input (post-HPF) peak from approximately delaySamples samples ago,
     // for time-aligning against the current Output peak. Output at any
     // instant reflects Input from getLatencySamples() earlier, so comparing
@@ -229,7 +238,14 @@ private:
     std::vector<float*> micFramePtrs;
     std::vector<float> refFrameBuffer;
 
-    std::vector<float> silenceBuffer; // fed as the reference when the reference bus is disconnected
+    std::vector<float> silenceBuffer; // fed as the reference when the reference bus is disconnected or a copy of the input
+
+    // Whether this block's reference is the main input again (see
+    // isReferenceCopyOfMainInput). An all-zero reference block can't tell
+    // either way and keeps the previous answer, so the status line doesn't
+    // flicker through silence.
+    static bool referenceDuplicatesMainInput(const juce::AudioBuffer<float>& mainIn, const float* ref, int numSamples) noexcept;
+    std::atomic<bool> referenceIsMainInput{ false };
 
     std::atomic<float> inputPeakLevelPre{ 0.0f };
     std::atomic<float> inputPeakLevelPost{ 0.0f };

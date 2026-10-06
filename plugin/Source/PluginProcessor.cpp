@@ -98,6 +98,7 @@ void PAEchoCancellerAudioProcessor::prepareToPlay(double sampleRate, int samples
     inputFilterScratch = perChannel(samplesPerBlock);
 
     silenceBuffer.assign(static_cast<size_t>(samplesPerBlock), 0.0f);
+    referenceIsMainInput.store(false, std::memory_order_relaxed);
     referenceFilterScratch.assign(static_cast<size_t>(samplesPerBlock), 0.0f);
     bypassMixScratch.assign(static_cast<size_t>(samplesPerBlock), 0.0f);
     dryPrefillSilence.assign(static_cast<size_t>(std::max(frameSize, KalmanEchoCanceller::suppressorDelaySamples)), 0.0f);
@@ -241,6 +242,33 @@ bool PAEchoCancellerAudioProcessor::isBusesLayoutSupported(const BusesLayout& la
     return true;
 }
 
+bool PAEchoCancellerAudioProcessor::referenceDuplicatesMainInput(const juce::AudioBuffer<float>& mainIn,
+                                                                const float* ref, int numSamples) noexcept
+{
+    // The mono Reference bus may get the left channel, the right, or a
+    // mono fold-down of a stereo input; any of them counts. The tolerance
+    // only absorbs float rounding in a host's fold-down; a real PA feed
+    // differs from the mic by orders of magnitude more.
+    const int numChannels = mainIn.getNumChannels();
+    if (numChannels == 0)
+        return false;
+
+    const float* left = mainIn.getReadPointer(0);
+    const float* right = mainIn.getReadPointer(juce::jmin(1, numChannels - 1));
+    bool matchesLeft = true, matchesRight = true, matchesAverage = true, matchesSum = true;
+
+    for (int s = 0; s < numSamples; ++s) {
+        const float tolerance = 1.0e-5f * std::abs(ref[s]) + 1.0e-10f;
+        matchesLeft = matchesLeft && std::abs(ref[s] - left[s]) <= tolerance;
+        matchesRight = matchesRight && std::abs(ref[s] - right[s]) <= tolerance;
+        matchesAverage = matchesAverage && std::abs(ref[s] - 0.5f * (left[s] + right[s])) <= tolerance;
+        matchesSum = matchesSum && std::abs(ref[s] - (left[s] + right[s])) <= tolerance;
+        if (!(matchesLeft || matchesRight || matchesAverage || matchesSum))
+            return false;
+    }
+    return true;
+}
+
 void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
@@ -272,6 +300,23 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     auto mainOut = getBusBuffer(buffer, false, 0);
     auto refIn = getBusBuffer(buffer, true, 1);
 
+    // Logic/MainStage feed the main input to the sidechain bus when Side
+    // Chain is None. Checked on the whole host block before anything is
+    // written (main in/out may alias). A reference that is a copy of the
+    // input is treated as no reference: the canceller gets silence and
+    // passes the mic through, exactly as with a disconnected bus.
+    bool useReference = refIn.getNumChannels() > 0;
+    if (useReference) {
+        const float* ref = refIn.getReadPointer(0);
+        if (juce::FloatVectorOperations::findMaximum(ref, totalNumSamples) != 0.0f
+            || juce::FloatVectorOperations::findMinimum(ref, totalNumSamples) != 0.0f)
+            referenceIsMainInput.store(referenceDuplicatesMainInput(mainIn, ref, totalNumSamples),
+                                       std::memory_order_relaxed);
+        useReference = !referenceIsMainInput.load(std::memory_order_relaxed);
+    } else {
+        referenceIsMainInput.store(false, std::memory_order_relaxed);
+    }
+
     const float refGainLinear = juce::Decibels::decibelsToGain(referenceGainParam->get());
 
     inputPeakLevelPre.store(mainIn.getMagnitude(0, totalNumSamples), std::memory_order_relaxed);
@@ -280,7 +325,7 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     // the canceller actually receives -- or turning the trim would not move
     // the bar toward the zone.
     sidechainPeakLevelPre.store(
-        refIn.getNumChannels() > 0 ? refIn.getMagnitude(0, totalNumSamples) * refGainLinear : 0.0f,
+        useReference ? refIn.getMagnitude(0, totalNumSamples) * refGainLinear : 0.0f,
         std::memory_order_relaxed);
 
     const float wetMix = juce::jlimit(0.0f, 1.0f, dryWetMixParam->get() / 100.0f);
@@ -334,7 +379,7 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         }
 
         {
-            const float* src = refIn.getNumChannels() > 0 ? refIn.getReadPointer(0) + chunkStart
+            const float* src = useReference ? refIn.getReadPointer(0) + chunkStart
                                                           : silenceBuffer.data();
             float* scratch = referenceFilterScratch.data();
             for (int s = 0; s < numSamples; ++s) {

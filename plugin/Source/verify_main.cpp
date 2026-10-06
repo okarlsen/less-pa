@@ -2582,6 +2582,61 @@ bool testLatencyMatrix() {
 
 } // namespace
 
+// Logic and MainStage keep an AU's sidechain bus active when Side Chain is
+// None and feed it the track's own input. That copy must count as no
+// reference: output identical to a silent Reference bus, and the flag the
+// editor shows set. A real PA reference must not trip it, and a stereo
+// input folded to mono (L+R)/2 must be caught too.
+bool testReferenceIsCopyOfMainInput(int sampleRate) {
+    printf("\n=== Reference is a copy of the main input (Logic Side Chain: None) @ %d Hz ===\n", sampleRate);
+    const auto signals = makeSignals(sampleRate, 6.0, { { 5.0, 0.6f }, { 22.0, 0.3f } });
+    const auto& reference = signals.reference;
+    const auto& mic = signals.mic;
+    const std::vector<float> silence(mic.size(), 0.0f);
+
+    PAEchoCancellerAudioProcessor procCopy, procSilent, procReal;
+    const auto outCopy = runThroughProcessor(procCopy, sampleRate, mic, mic);
+    const bool copyFlagged = procCopy.isReferenceCopyOfMainInput();
+    const auto outSilent = runThroughProcessor(procSilent, sampleRate, silence, mic);
+    runThroughProcessor(procReal, sampleRate, reference, mic);
+    const bool realFlagged = procReal.isReferenceCopyOfMainInput();
+
+    float maxDiff = 0.0f;
+    for (size_t i = 0; i < outCopy.size(); ++i)
+        maxDiff = std::max(maxDiff, std::abs(outCopy[i] - outSilent[i]));
+
+    // Stereo input with different channels, Reference = (L+R)/2.
+    bool foldFlagged = false;
+    {
+        PAEchoCancellerAudioProcessor proc;
+        const int blockSize = 256;
+        proc.prepareToPlay(sampleRate, blockSize);
+        juce::AudioBuffer<float> buffer(std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels()), blockSize);
+        juce::MidiBuffer midi;
+        for (int pos = 0; pos + blockSize <= static_cast<int>(mic.size()); pos += blockSize) {
+            buffer.clear();
+            auto mainIn = proc.getBusBuffer(buffer, true, 0);
+            auto refIn = proc.getBusBuffer(buffer, true, 1);
+            for (int s = 0; s < blockSize; ++s) {
+                const float l = mic[static_cast<size_t>(pos + s)];
+                const float r = 0.5f * reference[static_cast<size_t>(pos + s)];
+                mainIn.setSample(0, s, l);
+                mainIn.setSample(1, s, r);
+                refIn.setSample(0, s, 0.5f * (l + r));
+            }
+            proc.processBlock(buffer, midi);
+        }
+        foldFlagged = proc.isReferenceCopyOfMainInput();
+        proc.releaseResources();
+    }
+
+    printf("  Copy flagged=%d  real PA flagged=%d  (L+R)/2 flagged=%d  max |copy - silent ref| = %.3g\n",
+           copyFlagged, realFlagged, foldFlagged, static_cast<double>(maxDiff));
+    const bool pass = copyFlagged && !realFlagged && foldFlagged && maxDiff == 0.0f;
+    printf("  %s\n", pass ? "PASS -- a copy of the input is treated as no reference" : "FAIL");
+    return pass;
+}
+
 int main(int argc, char* argv[]) {
     // --latency-matrix: the full latency sweep (all rates and block sizes),
     // one line per case.
@@ -2659,6 +2714,7 @@ int main(int argc, char* argv[]) {
     for (int rate : rates) allPass = testBypassRawPassthrough(rate) && allPass;
     allPass = testBypassToggleClickFree(48000) && allPass;
     allPass = testReferenceGainTrim() && allPass;
+    for (int rate : rates) allPass = testReferenceIsCopyOfMainInput(rate) && allPass;
     for (int rate : rates) allPass = testOversizedHostBlock(rate) && allPass;
     for (int rate : rates) allPass = testNonFiniteInputRecovery(rate) && allPass;
     allPass = testLatencyInvariantAcrossTailLengths() && allPass;
