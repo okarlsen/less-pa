@@ -13,7 +13,8 @@ All notable changes to Less PA are documented here. Versions follow
   status said "Cancelling PA bleed" with a 0 ms PA delay, and the canceller
   worked against the mic itself. A Reference that is a copy of the main input
   is now treated as no reference: the mic passes through (after the HPF) and
-  the status reads "No sidechain selected". No change to latency.
+  the status reads "Check sidechain" (the same applies if the mic is routed to
+  both inputs by mistake). No change to latency.
 
 ## [1.1.1]
 
