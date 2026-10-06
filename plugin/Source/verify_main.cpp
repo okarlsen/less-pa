@@ -2580,8 +2580,6 @@ bool testLatencyMatrix() {
     return pass;
 }
 
-} // namespace
-
 // Logic and MainStage keep an AU's sidechain bus active when Side Chain is
 // None and feed it the track's own input. That copy must count as no
 // reference: output identical to a silent Reference bus, and the flag the
@@ -2636,6 +2634,8 @@ bool testReferenceIsCopyOfMainInput(int sampleRate) {
     printf("  %s\n", pass ? "PASS -- a copy of the input is treated as no reference" : "FAIL");
     return pass;
 }
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     // --latency-matrix: the full latency sweep (all rates and block sizes),
