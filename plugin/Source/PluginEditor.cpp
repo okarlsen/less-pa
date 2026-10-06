@@ -664,9 +664,10 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     // in the canceller). "--" with signal present = the reference likely
     // isn't reaching the plugin at all (e.g. sidechain pins not routed).
     {
+        const bool noSidechain = pluginProcessor.isReferenceCopyOfMainInput();
         const int delayMs = pluginProcessor.getEstimatedEchoPathDelayMs();
         juce::String text("PA delay: ");
-        if (delayMs < 0)
+        if (noSidechain || delayMs < 0)
             text << "--";
         else
             text << delayMs << " ms";
@@ -675,7 +676,9 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
         // The same facts, as the sentence an operator needs: is there a PA
         // feed at all, and has the canceller found it in the mic yet?
         juce::String status;
-        if (sidechainLevelPre <= silenceThreshold)
+        if (noSidechain)
+            status = "Check sidechain";
+        else if (sidechainLevelPre <= silenceThreshold)
             status = "No PA signal on Reference input";
         else if (delayMs < 0)
             status = "Locking on to the PA...";
@@ -850,7 +853,12 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "\n"
         "STATUS AND PA DELAY\n"
         "\"No PA signal\" means nothing is arriving on the Reference input -- "
-        "check the sidechain routing in your host. \"Locking on\" means the "
+        "check the sidechain routing in your host. \"Check sidechain\" means "
+        "the Reference input carries the same signal as the mic input. Logic "
+        "and MainStage do this when Side Chain is set to None, and it also "
+        "happens if the mic is routed to both inputs by mistake. The plugin "
+        "then treats it as no reference and passes the mic through (after "
+        "the HPF). \"Locking on\" means the "
         "PA is there but the canceller hasn't found it in the mic yet. PA "
         "delay is how far the PA reference leads the bleed in the mic; a "
         "steady number means a solid lock, a jumping one means the reference "

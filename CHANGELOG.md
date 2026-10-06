@@ -3,6 +3,19 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- In Logic and MainStage, with Side Chain set to None, the track's own input
+  reached the Reference input (these hosts feed the main input to an AU's
+  sidechain bus when none is selected). The PA ref meter showed the mic, the
+  status said "Cancelling PA bleed" with a 0 ms PA delay, and the canceller
+  worked against the mic itself. A Reference that is a copy of the main input
+  is now treated as no reference: the mic passes through (after the HPF) and
+  the status reads "Check sidechain" (the same applies if the mic is routed to
+  both inputs by mistake). No change to latency.
+
 ## [1.1.1]
 
 ### Fixed
