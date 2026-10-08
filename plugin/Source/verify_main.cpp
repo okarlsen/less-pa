@@ -38,10 +38,12 @@ void* operator new(std::size_t size)
     throw std::bad_alloc();
 }
 void* operator new[](std::size_t size) { return operator new(size); }
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+// Not inlined, so GCC doesn't see free() meet a pointer from operator new
+// at the call sites and warn (-Wmismatched-new-delete) about the pair.
+__attribute__((noinline)) void operator delete(void* p) noexcept { std::free(p); }
+__attribute__((noinline)) void operator delete[](void* p) noexcept { std::free(p); }
+__attribute__((noinline)) void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+__attribute__((noinline)) void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -2659,7 +2661,7 @@ bool testReferenceIsCopyOfMainInput(int sampleRate) {
 
     printf("  Copy flagged=%d  real PA flagged=%d  (L+R)/2 flagged=%d  max |copy - silent ref| = %.3g\n",
            copyFlagged, realFlagged, foldFlagged, static_cast<double>(maxDiff));
-    const bool pass = copyFlagged && !realFlagged && foldFlagged && maxDiff == 0.0f;
+    const bool pass = copyFlagged && !realFlagged && foldFlagged && juce::exactlyEqual(maxDiff, 0.0f);
     printf("  %s\n", pass ? "PASS -- a copy of the input is treated as no reference" : "FAIL");
     return pass;
 }
@@ -2968,6 +2970,76 @@ int runSoakMode(const char* refPath, const char* micPath, const char* mic2Path, 
     return ok ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// --thread-stress: the host's threads at once, for ThreadSanitizer. One
+// thread plays the audio callback; another plays the message thread: it
+// polls every getter the editor reads, moves every parameter and saves and
+// restores the state, as hosts do while audio runs. Build with
+// -fsanitize=thread; the run itself only checks the output stays finite.
+// ---------------------------------------------------------------------------
+int runThreadStressMode(double seconds) {
+    PAEchoCancellerAudioProcessor proc;
+    if (!setMonoLayout(proc)) {
+        printf("ERROR: layout refused\n");
+        return 1;
+    }
+    const int sampleRate = 48000, blockSize = 128;
+    proc.prepareToPlay(sampleRate, blockSize);
+    std::atomic<bool> running{ true };
+    std::atomic<uint64_t> nonFinite{ 0 }, blocks{ 0 };
+
+    std::thread audio([&] {
+        const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+        juce::AudioBuffer<float> buffer(totalChannels, blockSize);
+        juce::MidiBuffer midi;
+        std::mt19937 rng(1);
+        std::uniform_real_distribution<float> audioDist(-0.5f, 0.5f);
+        while (running.load()) {
+            auto mainIn = proc.getBusBuffer(buffer, true, 0);
+            auto refIn = proc.getBusBuffer(buffer, true, 1);
+            for (int s = 0; s < blockSize; ++s) {
+                const float r = audioDist(rng);
+                refIn.setSample(0, s, r);
+                mainIn.setSample(0, s, 0.4f * r + 0.1f * audioDist(rng));
+            }
+            proc.processBlock(buffer, midi);
+            for (int s = 0; s < blockSize; ++s)
+                if (!std::isfinite(proc.getBusBuffer(buffer, false, 0).getSample(0, s)))
+                    nonFinite.fetch_add(1);
+            blocks.fetch_add(1);
+        }
+    });
+
+    std::mt19937 rng(2);
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    float sink = 0.0f;
+    int round = 0;
+    while (std::chrono::steady_clock::now() < end) {
+        sink += proc.getInputPeakLevelPre() + proc.getInputPeakLevelPost() + proc.getSidechainPeakLevelPre()
+              + proc.getSidechainPeakLevelPost() + proc.getOutputPeakLevel()
+              + proc.getInputPeakLevelPostDelayed(proc.getLatencySamples())
+              + static_cast<float>(proc.getEstimatedEchoPathDelayMs() + static_cast<int>(proc.getProcessBlockCallCount() & 1u)
+                                   + (proc.isReferenceCopyOfMainInput() ? 1 : 0));
+        auto params = proc.getParameters();
+        params[round % params.size()]->setValueNotifyingHost(unit(rng));
+        if (round % 50 == 0) {
+            juce::MemoryBlock state;
+            proc.getStateInformation(state);
+            proc.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+        }
+        ++round;
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    running.store(false);
+    audio.join();
+    proc.releaseResources();
+    printf("Thread stress: %llu audio blocks, %d message-thread rounds, non-finite output samples: %llu (readout sum %g)\n",
+           static_cast<unsigned long long>(blocks.load()), round, static_cast<unsigned long long>(nonFinite.load()),
+           static_cast<double>(sink));
+    return nonFinite.load() == 0 ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -3021,6 +3093,9 @@ int main(int argc, char* argv[]) {
         }
         return runSoakMode(argv[2], argv[3], mic2, hours);
     }
+
+    if (argc >= 2 && std::string(argv[1]) == "--thread-stress")
+        return runThreadStressMode(argc >= 3 ? std::atof(argv[2]) : 10.0);
 
     // --bypass-only: just the bypass regression tests, for fast iteration on
     // the bypass path without waiting for the whole suite.

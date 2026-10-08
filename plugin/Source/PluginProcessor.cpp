@@ -308,8 +308,8 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     bool useReference = refIn.getNumChannels() > 0;
     if (useReference) {
         const float* ref = refIn.getReadPointer(0);
-        if (juce::FloatVectorOperations::findMaximum(ref, totalNumSamples) != 0.0f
-            || juce::FloatVectorOperations::findMinimum(ref, totalNumSamples) != 0.0f)
+        if (!juce::exactlyEqual(juce::FloatVectorOperations::findMaximum(ref, totalNumSamples), 0.0f)
+            || !juce::exactlyEqual(juce::FloatVectorOperations::findMinimum(ref, totalNumSamples), 0.0f))
             referenceIsMainInput.store(referenceDuplicatesMainInput(mainIn, ref, totalNumSamples),
                                        std::memory_order_relaxed);
         useReference = !referenceIsMainInput.load(std::memory_order_relaxed);

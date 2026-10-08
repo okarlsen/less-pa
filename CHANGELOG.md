@@ -21,7 +21,10 @@ All notable changes to Less PA are documented here. Versions follow
 - The verify harness checks that processBlock never allocates while every
   control is automated, restores damaged and random session data, and has a
   `--soak` mode: hours of real recordings, looped, with memory, allocations
-  and output level reported per pass. No change to the audio or latency.
+  and output level reported per pass, and a `--thread-stress` mode for
+  ThreadSanitizer (audio callback against UI polling, automation and state
+  save/restore). No change to the audio or latency.
+- The build is free of compiler warnings under JUCE's recommended warning set.
 
 ## [1.1.2]
 
