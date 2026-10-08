@@ -2811,6 +2811,31 @@ bool testCorruptStateRestore() {
         }
         printf("  %zu truncations and 4000 random states: %s\n", valid.getSize() + 1,
                fuzzOk ? "no crash, parameters in range" : "PARAMETERS OUT OF RANGE");
+
+        // Crafted counts: a tree claiming ~2 billion children, and a
+        // property claiming a ~2 GB binary value, each in a few bytes. JUCE's
+        // ValueTree reader would try to allocate that much on session load.
+        const auto withHeader = [](std::initializer_list<uint8_t> tail) {
+            std::vector<uint8_t> b;
+            for (const char c : juce::String("PAEchoCancellerState")) b.push_back(static_cast<uint8_t>(c));
+            b.push_back(0);
+            b.insert(b.end(), tail);
+            return b;
+        };
+        const std::vector<uint8_t> crafted[] = {
+            withHeader({ 0x00, 0x04, 0xff, 0xff, 0xff, 0x7f }),                   // 0 props, 2^31-1 children
+            withHeader({ 0x01, 'a', 0x00, 0x04, 0xff, 0xff, 0xff, 0x7f, 0x08 }), // 2 GB binary property
+        };
+        proc.getAmountParameter()->setValueNotifyingHost(proc.getAmountParameter()->convertTo0to1(42.0f));
+        bool craftedOk = true;
+        for (const auto& craftedBlob : crafted) {
+            const auto t0 = std::chrono::steady_clock::now();
+            proc.setStateInformation(craftedBlob.data(), static_cast<int>(craftedBlob.size()));
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            craftedOk = craftedOk && ms < 50.0 && std::abs(proc.getAmountParameter()->get() - 42.0f) < 0.05f;
+        }
+        printf("  crafted huge-count states: %s\n", craftedOk ? "rejected, settings kept" : "NOT REJECTED");
+        fuzzOk = fuzzOk && craftedOk;
         pass = pass && fuzzOk;
     }
     printf("  %s\n", pass ? "PASS -- corrupt values are ignored or clamped, audio keeps flowing"

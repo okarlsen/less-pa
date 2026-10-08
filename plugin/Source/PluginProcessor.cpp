@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 
 PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
     : AudioProcessor(BusesProperties()
@@ -552,8 +554,87 @@ void PAEchoCancellerAudioProcessor::getStateInformation(juce::MemoryBlock& destD
     state.writeToStream(stream);
 }
 
+namespace {
+// Walks JUCE's binary ValueTree format (ValueTree::writeToStream) and
+// accepts it only if every count and length it claims fits in the bytes
+// actually there. ValueTree::readFromData trusts those numbers: a damaged
+// or crafted session can claim two billion children or a 2 GB binary
+// property, and JUCE then tries to allocate that much (or loops that many
+// times) while the host loads the session. Our state is one flat tree of
+// numbers, so only plain scalar and string properties are accepted.
+class StateBlobChecker {
+public:
+    StateBlobChecker(const void* data, size_t size) : p(static_cast<const uint8_t*>(data)), end(p + size) {}
+
+    bool isWellFormed() { return p != nullptr && tree(0); }
+
+private:
+    const uint8_t* p;
+    const uint8_t* end;
+
+    size_t remaining() const { return static_cast<size_t>(end - p); }
+
+    // A count or length: non-negative and no larger than the bytes left.
+    bool count(int& out)
+    {
+        if (remaining() < 1) return false;
+        const uint8_t sizeByte = *p++;
+        const int numBytes = sizeByte & 0x7f;
+        if (numBytes > 4 || (sizeByte & 0x80) != 0 || remaining() < static_cast<size_t>(numBytes)) return false;
+        uint32_t v = 0;
+        for (int i = 0; i < numBytes; ++i) v |= static_cast<uint32_t>(*p++) << (8 * i);
+        if (v > remaining()) return false;
+        out = static_cast<int>(v);
+        return true;
+    }
+
+    bool string(bool mustBeNonEmpty)
+    {
+        const auto* nul = static_cast<const uint8_t*>(std::memchr(p, 0, remaining()));
+        if (nul == nullptr || (mustBeNonEmpty && nul == p)) return false;
+        p = nul + 1;
+        return true;
+    }
+
+    bool value()
+    {
+        int numBytes = 0;
+        if (!count(numBytes)) return false;
+        if (numBytes == 0) return true; // void
+        const uint8_t marker = *p;
+        const size_t payload = static_cast<size_t>(numBytes - 1);
+        switch (marker) {
+            case 1: if (payload != 4) return false; break; // int
+            case 2: case 3: case 9: if (payload != 0) return false; break; // true, false, undefined
+            case 4: case 6: if (payload != 8) return false; break; // double, int64
+            case 5: break; // string
+            default: return false; // arrays, binary blobs, objects: never written by this plugin
+        }
+        p += numBytes;
+        return true;
+    }
+
+    bool tree(int depth)
+    {
+        if (depth > 8 || !string(true)) return false;
+        int numProps = 0;
+        if (!count(numProps)) return false;
+        for (int i = 0; i < numProps; ++i)
+            if (!string(true) || !value()) return false;
+        int numChildren = 0;
+        if (!count(numChildren)) return false;
+        for (int i = 0; i < numChildren; ++i)
+            if (!tree(depth + 1)) return false;
+        return true;
+    }
+};
+} // namespace
+
 void PAEchoCancellerAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
+    if (sizeInBytes <= 0 || !StateBlobChecker(data, static_cast<size_t>(sizeInBytes)).isWellFormed())
+        return; // damaged or foreign data: keep the current settings
+
     auto state = juce::ValueTree::readFromData(data, static_cast<size_t>(sizeInBytes));
     if (!state.isValid())
         return;

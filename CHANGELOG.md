@@ -15,6 +15,11 @@ All notable changes to Less PA are documented here. Versions follow
   mic for the rest of the session (the NaN reached the Bleed Suppressor and
   latched in its smoothing). Non-finite saved values are now ignored and the
   rest clamped to range.
+- A damaged or crafted session file could make the plugin try to allocate
+  gigabytes, or loop for a very long time, while the host loads the session
+  (JUCE's state reader trusts the counts and lengths stored in the data).
+  The saved state is now checked before it is read, and anything malformed
+  is ignored, leaving the current settings. Found by UndefinedBehaviorSanitizer.
 
 ### Added
 
