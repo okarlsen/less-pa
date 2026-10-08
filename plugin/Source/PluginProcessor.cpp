@@ -565,8 +565,15 @@ void PAEchoCancellerAudioProcessor::setStateInformation(const void* data, int si
             // A key simply absent (older save, made before some parameter
             // existed) leaves that parameter at its constructor default --
             // no special-casing needed for forward/backward compatibility.
-            if (state.hasProperty(withId->paramID))
-                param->setValueNotifyingHost(static_cast<float>(state.getProperty(withId->paramID)));
+            // A damaged session file can hold any number here. JUCE's
+            // parameters pass a NaN straight through to the DSP (where it
+            // latches in the suppressor's smoothing and silences the mic),
+            // so a non-finite value is skipped and the rest clamped to 0..1.
+            if (state.hasProperty(withId->paramID)) {
+                const auto value = static_cast<double>(state.getProperty(withId->paramID));
+                if (std::isfinite(value))
+                    param->setValueNotifyingHost(static_cast<float>(juce::jlimit(0.0, 1.0, value)));
+            }
         }
     }
 }

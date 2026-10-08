@@ -18,6 +18,31 @@
 #include <thread>
 #include <vector>
 
+#include <atomic>
+#include <cstdlib>
+#include <new>
+
+// Heap allocations counted while gAllocCounting is set: the audio-thread
+// checks below switch it on around processBlock to prove the audio path
+// never allocates (an allocation can block on a lock inside malloc, and
+// over hours of live use a steady trickle of them is how memory grows).
+static std::atomic<bool> gAllocCounting{ false };
+static std::atomic<uint64_t> gAllocCount{ 0 };
+
+void* operator new(std::size_t size)
+{
+    if (gAllocCounting.load(std::memory_order_relaxed))
+        gAllocCount.fetch_add(1, std::memory_order_relaxed);
+    if (void* p = std::malloc(size == 0 ? 1 : size))
+        return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+
 namespace {
 
 void writeWav16(const std::string& path, const std::vector<float>& samples, int sampleRate) {
@@ -1269,8 +1294,11 @@ bool testOversizedHostBlock(int sampleRate) {
 // For live use that means one glitched frame from anything upstream silently
 // kills an audience mic for the rest of the show. Confirms the plugin both
 // survives the burst and fully recovers afterwards.
-bool testNonFiniteInputRecovery(int sampleRate) {
-    printf("\n=== Non-finite (NaN/Inf) input recovery test (%d Hz) ===\n", sampleRate);
+// hugeFinite: the burst is +/-1e30 instead -- finite, so it passes the
+// HPF's NaN guard, but its square overflows inside the canceller.
+bool testNonFiniteInputRecovery(int sampleRate, bool hugeFinite = false) {
+    printf("\n=== %s input recovery test (%d Hz) ===\n", hugeFinite ? "Huge finite (1e30)" : "Non-finite (NaN/Inf)",
+           sampleRate);
     const double durationS = 12.0;
     const int n = static_cast<int>(sampleRate * durationS);
 
@@ -1293,7 +1321,8 @@ bool testNonFiniteInputRecovery(int sampleRate) {
     const int burstLen = static_cast<int>(sampleRate * 0.005);
     for (int i = 0; i < burstLen && burstStart + i < n; ++i)
         mic[static_cast<size_t>(burstStart + i)] =
-            (i % 2 == 0) ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+            hugeFinite ? ((i % 2 == 0) ? 1e30f : -1e30f)
+                       : ((i % 2 == 0) ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity());
 
     PAEchoCancellerAudioProcessor proc;
     if (!setMonoLayout(proc)) {
@@ -2635,6 +2664,310 @@ bool testReferenceIsCopyOfMainInput(int sampleRate) {
     return pass;
 }
 
+// Hours of live use must not grow memory: everything is allocated in
+// prepareToPlay, so processBlock must never touch the heap, whatever the
+// host does -- every control automated on every block (Tail Length, HPF,
+// Strength/Range/Time, Trim, Mix, Bypass), and host blocks that are
+// smaller than a frame, off the frame grid and larger than promised.
+bool testProcessBlockNeverAllocates(int sampleRate) {
+    printf("\n=== No heap allocation in processBlock, every control moving (%d Hz) ===\n", sampleRate);
+    PAEchoCancellerAudioProcessor proc;
+    if (!setMonoLayout(proc)) {
+        printf("  FAILED to set mono layout\n");
+        return false;
+    }
+    const int preparedBlock = 128;
+    proc.prepareToPlay(sampleRate, preparedBlock);
+    const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer(totalChannels, 4 * preparedBlock);
+    juce::MidiBuffer midi;
+    auto params = proc.getParameters();
+
+    std::mt19937 rng(17);
+    std::uniform_real_distribution<float> audio(-0.5f, 0.5f), unit(0.0f, 1.0f);
+    static const int pattern[] = { 128, 37, 1, 129, 512, 64 }; // 512 is over the promised 128
+    uint64_t allocations = 0;
+    const int numBlocks = static_cast<int>(20.0 * sampleRate / 128);
+    for (int b = 0; b < numBlocks; ++b) {
+        const int bs = pattern[b % 6];
+        buffer.setSize(totalChannels, bs, false, false, true);
+        auto mainIn = proc.getBusBuffer(buffer, true, 0);
+        auto refIn = proc.getBusBuffer(buffer, true, 1);
+        for (int s = 0; s < bs; ++s) {
+            const float r = audio(rng);
+            refIn.setSample(0, s, r);
+            mainIn.setSample(0, s, 0.4f * r + 0.1f * audio(rng));
+        }
+        // Like a host's automation, set between blocks (hosts set parameters
+        // from their own threads); processBlock then applies the change.
+        if (b > numBlocks / 4)
+            params[static_cast<int>(static_cast<size_t>(b) % static_cast<size_t>(params.size()))]
+                ->setValueNotifyingHost(unit(rng));
+
+        gAllocCount.store(0, std::memory_order_relaxed);
+        gAllocCounting.store(true, std::memory_order_relaxed);
+        proc.processBlock(buffer, midi);
+        gAllocCounting.store(false, std::memory_order_relaxed);
+        allocations += gAllocCount.load(std::memory_order_relaxed);
+    }
+    proc.releaseResources();
+
+    printf("  %d blocks, heap allocations inside processBlock: %llu\n", numBlocks,
+           static_cast<unsigned long long>(allocations));
+    const bool pass = allocations == 0;
+    printf("  %s\n", pass ? "PASS -- the audio path never allocates" : "CHECK -- processBlock allocated");
+    return pass;
+}
+
+// A session file (or preset) with a NaN, an infinity or an out-of-range
+// value must never reach the DSP as one: a NaN Strength or Range would
+// make the suppressor's gains NaN, which latches in its smoothing and
+// silences the mic for the rest of the show.
+bool testCorruptStateRestore() {
+    printf("\n=== Corrupt saved state is sanitised on restore ===\n");
+    const double badValues[] = { std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(),
+                                 -std::numeric_limits<double>::infinity(), 1e30, -1e30, 7.0, -3.0 };
+    bool pass = true;
+    for (double bad : badValues) {
+        PAEchoCancellerAudioProcessor proc;
+        if (!setMonoLayout(proc)) {
+            printf("  FAILED to set mono layout\n");
+            return false;
+        }
+        juce::ValueTree state("PAEchoCancellerState");
+        for (auto* param : proc.getParameters())
+            if (auto* withId = dynamic_cast<juce::AudioProcessorParameterWithID*>(param))
+                state.setProperty(withId->paramID, bad, nullptr);
+        juce::MemoryOutputStream stream;
+        state.writeToStream(stream);
+        proc.setStateInformation(stream.getData(), static_cast<int>(stream.getDataSize()));
+
+        bool paramsOk = true;
+        for (auto* param : proc.getParameters()) {
+            const float v = param->getValue();
+            paramsOk = paramsOk && std::isfinite(v) && v >= 0.0f && v <= 1.0f;
+        }
+
+        const int sampleRate = 48000, blockSize = 256;
+        proc.prepareToPlay(sampleRate, blockSize);
+        const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+        juce::AudioBuffer<float> buffer(totalChannels, blockSize);
+        juce::MidiBuffer midi;
+        std::mt19937 rng(3);
+        std::uniform_real_distribution<float> audio(-0.5f, 0.5f);
+        int nonFinite = 0;
+        double outSq = 0.0;
+        for (int b = 0; b < 2 * sampleRate / blockSize; ++b) {
+            auto mainIn = proc.getBusBuffer(buffer, true, 0);
+            auto refIn = proc.getBusBuffer(buffer, true, 1);
+            for (int s = 0; s < blockSize; ++s) {
+                const float r = audio(rng);
+                refIn.setSample(0, s, r);
+                mainIn.setSample(0, s, 0.4f * r + 0.1f * audio(rng));
+            }
+            proc.processBlock(buffer, midi);
+            for (int s = 0; s < blockSize; ++s) {
+                const float v = proc.getBusBuffer(buffer, false, 0).getSample(0, s);
+                if (!std::isfinite(v)) ++nonFinite;
+                else outSq += static_cast<double>(v) * v;
+            }
+        }
+        proc.releaseResources();
+        const bool ok = paramsOk && nonFinite == 0 && outSq > 0.0;
+        printf("  saved value %-8g: parameters %s, output %s\n", bad, paramsOk ? "in range" : "OUT OF RANGE",
+               nonFinite > 0 ? "NON-FINITE" : (outSq > 0.0 ? "finite" : "SILENT"));
+        pass = pass && ok;
+    }
+
+    // Damaged files, not just damaged values: every truncation of a valid
+    // state, then random bytes, and random bytes behind a valid header.
+    {
+        PAEchoCancellerAudioProcessor source;
+        juce::MemoryBlock valid;
+        source.getStateInformation(valid);
+        PAEchoCancellerAudioProcessor proc;
+        const auto inRange = [&proc] {
+            for (auto* param : proc.getParameters())
+                if (!(param->getValue() >= 0.0f && param->getValue() <= 1.0f))
+                    return false;
+            return true;
+        };
+        bool fuzzOk = true;
+        for (size_t len = 0; len <= valid.getSize(); ++len) {
+            proc.setStateInformation(valid.getData(), static_cast<int>(len));
+            fuzzOk = fuzzOk && inRange();
+        }
+        std::mt19937 rng(11);
+        std::vector<uint8_t> blob;
+        for (int i = 0; i < 4000; ++i) {
+            blob.resize(static_cast<size_t>(rng() % 512));
+            for (auto& byte : blob) byte = static_cast<uint8_t>(rng());
+            if (i % 2 == 1) // keep the real header so the parser gets further in
+                std::copy_n(static_cast<const uint8_t*>(valid.getData()), std::min(blob.size(), size_t{ 24 }), blob.begin());
+            proc.setStateInformation(blob.data(), static_cast<int>(blob.size()));
+            fuzzOk = fuzzOk && inRange();
+        }
+        printf("  %zu truncations and 4000 random states: %s\n", valid.getSize() + 1,
+               fuzzOk ? "no crash, parameters in range" : "PARAMETERS OUT OF RANGE");
+        pass = pass && fuzzOk;
+    }
+    printf("  %s\n", pass ? "PASS -- corrupt values are ignored or clamped, audio keeps flowing"
+                          : "CHECK -- a corrupt saved value reached the DSP");
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// --soak: hours of live-style processing on real recordings, looped, at a
+// 128-sample host block, with the process's resident memory, heap
+// allocations inside processBlock, non-finite output and the PA reduction
+// reported for every pass through the material. The files are streamed
+// from disk a chunk at a time so the harness itself holds no growing state.
+// ---------------------------------------------------------------------------
+
+double residentMegabytes() {
+#if JUCE_LINUX
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line))
+        if (line.rfind("VmRSS:", 0) == 0)
+            return std::atof(line.c_str() + 6) / 1024.0;
+#endif
+    return -1.0; // not measured on this platform; the allocation count still is
+}
+
+int runSoakMode(const char* refPath, const char* micPath, const char* mic2Path, double hours) {
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> refReader(formats.createReaderFor(juce::File(juce::String(refPath))));
+    std::unique_ptr<juce::AudioFormatReader> micReader(formats.createReaderFor(juce::File(juce::String(micPath))));
+    std::unique_ptr<juce::AudioFormatReader> mic2Reader(
+        mic2Path != nullptr ? formats.createReaderFor(juce::File(juce::String(mic2Path))) : nullptr);
+    if (refReader == nullptr || micReader == nullptr || (mic2Path != nullptr && mic2Reader == nullptr)) {
+        printf("ERROR: cannot read the input files\n");
+        return 1;
+    }
+    const int sampleRate = static_cast<int>(refReader->sampleRate);
+    int64_t loopLength = std::min<int64_t>(refReader->lengthInSamples, micReader->lengthInSamples);
+    if (mic2Reader != nullptr)
+        loopLength = std::min<int64_t>(loopLength, mic2Reader->lengthInSamples);
+    const int numMics = mic2Reader != nullptr ? 2 : 1;
+
+    PAEchoCancellerAudioProcessor proc;
+    PAEchoCancellerAudioProcessor::BusesLayout layout;
+    const auto micSet = numMics == 2 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    layout.inputBuses.add(micSet);
+    layout.inputBuses.add(juce::AudioChannelSet::mono());
+    layout.outputBuses.add(micSet);
+    if (!proc.setBusesLayout(layout)) {
+        printf("ERROR: layout refused\n");
+        return 1;
+    }
+    const int hostBlock = 128;
+    proc.prepareToPlay(sampleRate, hostBlock);
+    const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer(totalChannels, hostBlock);
+    juce::MidiBuffer midi;
+
+    const int chunk = 64 * hostBlock;
+    juce::AudioBuffer<float> refChunk(1, chunk), micChunk(2, chunk);
+
+    const int64_t total = static_cast<int64_t>(hours * 3600.0 * sampleRate);
+    printf("=== Soak: %.2f h of live processing, %d mic channel(s), %d Hz, %d-sample blocks, %.0f s loop ===\n",
+           hours, numMics, sampleRate, hostBlock, static_cast<double>(loopLength) / sampleRate);
+    printf("%6s %9s %10s %12s %10s %13s %9s %8s\n", "pass", "audio", "RSS (MB)", "allocations", "non-finite",
+           "level drop", "delay", "speed");
+
+    const double rssStart = residentMegabytes();
+    double rssAfterFirstPass = -1.0, rssMax = rssStart;
+    uint64_t allocationsTotal = 0, nonFiniteTotal = 0;
+    std::vector<double> reductions;
+    const auto wallStart = std::chrono::steady_clock::now();
+    auto passWallStart = wallStart;
+
+    int64_t done = 0, posInLoop = 0;
+    double micSq = 0.0, outSq = 0.0;
+    uint64_t passAllocations = 0, passNonFinite = 0;
+    int pass = 1;
+    while (done < total) {
+        const int n = static_cast<int>(std::min<int64_t>({ static_cast<int64_t>(chunk), loopLength - posInLoop, total - done }));
+        refReader->read(&refChunk, 0, n, posInLoop, true, false);
+        micReader->read(&micChunk, 0, n, posInLoop, true, false);
+        if (mic2Reader != nullptr)
+            mic2Reader->read(micChunk.getArrayOfWritePointers() + 1, 1, posInLoop, n);
+
+        for (int off = 0; off < n; off += hostBlock) {
+            const int bs = std::min(hostBlock, n - off);
+            buffer.setSize(totalChannels, bs, false, false, true);
+            auto mainIn = proc.getBusBuffer(buffer, true, 0);
+            auto refIn = proc.getBusBuffer(buffer, true, 1);
+            for (int ch = 0; ch < numMics; ++ch) {
+                mainIn.copyFrom(ch, 0, micChunk, ch, off, bs);
+                for (int s = 0; s < bs; ++s) {
+                    const double v = micChunk.getSample(ch, off + s);
+                    micSq += v * v;
+                }
+            }
+            refIn.copyFrom(0, 0, refChunk, 0, off, bs);
+
+            gAllocCount.store(0, std::memory_order_relaxed);
+            gAllocCounting.store(true, std::memory_order_relaxed);
+            proc.processBlock(buffer, midi);
+            gAllocCounting.store(false, std::memory_order_relaxed);
+            passAllocations += gAllocCount.load(std::memory_order_relaxed);
+
+            auto mainOut = proc.getBusBuffer(buffer, false, 0);
+            for (int ch = 0; ch < numMics; ++ch)
+                for (int s = 0; s < bs; ++s) {
+                    const float v = mainOut.getSample(ch, s);
+                    if (!std::isfinite(v)) ++passNonFinite;
+                    else outSq += static_cast<double>(v) * v;
+                }
+        }
+        done += n;
+        posInLoop += n;
+
+        if (posInLoop >= loopLength || done >= total) {
+            const auto now = std::chrono::steady_clock::now();
+            const double wall = std::chrono::duration<double>(now - passWallStart).count();
+            passWallStart = now;
+            const double rss = residentMegabytes();
+            rssMax = std::max(rssMax, rss);
+            if (pass == 1) rssAfterFirstPass = rss;
+            const double reductionDb = 10.0 * std::log10(std::max(1e-30, micSq) / std::max(1e-30, outSq));
+            reductions.push_back(reductionDb);
+            const double audioS = static_cast<double>(done) / sampleRate;
+            printf("%6d %5d:%02d:%02d %10.1f %12llu %10llu %10.2f dB %6d ms %7.0fx\n", pass,
+                   static_cast<int>(audioS / 3600), static_cast<int>(audioS / 60) % 60, static_cast<int>(audioS) % 60,
+                   rss, static_cast<unsigned long long>(passAllocations), static_cast<unsigned long long>(passNonFinite),
+                   reductionDb, proc.getEstimatedEchoPathDelayMs(),
+                   static_cast<double>(posInLoop) / sampleRate / std::max(1e-9, wall));
+            fflush(stdout);
+            allocationsTotal += passAllocations;
+            nonFiniteTotal += passNonFinite;
+            passAllocations = passNonFinite = 0;
+            micSq = outSq = 0.0;
+            posInLoop = 0;
+            ++pass;
+        }
+    }
+    proc.releaseResources();
+
+    // Pass 1 includes the start-up (learning from zero); from pass 2 on the
+    // material repeats, so the reduction should repeat too.
+    double reductionSpread = 0.0;
+    for (size_t i = 1; i < reductions.size(); ++i)
+        reductionSpread = std::max(reductionSpread, std::abs(reductions[i] - reductions[std::min<size_t>(1, reductions.size() - 1)]));
+    const double rssGrowth = rssAfterFirstPass >= 0.0 ? rssMax - rssAfterFirstPass : 0.0;
+    printf("\nRSS start %.1f MB, after pass 1 %.1f MB, peak %.1f MB (growth after pass 1: %.2f MB)\n", rssStart,
+           rssAfterFirstPass, rssMax, rssGrowth);
+    printf("Allocations in processBlock: %llu; non-finite output samples: %llu; reduction spread after pass 1: %.3f dB\n",
+           static_cast<unsigned long long>(allocationsTotal), static_cast<unsigned long long>(nonFiniteTotal),
+           reductionSpread);
+    const bool ok = allocationsTotal == 0 && nonFiniteTotal == 0 && rssGrowth < 1.0 && reductionSpread < 0.5;
+    printf("%s\n", ok ? "PASS -- flat memory, no allocations, steady cancellation" : "CHECK -- see above");
+    return ok ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -2671,6 +3004,22 @@ int main(int argc, char* argv[]) {
                 irregularCadence = true;
         }
         return runRealMaterialMode(argv[2], argv[3], maxSeconds, writeOutputs, irregularCadence);
+    }
+
+    // --soak <ref> <mic> [--mic2 <mic>] [--hours H]: hours of live-style
+    // processing on looped real recordings, with memory and allocations
+    // measured (see runSoakMode).
+    if (argc >= 4 && std::string(argv[1]) == "--soak") {
+        const char* mic2 = nullptr;
+        double hours = 1.0;
+        for (int i = 4; i < argc; ++i) {
+            const std::string arg(argv[i]);
+            if (arg == "--mic2" && i + 1 < argc)
+                mic2 = argv[++i];
+            else if (arg == "--hours" && i + 1 < argc)
+                hours = std::atof(argv[++i]);
+        }
+        return runSoakMode(argv[2], argv[3], mic2, hours);
     }
 
     // --bypass-only: just the bypass regression tests, for fast iteration on
@@ -2717,10 +3066,13 @@ int main(int argc, char* argv[]) {
     for (int rate : rates) allPass = testReferenceIsCopyOfMainInput(rate) && allPass;
     for (int rate : rates) allPass = testOversizedHostBlock(rate) && allPass;
     for (int rate : rates) allPass = testNonFiniteInputRecovery(rate) && allPass;
+    for (int rate : rates) allPass = testNonFiniteInputRecovery(rate, true) && allPass;
     allPass = testLatencyInvariantAcrossTailLengths() && allPass;
     for (int rate : rates) allPass = testLiveTailLengthChangeNonBlocking(rate) && allPass;
     allPass = testFastBounceTailLengthAppliedPromptly(48000) && allPass;
     allPass = testDelayStatsExposed(48000) && allPass;
+    for (int rate : rates) allPass = testProcessBlockNeverAllocates(rate) && allPass;
+    allPass = testCorruptStateRestore() && allPass;
 
     printf("\n%s\n", allPass ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
 
