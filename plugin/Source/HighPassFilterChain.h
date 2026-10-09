@@ -15,9 +15,14 @@ public:
         stage2.reset();
     }
 
+    // Called from the audio thread when HPF Frequency moves, so it must not
+    // allocate: ArrayCoefficients returns the values by value and they are
+    // written into the existing coefficient storage (Coefficients::makeHighPass
+    // would heap-allocate a new object on every change).
     void setCutoff(double sampleRate, float frequencyHz) {
-        *stage1.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, frequencyHz, 0.5411961f);
-        *stage2.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, frequencyHz, 1.3065630f);
+        using Array = juce::dsp::IIR::ArrayCoefficients<float>;
+        *stage1.coefficients = Array::makeHighPass(sampleRate, frequencyHz, 0.5411961f);
+        *stage2.coefficients = Array::makeHighPass(sampleRate, frequencyHz, 1.3065630f);
     }
 
     // Guards both ways against non-finite samples, because an IIR's feedback

@@ -3,6 +3,34 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Moving HPF Frequency (from the host's automation or a control surface)
+  allocated memory on the audio thread, four small allocations per change.
+  Memory stayed flat, but an allocation can wait on a lock and cause a dropout
+  under load. The filter coefficients are now written in place.
+- A damaged session file or preset holding NaN for a control silenced the
+  mic for the rest of the session (the NaN reached the Bleed Suppressor and
+  latched in its smoothing). Non-finite saved values are now ignored and the
+  rest clamped to range.
+- A damaged or crafted session file could make the plugin try to allocate
+  gigabytes, or loop for a very long time, while the host loads the session
+  (JUCE's state reader trusts the counts and lengths stored in the data).
+  The saved state is now checked before it is read, and anything malformed
+  is ignored, leaving the current settings. Found by UndefinedBehaviorSanitizer.
+
+### Added
+
+- The verify harness checks that processBlock never allocates while every
+  control is automated, restores damaged and random session data, and has a
+  `--soak` mode: hours of real recordings, looped, with memory, allocations
+  and output level reported per pass, and a `--thread-stress` mode for
+  ThreadSanitizer (audio callback against UI polling, automation and state
+  save/restore). No change to the audio or latency.
+- The build is free of compiler warnings under JUCE's recommended warning set.
+
 ## [1.1.2]
 
 ### Fixed
