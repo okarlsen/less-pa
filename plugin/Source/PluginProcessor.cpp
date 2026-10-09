@@ -476,6 +476,16 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         }
     }
 
+    // Output guard: whatever happens inside, the host never gets a
+    // non-finite sample or one above the +60 dBFS input clamp (see
+    // HighPassFilterChain). The canceller restarts itself if it ever
+    // blows up; this only covers the block in which that happens.
+    for (int ch = 0; ch < mainOut.getNumChannels(); ++ch) {
+        float* out = mainOut.getWritePointer(ch);
+        for (int s = 0; s < totalNumSamples; ++s)
+            out[s] = std::isfinite(out[s]) ? juce::jlimit(-maxOutputLevel, maxOutputLevel, out[s]) : 0.0f;
+    }
+
     inputPeakLevelPost.store(inputPostPeak, std::memory_order_relaxed);
     sidechainPeakLevelPost.store(sidechainPostPeak, std::memory_order_relaxed);
     outputPeakLevel.store(mainOut.getMagnitude(0, totalNumSamples), std::memory_order_relaxed);

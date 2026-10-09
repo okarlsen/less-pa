@@ -109,7 +109,12 @@ public:
     // has found the PA in the mic. Safe from any thread.
     int getEstimatedEchoPathDelayMs() const noexcept { return kalman.getDelayEstimateMs(); }
 
+    // Canceller restarts after a blow-up (see KalmanEchoCanceller). Tests.
+    uint64_t getCancellerRestartCount() const noexcept { return kalman.getRestartCount(); }
+
 private:
+    static constexpr float maxOutputLevel = 1000.0f; // +60 dBFS, the input clamp
+
     // The echo canceller: a full-band partitioned-block frequency-domain
     // Kalman filter plus a low-latency Wiener suppressor. Allocated for the
     // longest Tail Length in prepareToPlay, so every control below applies
