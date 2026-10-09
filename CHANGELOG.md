@@ -3,7 +3,7 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.3]
 
 ### Fixed
 
@@ -20,9 +20,15 @@ All notable changes to Less PA are documented here. Versions follow
   (JUCE's state reader trusts the counts and lengths stored in the data).
   The saved state is now checked before it is read, and anything malformed
   is ignored, leaving the current settings. Found by UndefinedBehaviorSanitizer.
+- A burst of huge but finite samples on the mic or Reference input (an
+  upstream plugin's filter blowing up, for example) overflowed inside the
+  canceller on macOS and left the output non-finite until the plugin was
+  reloaded. Input is now limited to +60 dBFS before the canceller, which no
+  real signal reaches, so the burst is contained and cancellation recovers.
 
 ### Added
 
+- AAX for Pro Tools, PACE-signed, in the installer and the zip.
 - The verify harness checks that processBlock never allocates while every
   control is automated, restores damaged and random session data, and has a
   `--soak` mode: hours of real recordings, looped, with memory, allocations
@@ -30,6 +36,14 @@ All notable changes to Less PA are documented here. Versions follow
   ThreadSanitizer (audio callback against UI polling, automation and state
   save/restore). No change to the audio or latency.
 - The build is free of compiler warnings under JUCE's recommended warning set.
+
+### Changed
+
+- The installer now installs for all users, into `/Library/Audio/Plug-Ins`
+  (and `/Library/Application Support/Avid/Audio/Plug-Ins` for the AAX), and
+  asks for an administrator password. Pro Tools only scans the system folder,
+  so one destination covers all three formats. An older copy in
+  `~/Library/Audio/Plug-Ins`, where versions up to 1.1.2 installed, is removed.
 
 ## [1.1.2]
 

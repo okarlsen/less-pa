@@ -16,7 +16,7 @@ by a per-band bleed suppressor, adding about 4 ms of latency. Built by SGTM on t
 ## Requirements
 
 - macOS 13 (Ventura) or newer, on Apple Silicon.
-- A DAW/host supporting AU or VST3 plugins with a sidechain/second input
+- A DAW/host supporting AU, VST3 or AAX plugins with a sidechain/second input
   bus (e.g. Logic Pro, Reaper, Ableton Live). Some hosts need the PA
   reference explicitly wired to the plugin's second input in their own
   routing/pin-connector UI rather than relying on automatic sidechain
@@ -28,12 +28,13 @@ by a per-band bleed suppressor, adding about 4 ms of latency. Built by SGTM on t
 
 Download the latest `.pkg` from the
 [Releases page](https://github.com/okarlsen/less-pa/releases) and open it.
-It installs the AU and VST3 into your own
-`~/Library/Audio/Plug-Ins/` — no administrator password needed, and you can
-deselect either format if you only want one.
+It installs the AU, the VST3 and the AAX (Pro Tools) into the system plug-in
+folders under `/Library`, so it asks for an administrator password, and you
+can deselect the formats you don't need. Versions up to 1.1.2 installed into
+your own `~/Library/Audio/Plug-Ins/`; the installer removes that older copy.
 
 If you would rather not run an installer, the `.zip` on the same page has the
-two plugin bundles to copy into place by hand; see the `INSTALL.txt` inside.
+plugin bundles to copy into place by hand; see the `INSTALL.txt` inside.
 
 Both downloads are signed with an Apple Developer ID and notarized by Apple,
 so there is no Gatekeeper detour either way — nothing to approve in System

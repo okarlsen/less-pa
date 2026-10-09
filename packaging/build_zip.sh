@@ -1,7 +1,8 @@
 #!/bin/bash
 #
 # Builds a no-installer distribution of Less PA: a plain .zip containing the
-# built AU and VST3 bundles plus manual install instructions.
+# built AU and VST3 bundles (and the AAX, when a PACE-signed one is present)
+# plus manual install instructions.
 #
 # This is the drag-and-drop alternative to build_installer.sh, for people who
 # would rather copy two bundles into place than run an installer. The bundles
@@ -28,6 +29,7 @@ source "$HERE/signing.sh"
 ARTEFACTS="$REPO_ROOT/plugin/build/PAEchoCanceller_artefacts/Release"
 AU_BUNDLE="$ARTEFACTS/AU/Less PA.component"
 VST3_BUNDLE="$ARTEFACTS/VST3/Less PA.vst3"
+AAX_BUNDLE="$ARTEFACTS/AAX/Less PA.aaxplugin"
 
 BUILD_DIR="$HERE/build"
 
@@ -70,28 +72,48 @@ mkdir -p "$STAGE_DIR"
 cp -R "$AU_BUNDLE" "$STAGE_DIR/"
 cp -R "$VST3_BUNDLE" "$STAGE_DIR/"
 
+# The AAX is never signed here (see build_installer.sh): it is included only
+# if it is already PACE-signed, notarized and stapled.
+AAX_COPY_LINE=""
+AAX_NOTE=""
+if [[ -d "$AAX_BUNDLE/Contents/__Pace_Eden.bundle" ]] \
+        && codesign --verify --deep --strict "$AAX_BUNDLE" 2>/dev/null \
+        && lesspa_bundles_are_stapled "$AAX_BUNDLE"; then
+    lesspa_check_no_stray_dylibs "$AAX_BUNDLE"
+    cp -R "$AAX_BUNDLE" "$STAGE_DIR/"
+    echo "  including the AAX (PACE-signed and stapled)"
+    AAX_COPY_LINE="
+    Less PA.aaxplugin  ->  /Library/Application Support/Avid/Audio/Plug-Ins/"
+    AAX_NOTE="
+The AAX is for Pro Tools, which only looks in that system folder, so macOS
+asks for an administrator password when you copy it there.
+"
+fi
+
 cat > "$STAGE_DIR/INSTALL.txt" <<TXT
 Less PA $VERSION -- manual install
 ===================================
 
-This is the no-installer copy, for anyone who would rather drag two files
+This is the no-installer copy, for anyone who would rather drag the files
 into place than run an installer. If you would prefer the installer, grab
 the .pkg from the releases page instead -- it does exactly the same thing.
 
 Copy the plugin(s) you want into place:
 
     Less PA.component  ->  ~/Library/Audio/Plug-Ins/Components/
-    Less PA.vst3       ->  ~/Library/Audio/Plug-Ins/VST3/
+    Less PA.vst3       ->  ~/Library/Audio/Plug-Ins/VST3/$AAX_COPY_LINE
 
-Only one format is needed, not both -- AU for Logic/GarageBand, VST3 for
+Only the format your DAW uses is needed -- AU for Logic/GarageBand, VST3 for
 Reaper/Ableton/Cubase/etc. Create the destination folder first if it
-doesn't already exist. These are your own user plug-in folders, so no
-administrator password is needed.
-
+doesn't already exist. The AU and VST3 folders above are your own user
+plug-in folders, so no administrator password is needed for those. If an
+installer put Less PA in /Library/Audio/Plug-Ins before, remove that copy
+so your DAW doesn't see two.
+$AAX_NOTE
 That's the whole install. Restart your DAW, or trigger a plugin rescan, so
 it picks up the new plugin.
 
-Both plugins are signed with an Apple Developer ID and notarized by Apple,
+The plugins are signed with an Apple Developer ID and notarized by Apple,
 with the notarization ticket stapled to each bundle -- so there is no
 quarantine flag to clear, no Terminal command to run, and no Gatekeeper
 prompt, even offline.

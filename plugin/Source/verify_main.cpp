@@ -1297,7 +1297,8 @@ bool testOversizedHostBlock(int sampleRate) {
 // kills an audience mic for the rest of the show. Confirms the plugin both
 // survives the burst and fully recovers afterwards.
 // hugeFinite: the burst is +/-1e30 instead -- finite, so it passes the
-// HPF's NaN guard, but its square overflows inside the canceller.
+// HPF's NaN guard, and unless the HPF also clamps it, its square overflows
+// inside the canceller.
 bool testNonFiniteInputRecovery(int sampleRate, bool hugeFinite = false) {
     printf("\n=== %s input recovery test (%d Hz) ===\n", hugeFinite ? "Huge finite (1e30)" : "Non-finite (NaN/Inf)",
            sampleRate);

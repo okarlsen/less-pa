@@ -62,7 +62,10 @@ cmake --build build --target PAEchoCanceller_AAX -j8
 ```
 
 It is off by default. Pro Tools only loads an AAX plugin that has been
-signed with PACE's wraptool, which the packaging scripts don't do yet. With
+signed with PACE's wraptool. PACE's tools are confidential and not part of
+this repository, so the packaging scripts never sign the AAX themselves:
+they include an AAX in the installer and the zip only if the one in the
+build folder is already PACE-signed, notarized and stapled. With
 `LESSPA_INSTALL_AFTER_BUILD` on, the build also copies the plugin into
 `/Library/Application Support/Avid/Audio/Plug-Ins`.
 
@@ -218,11 +221,15 @@ With a completed Release build in place:
 ./packaging/build_installer.sh
 ```
 
-This writes `packaging/build/Less-PA-<version>.pkg`, containing the AU and
-VST3 as two components that install into the current user's
-`~/Library/Audio/Plug-Ins` — no administrator password required. It is signed,
-notarized and stapled as described above, so it installs with no Gatekeeper
-detour.
+This writes `packaging/build/Less-PA-<version>.pkg`, containing the AU, the
+VST3 and (when a PACE-signed one is present) the AAX as separate components
+the user can tick or untick. They install system-wide, into
+`/Library/Audio/Plug-Ins` and `/Library/Application Support/Avid/Audio/Plug-Ins`,
+so the installer asks for an administrator password; Pro Tools scans no
+per-user folder. The AU and VST3 components remove an older per-user copy
+from `~/Library/Audio/Plug-Ins`, where versions up to 1.1.2 installed. The
+package is signed, notarized and stapled as described above, so it installs
+with no Gatekeeper detour.
 
 ```sh
 ./packaging/build_zip.sh
@@ -244,4 +251,4 @@ script if you want to test against the signed build locally.
 ## Not currently supported
 
 Intel/universal builds, Windows and Linux. The released plugin is Apple
-Silicon, AU + VST3; AAX builds but is not signed or shipped yet.
+Silicon: AU, VST3 and AAX.
