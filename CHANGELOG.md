@@ -28,6 +28,7 @@ All notable changes to Less PA are documented here. Versions follow
 
 ### Added
 
+- AAX for Pro Tools, PACE-signed, in the installer and the zip.
 - The verify harness checks that processBlock never allocates while every
   control is automated, restores damaged and random session data, and has a
   `--soak` mode: hours of real recordings, looped, with memory, allocations
@@ -35,6 +36,14 @@ All notable changes to Less PA are documented here. Versions follow
   ThreadSanitizer (audio callback against UI polling, automation and state
   save/restore). No change to the audio or latency.
 - The build is free of compiler warnings under JUCE's recommended warning set.
+
+### Changed
+
+- The installer now installs for all users, into `/Library/Audio/Plug-Ins`
+  (and `/Library/Application Support/Avid/Audio/Plug-Ins` for the AAX), and
+  asks for an administrator password. Pro Tools only scans the system folder,
+  so one destination covers all three formats. An older copy in
+  `~/Library/Audio/Plug-Ins`, where versions up to 1.1.2 installed, is removed.
 
 ## [1.1.2]
 

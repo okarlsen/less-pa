@@ -3,25 +3,32 @@ Less PA
 Less PA cancels PA speaker bleed out of an audience microphone, using the PA
 feed itself as a reference signal.
 
-This installer places two plugins in your personal plug-in folders:
+This installer places the plugins in the system plug-in folders, for every
+user of this Mac:
 
-  * Audio Unit (AU)   ->  ~/Library/Audio/Plug-Ins/Components/Less PA.component
-  * VST3              ->  ~/Library/Audio/Plug-Ins/VST3/Less PA.vst3
+  * Audio Unit (AU)   ->  /Library/Audio/Plug-Ins/Components/Less PA.component
+  * VST3              ->  /Library/Audio/Plug-Ins/VST3/Less PA.vst3
+  * AAX (Pro Tools)   ->  /Library/Application Support/Avid/Audio/Plug-Ins/Less PA.aaxplugin
 
-Both install into your own home folder, so no administrator password is
-needed and nothing is changed system-wide. The Installation Type step lists
-both formats, ticked; untick the one you don't need.
+The Installation Type step lists the formats, ticked; untick the ones you
+don't need. Because these are system folders, the installer asks for an
+administrator password.
 
-Requirements: macOS 13 or newer on Apple Silicon, and a DAW that supports AU
-or VST3 plugins with a sidechain / second input bus.
+Upgrading from 1.1.2 or older: those versions installed into your own home
+folder (~/Library/Audio/Plug-Ins). This installer removes that older copy of
+each format it installs, so your DAW doesn't keep loading the old version.
+
+Requirements: macOS 13 or newer on Apple Silicon, and a DAW that supports AU,
+VST3 or AAX plugins with a sidechain / second input bus.
 
 
 Signing
 
 This installer is signed with an Apple Developer ID (Sounds Good To Me AS)
-and notarized by Apple, as are both plugins it installs. Nothing needs to be
-approved in System Settings and there is no Terminal step -- it installs, and
-the plugins load in your DAW, without any Gatekeeper detour.
+and notarized by Apple, as are the plugins it installs. The AAX is also
+signed for Pro Tools with PACE. Nothing needs to be approved in System
+Settings and there is no Terminal step -- it installs, and the plugins load
+in your DAW, without any Gatekeeper detour.
 
 
 After installing
