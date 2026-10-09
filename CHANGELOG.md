@@ -20,6 +20,11 @@ All notable changes to Less PA are documented here. Versions follow
   (JUCE's state reader trusts the counts and lengths stored in the data).
   The saved state is now checked before it is read, and anything malformed
   is ignored, leaving the current settings. Found by UndefinedBehaviorSanitizer.
+- A burst of huge but finite samples on the mic or Reference input (an
+  upstream plugin's filter blowing up, for example) overflowed inside the
+  canceller on macOS and left the output non-finite until the plugin was
+  reloaded. Input is now limited to +60 dBFS before the canceller, which no
+  real signal reaches, so the burst is contained and cancellation recovers.
 
 ### Added
 

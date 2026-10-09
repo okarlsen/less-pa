@@ -2,6 +2,7 @@
 
 #include <juce_dsp/juce_dsp.h>
 
+#include <algorithm>
 #include <cmath>
 
 // A proper 24dB/octave (4th-order) Butterworth high-pass, built from JUCE's
@@ -42,6 +43,11 @@ public:
     float processSample(float x) {
         if (!std::isfinite(x))
             x = 0.0f;
+        // A huge but finite sample (an upstream filter on its way to
+        // blowing up) passes the check above, then overflows to Inf when
+        // the canceller squares it, and that latches there for good. Nothing
+        // real is anywhere near +60 dBFS, so the clamp never touches audio.
+        x = std::clamp(x, -maxInputLevel, maxInputLevel);
 
         const float y = stage2.processSample(stage1.processSample(x));
 
@@ -53,6 +59,8 @@ public:
     }
 
 private:
+    static constexpr float maxInputLevel = 1000.0f; // +60 dBFS
+
     juce::dsp::IIR::Filter<float> stage1;
     juce::dsp::IIR::Filter<float> stage2;
 };
