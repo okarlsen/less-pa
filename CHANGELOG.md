@@ -3,6 +3,26 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.5]
+
+### Changed
+
+- The PA Canceller keeps its long-run stability without 1.1.4's costs. The
+  runaway came from bins where the PA feed has no content of its own (above
+  its bandwidth, roughly 16 kHz up, where the reference holds only spectral
+  leakage of the low end): there the filter could hand the whole mic signal
+  to itself and inflate its own uncertainty. It now regularises its step
+  size, bounds the process noise, and adapts slowly in bins the reference
+  does not excite, so 1.1.4's strong filter decay and its 16x more frequent
+  gradient constraint are no longer needed (a much weaker decay stays).
+  Compared with 1.1.4: 0.8 to 1.5 dB more PA cancellation on the LS26 venue
+  recordings and up to 0.2 dB more on Oslo, close to 1.1.3's level, and the
+  canceller's CPU back to the 1.1.3 level (about a quarter of 1.1.4's at
+  800 ms Tail Length; 1.1.4 had roughly doubled the whole plugin's CPU).
+  Verified with 2 h runs at 200 and 800 ms Tail Length on four real
+  recordings and a 6 h run on Oslo: no restarts, PA delay readout steady.
+  Latency and the Bleed Suppressor are unchanged.
+
 ## [1.1.4]
 
 ### Fixed

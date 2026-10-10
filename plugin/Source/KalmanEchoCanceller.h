@@ -64,6 +64,7 @@ public:
         const size_t pk = static_cast<size_t>(maxPartitions * K);
         xr.assign(pk, 0.0f); xi.assign(pk, 0.0f); x2.assign(pk, 0.0f);
         xbuf.assign(static_cast<size_t>(M), 0.0f);
+        xbar.assign(static_cast<size_t>(K), 0.0f);
         fftScratch.assign(static_cast<size_t>(2 * M), 0.0f);
         fftScratch2.assign(static_cast<size_t>(2 * M), 0.0f);
         yhr.assign(static_cast<size_t>(K), 0.0f); yhi.assign(static_cast<size_t>(K), 0.0f);
@@ -118,6 +119,7 @@ public:
     {
         std::fill(xr.begin(), xr.end(), 0.0f); std::fill(xi.begin(), xi.end(), 0.0f);
         std::fill(x2.begin(), x2.end(), 0.0f); std::fill(xbuf.begin(), xbuf.end(), 0.0f);
+        std::fill(xbar.begin(), xbar.end(), 0.0f);
         for (auto& c : channels) {
             std::fill(c.wr.begin(), c.wr.end(), 0.0f); std::fill(c.wi.begin(), c.wi.end(), 0.0f);
             std::fill(c.psi.begin(), c.psi.end(), psi0);
@@ -215,6 +217,7 @@ public:
         for (int k = 0; k < K; ++k) {
             const size_t i = static_cast<size_t>(head * K + k);
             x2[i] = xr[i] * xr[i] + xi[i] * xi[i];
+            xbar[static_cast<size_t>(k)] = xbarSmooth * xbar[static_cast<size_t>(k)] + (1.0f - xbarSmooth) * x2[i];
         }
 
         const int numCh = std::min(numChannels, static_cast<int>(channels.size()));
@@ -292,27 +295,38 @@ private:
 
     // Tuned on the real recordings
     //
-    // Long-run stability (1.1.4). Three things together keep the filter
-    // bounded over a whole show; before them it slowly filled with stray
-    // taps (mostly at the end of the tail and in bins with no signal) until
-    // it overflowed: the delay readout ran off to the end of the tail, then
-    // the output went NaN until the plugin was reloaded. On the venue
-    // recordings that took 12 min to a few hours, sooner with a short tail.
-    // Measured with verify's --long mode; each of the three alone was not
-    // enough.
-    // - Decay of the filter itself, W <- Aw W each block (the state
-    //   transition the uncertainty already assumed): ~2.2 min time constant
-    //   at every rate, so stray taps die out instead of building on each
-    //   other through the process noise (1 - A^2)|W|^2.
-    // - The gradient constraint on every partition every constraintStride
-    //   blocks (was 64): the unconstrained half of each partition is what
-    //   drifted. 8 was the slowest that held on LS26 Pub 1 at 200 ms; 4 for
-    //   margin.
+    // Long-run stability (1.1.5). Before 1.1.4 the filter could run away
+    // after 15 min to a few hours on real music: the delay readout ran off
+    // to the end of the tail, then the output went NaN or full scale. The
+    // cause is a positive-feedback loop in bins where the PA reference has
+    // almost no energy of its own, only the rectangular-window leakage of
+    // the bass (a flat floor about 27 dB below the mean bin, from roughly
+    // 16 kHz up on the venue feeds; also bin 0). There the filter's own
+    // uncertainty U_k soon outweighs the crowd PSD, the gain hands the
+    // bin's whole error to the filter (steps of |E|/|X|), |W|^2 grows, and
+    // the process noise (1 - A^2)|W|^2 grows psi with it until it
+    // overflows. 1.1.4 held it with a strong W decay and the gradient
+    // constraint every 4th block, which cost about 1.5 dB of cancellation
+    // and 4x the CPU. These break the loop itself instead (measured with
+    // verify's --long mode, 2 h at 200 and 800 ms on three recordings):
+    // - Step-size regularisation: regRho times the band's mean uncertainty
+    //   power is added to the gain's denominator, so a bin far below the
+    //   band mean can't take a step of |E|/|X|.
+    // - Bounded process noise: |W|^2 in it is capped at procNoiseCapMul *
+    //   psiStart, so a stray tap can't inflate its own uncertainty.
+    // - Excitation freeze: the gain in bin k is scaled by
+    //   min(1, xbar_k / (freezeRho * mean xbar)), xbar a ~5 s average of
+    //   the reference power. The leakage-only bins above the PA band adapt
+    //   slowly or not at all. The filter can't inflate xbar, unlike U.
+    // - A weak decay of the filter, W <- Aw W each block (~9 min time
+    //   constant at 48 kHz), which only bounds the slow drift that is left
+    //   and keeps the filter from memorising hours-old material.
     // - An absolute floor on the noise PSD (-100 dBFS of white noise per
-    //   bin), so bins with neither PA nor mic content (above the converters'
-    //   anti-alias filters, below the HPF) stop adapting instead of fitting
-    //   rounding noise with ever larger gains.
-    static constexpr float Aw = 0.99998f;
+    //   bin), so bins with neither PA nor mic content stop adapting instead
+    //   of fitting rounding noise.
+    // Never zero bin 0 to "fix" it: it is the DC of each partition's 2N-point
+    // spectrum, and dropping it costs 4 to 5 dB of cancellation.
+    static constexpr float Aw = 0.999995f;
     static constexpr float A2 = 0.99999f * 0.99999f;
     static constexpr float noiseFloorPower = 1e-10f; // mean square, -100 dBFS
     static constexpr float psi0 = 1e-3f;
@@ -320,7 +334,11 @@ private:
     static constexpr float psiFloor = 1e-10f;
     static constexpr float cPad = 0.5f;         // |X|^2 of a 2N frame vs |E|^2 of N samples zero-padded
     static constexpr float guardSmooth = 0.9f;
-    static constexpr int constraintStride = 4;  // gradient constraint on 1 partition in 4 per block (see above)
+    static constexpr int constraintStride = 64; // gradient constraint on 1 partition in 64 per block
+    static constexpr float regRho = 0.05f;          // step-size regularisation vs the band's mean uncertainty power
+    static constexpr float procNoiseCapMul = 4.0f;  // |W|^2 in the process noise is capped at this multiple of psiStart
+    static constexpr float freezeRho = 1e-2f;       // bins with reference power 20 dB or more below the band mean adapt slowly
+    static constexpr float xbarSmooth = 0.99947f;   // reference power average: ~5 s at 48 kHz (N = 128), ~2.5 s at 96 kHz
     static constexpr double startSeconds = 3.0;    // PA needed before the level-relative start
     static constexpr double startRefPower = 1e-5;  // a "PA-active" ref block: mean square above -50 dBFS
     static constexpr double startScale = 1.0;
@@ -422,7 +440,8 @@ private:
     static void updatePartition(float* __restrict Wr, float* __restrict Wi, float* __restrict Ps,
                                 const float* __restrict Xr, const float* __restrict Xi,
                                 const float* __restrict X2, const float* __restrict Er,
-                                const float* __restrict Ei, const float* __restrict D, int K) noexcept
+                                const float* __restrict Ei, const float* __restrict D, int K,
+                                float w2Cap) noexcept
     {
         for (int k = 0; k < K; ++k) {
             const float g = Ps[k] * D[k];
@@ -431,7 +450,7 @@ private:
             const float wi = Aw * (Wi[k] + kr * Ei[k] + ki * Er[k]);
             Wr[k] = wr;
             Wi[k] = wi;
-            Ps[k] = A2 * (1.0f - cPad * g * X2[k]) * Ps[k] + (1.0f - A2) * (wr * wr + wi * wi) + psiFloor;
+            Ps[k] = A2 * (1.0f - cPad * g * X2[k]) * Ps[k] + (1.0f - A2) * std::min(wr * wr + wi * wi, w2Cap) + psiFloor;
         }
     }
 
@@ -529,6 +548,13 @@ private:
         float* __restrict Er = er.data();
         float* __restrict Ei = ei.data();
         float* __restrict D = dScratch.data();
+        // Regularisation and excitation freeze (see the constants): bins whose
+        // uncertainty power or reference power is far below the band mean
+        // must not take steps of |E|/|X|.
+        float delta = 0.0f, xbarMean = 0.0f;
+        for (int k = 0; k < K; ++k) { delta += U[k]; xbarMean += xbar[static_cast<size_t>(k)]; }
+        delta *= cPad * regRho / static_cast<float>(K); // U gets its cPad in the loop below
+        xbarMean *= freezeRho / static_cast<float>(K);
         for (int k = 0; k < K; ++k) {
             Er[k] = yr[static_cast<size_t>(k)] - ypr[static_cast<size_t>(k)];
             Ei[k] = yi[static_cast<size_t>(k)] - ypi[static_cast<size_t>(k)];
@@ -537,7 +563,8 @@ private:
             // crowd/noise PSD: error power the filter's uncertainty can't explain
             ch.psiS[static_cast<size_t>(k)] = lam * ch.psiS[static_cast<size_t>(k)]
                                             + (1.0f - lam) * std::max(e2 - U[k], 1e-3f * e2 + noiseFloorPower * static_cast<float>(N));
-            D[k] = 1.0f / (U[k] + ch.psiS[static_cast<size_t>(k)]);
+            D[k] = std::min(1.0f, xbar[static_cast<size_t>(k)] / (xbarMean + 1e-30f))
+                 / (U[k] + ch.psiS[static_cast<size_t>(k)] + delta);
         }
 
         // --- Kalman update, one pass: W += Kg E with Kg = Psi conj(X) / D,
@@ -550,12 +577,12 @@ private:
             float* __restrict Wr = ch.wr.data() + p * K;
             float* __restrict Wi = ch.wi.data() + p * K;
             float* __restrict Ps = ch.psi.data() + p * K;
-            updatePartition(Wr, Wi, Ps, Xr, Xi, X2, Er, Ei, D, K);
+            updatePartition(Wr, Wi, Ps, Xr, Xi, X2, Er, Ei, D, K, procNoiseCapMul * ch.psiStart);
         }
         // Gradient constraint (keep each partition causal and N long), on one
         // partition in constraintStride per block in turn: 2 FFTs per
-        // partition is most of the cost. Rarer than every 8 blocks lets the
-        // filter drift over long runs (see the constants).
+        // partition is most of the cost. The stability terms above keep the
+        // unconstrained half from drifting at this rate (see the constants).
         for (int p = static_cast<int>(blockCount % constraintStride); p < P; p += constraintStride) {
             float* Wr = ch.wr.data() + p * K;
             float* Wi = ch.wi.data() + p * K;
@@ -656,7 +683,7 @@ private:
     float floorGain = 0.25f;
     std::atomic<int> delayEstimateMs{ -1 };
 
-    std::vector<float> xr, xi, x2, xbuf;
+    std::vector<float> xr, xi, x2, xbuf, xbar; // xbar: K floats, ~5 s average of the reference |X_k|^2
     std::vector<Channel> channels;
     std::vector<float> fftScratch, fftScratch2, yhr, yhi, unc, er, ei, yr, yi, ypr, ypi, gl, cosTable;
     std::vector<float> timeScratch, timeScratch2, dScratch, mScratch, egScratchR, egScratchI;
