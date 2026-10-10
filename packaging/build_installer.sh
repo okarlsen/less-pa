@@ -69,7 +69,9 @@ done
 echo "Less PA $VERSION -- building installer"
 
 lesspa_require_signing_identities --with-installer
+MIN_MACOS="$(lesspa_deployment_target "$REPO_ROOT/plugin/CMakeLists.txt")"
 lesspa_check_no_stray_dylibs "$AU_BUNDLE" "$VST3_BUNDLE"
+lesspa_check_binary_targets "$MIN_MACOS" "$AU_BUNDLE" "$VST3_BUNDLE"
 
 # Sign, notarize and staple the plugins before they go into the package.
 lesspa_prepare_bundles "$AU_BUNDLE" "$VST3_BUNDLE"
@@ -80,6 +82,7 @@ if [[ -d "$AAX_BUNDLE" ]]; then
             && codesign --verify --deep --strict "$AAX_BUNDLE" 2>/dev/null \
             && lesspa_bundles_are_stapled "$AAX_BUNDLE"; then
         lesspa_check_no_stray_dylibs "$AAX_BUNDLE"
+        lesspa_check_binary_targets "$MIN_MACOS" "$AAX_BUNDLE"
         INCLUDE_AAX=1
         echo "  including the AAX (PACE-signed and stapled)"
     else
@@ -186,6 +189,13 @@ if [[ -f "$LOGO" ]]; then
     BACKGROUND_XML='<background file="background.png" alignment="bottomleft" scaling="proportional"/>'
 fi
 
+# The installer stops before anything is written on a Mac it doesn't
+# support. hostArchitectures="arm64" alone makes Installer refuse an Intel
+# Mac with a generic "can't be installed on this computer"; the
+# installation-check script says why, and also refuses a macOS older than
+# the deployment target, which nothing else checks: the plugins would
+# install and then fail to load in the DAW.
+#
 # customize="always" opens the Installation Type step on the format choice
 # list itself. With "allow" the list hid behind a Customize button that
 # was easy to miss, so the welcome text's promise of a choice went unmet.
@@ -197,6 +207,24 @@ cat > "$BUILD_DIR/distribution.xml" <<XML
     $BACKGROUND_XML
     <options customize="always" require-scripts="false" hostArchitectures="arm64"/>
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <installation-check script="lesspa_system_supported()"/>
+    <script><![CDATA[
+    function lesspa_system_supported() {
+        if (system.sysctl('hw.optional.arm64') != 1) {
+            my.result.type = 'Fatal';
+            my.result.title = 'Less PA needs a Mac with Apple Silicon';
+            my.result.message = 'This Mac has an Intel processor. Less PA $VERSION is built for Apple Silicon (M-series) only.';
+            return false;
+        }
+        if (system.compareVersions(system.version.ProductVersion, '$MIN_MACOS') < 0) {
+            my.result.type = 'Fatal';
+            my.result.title = 'Less PA needs macOS $MIN_MACOS or newer';
+            my.result.message = 'This Mac runs macOS ' + system.version.ProductVersion + '. Update macOS, then run the installer again.';
+            return false;
+        }
+        return true;
+    }
+    ]]></script>
     <choices-outline>
         <line choice="au"/>
         <line choice="vst3"/>
