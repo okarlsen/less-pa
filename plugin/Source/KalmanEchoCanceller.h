@@ -79,6 +79,7 @@ public:
             c.h.assign(static_cast<size_t>(firLength), 0.0f); c.hPrev.assign(static_cast<size_t>(firLength), 0.0f);
             c.hist.assign(static_cast<size_t>(firLength - 1 + N), 0.0f);
             c.hasPrev = false;
+            c.fastConstraintBlocks = fastStartBlocks();
         }
         unc.assign(static_cast<size_t>(K), 0.0f);
         er.assign(static_cast<size_t>(K), 0.0f); ei.assign(static_cast<size_t>(K), 0.0f);
@@ -130,6 +131,7 @@ public:
             c.hasPrev = false;
             c.accMic = 0.0;
             c.psiStart = psi0;
+            c.fastConstraintBlocks = fastStartBlocks();
         }
         std::fill(irPeak.begin(), irPeak.end(), 0.0f);
         std::fill(irPeakIdx.begin(), irPeakIdx.end(), 0);
@@ -240,7 +242,10 @@ private:
         bool hasPrev = false;
         double accMic = 0.0;   // mic power summed over the PA-active start blocks
         float psiStart = psi0; // the uncertainty newly started partitions get
+        int fastConstraintBlocks = 0; // blocks left at fastConstraintStride (see the constants)
     };
+
+    int fastStartBlocks() const { return static_cast<int>(fastStartSeconds * fs / N); }
 
     // Level-relative start. A fixed starting uncertainty only suits one
     // mic/PA level ratio: too small and the filter learns for minutes (LS26
@@ -269,6 +274,7 @@ private:
         for (auto& c : channels) {
             c.psiStart = std::max(psiFloor, static_cast<float>(startScale * c.accMic / accRef));
             std::fill(c.psi.begin(), c.psi.end(), c.psiStart);
+            c.fastConstraintBlocks = fastStartBlocks(); // the filter re-converges from here
         }
         startDone = true;
     }
@@ -285,6 +291,7 @@ private:
         std::fill(c.h.begin(), c.h.end(), 0.0f); std::fill(c.hPrev.begin(), c.hPrev.end(), 0.0f);
         std::fill(c.hist.begin(), c.hist.end(), 0.0f);
         c.hasPrev = false;
+        c.fastConstraintBlocks = fastStartBlocks();
         ++restartCount;
         if (&c == &channels.front()) { // the delay readout reads channel 0's filter
             std::fill(irPeak.begin(), irPeak.end(), 0.0f);
@@ -335,6 +342,12 @@ private:
     static constexpr float cPad = 0.5f;         // |X|^2 of a 2N frame vs |E|^2 of N samples zero-padded
     static constexpr float guardSmooth = 0.9f;
     static constexpr int constraintStride = 64; // gradient constraint on 1 partition in 64 per block
+    // While the filter converges (fastStartSeconds after prepare, reset,
+    // the level-relative start or a restart) the constraint runs on 1
+    // partition in 4 instead: it tunes in about 1 dB further during the
+    // first ~15 s (1.1.4's start-up), at 1.1.4's CPU for those seconds only.
+    static constexpr int fastConstraintStride = 4;
+    static constexpr double fastStartSeconds = 20.0;
     static constexpr float regRho = 0.05f;          // step-size regularisation vs the band's mean uncertainty power
     static constexpr float procNoiseCapMul = 4.0f;  // |W|^2 in the process noise is capped at this multiple of psiStart
     static constexpr float freezeRho = 1e-2f;       // bins with reference power 20 dB or more below the band mean adapt slowly
@@ -582,8 +595,12 @@ private:
         // Gradient constraint (keep each partition causal and N long), on one
         // partition in constraintStride per block in turn: 2 FFTs per
         // partition is most of the cost. The stability terms above keep the
-        // unconstrained half from drifting at this rate (see the constants).
-        for (int p = static_cast<int>(blockCount % constraintStride); p < P; p += constraintStride) {
+        // unconstrained half from drifting at this rate (see the constants);
+        // it runs faster while the filter converges.
+        const int stride = ch.fastConstraintBlocks > 0 ? fastConstraintStride : constraintStride;
+        if (ch.fastConstraintBlocks > 0)
+            --ch.fastConstraintBlocks;
+        for (int p = static_cast<int>(blockCount % static_cast<uint64_t>(stride)); p < P; p += stride) {
             float* Wr = ch.wr.data() + p * K;
             float* Wi = ch.wi.data() + p * K;
             auto& w = timeScratch2;

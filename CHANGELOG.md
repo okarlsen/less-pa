@@ -19,6 +19,10 @@ All notable changes to Less PA are documented here. Versions follow
   recordings and up to 0.2 dB more on Oslo, close to 1.1.3's level, and the
   canceller's CPU back to the 1.1.3 level (about a quarter of 1.1.4's at
   800 ms Tail Length; 1.1.4 had roughly doubled the whole plugin's CPU).
+  For the first 20 s after the plugin starts or restarts its filter it
+  works as hard as 1.1.4 did, so it tunes in as fast as 1.1.4 (1.1.3's
+  slower start left about 1 dB more PA for the first ~15 s); the CPU in
+  those seconds is 1.1.4's.
   Verified with 2 h runs at 200 and 800 ms Tail Length on four real
   recordings and a 6 h run on Oslo: no restarts, PA delay readout steady.
   Latency and the Bleed Suppressor are unchanged.
