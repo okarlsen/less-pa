@@ -59,7 +59,9 @@ done
 echo "Less PA $VERSION -- building zip"
 
 lesspa_require_signing_identities
+MIN_MACOS="$(lesspa_deployment_target "$REPO_ROOT/plugin/CMakeLists.txt")"
 lesspa_check_no_stray_dylibs "$AU_BUNDLE" "$VST3_BUNDLE"
+lesspa_check_binary_targets "$MIN_MACOS" "$AU_BUNDLE" "$VST3_BUNDLE"
 
 # Idempotent: if build_installer.sh already ran against this build, the
 # bundles are stapled and this is a no-op rather than a second trip to

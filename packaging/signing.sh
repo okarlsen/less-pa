@@ -45,6 +45,47 @@ lesspa_check_no_stray_dylibs() {
     echo "  checked: no non-system dynamic dependencies"
 }
 
+# The minimum macOS the release targets, read from the same line in
+# plugin/CMakeLists.txt that the build uses, so the installer's check and
+# the binaries cannot drift apart. Printed as major.minor (13 -> 13.0).
+lesspa_deployment_target() {
+    local cmakelists="$1" target
+    target="$(sed -n 's/^ *set(CMAKE_OSX_DEPLOYMENT_TARGET "\([0-9.]*\)".*/\1/p' "$cmakelists")"
+    if [[ -z "$target" ]]; then
+        echo "error: could not read CMAKE_OSX_DEPLOYMENT_TARGET from $cmakelists" >&2
+        return 1
+    fi
+    [[ "$target" == *.* ]] || target="$target.0"
+    echo "$target"
+}
+
+# The packages promise "macOS <target> or newer on Apple Silicon", so refuse
+# to ship a binary that is anything else: an Intel or universal slice (a
+# build from a Rosetta terminal, or a stray CMAKE_OSX_ARCHITECTURES), or a
+# minimum macOS other than the release target (a build directory configured
+# with a different -DCMAKE_OSX_DEPLOYMENT_TARGET).
+lesspa_check_binary_targets() {
+    local target="$1" bundle binary archs minos
+    shift
+    for bundle in "$@"; do
+        binary="$bundle/Contents/MacOS/Less PA"
+        archs="$(lipo -archs "$binary")"
+        if [[ "$archs" != "arm64" ]]; then
+            echo "error: $(basename "$bundle") is built for '$archs', expected arm64 only." >&2
+            echo "       Configure with -DCMAKE_OSX_ARCHITECTURES=arm64. See BUILDING.md." >&2
+            return 1
+        fi
+        minos="$(otool -l "$binary" \
+            | awk '$2 == "LC_BUILD_VERSION" { found = 1 } found && $1 == "minos" { print $2; exit }')"
+        if [[ "$minos" != "$target" ]]; then
+            echo "error: $(basename "$bundle") has minimum macOS '${minos:-unknown}', expected $target." >&2
+            echo "       Reconfigure the build with -DCMAKE_OSX_DEPLOYMENT_TARGET=$target. See BUILDING.md." >&2
+            return 1
+        fi
+    done
+    echo "  checked: arm64 only, minimum macOS $target"
+}
+
 # Fail early and clearly if the machine can't sign, rather than part way
 # through a build or -- worse -- silently shipping an ad-hoc signature.
 lesspa_require_signing_identities() {

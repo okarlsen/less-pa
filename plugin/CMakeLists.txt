@@ -18,6 +18,13 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
+# Likewise, CMake builds for the architecture of the shell it runs in, so a
+# Terminal under Rosetta would quietly produce an Intel build. Released
+# builds are Apple Silicon only, and the installer refuses Intel Macs.
+if(NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Target architectures" FORCE)
+endif()
+
 project(PAEchoCanceller VERSION 1.1.4)
 
 set(CMAKE_CXX_STANDARD 17)
