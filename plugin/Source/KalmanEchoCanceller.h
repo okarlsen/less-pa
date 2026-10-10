@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -172,6 +173,27 @@ public:
 
     int getBlockSize() const noexcept { return N; }
 
+    // How many times a channel's filter has been restarted after blowing up
+    // (see processChannel). Audio thread only; for tests.
+    uint64_t getRestartCount() const noexcept { return restartCount; }
+
+    // Tests and the --long run: total filter energy sum |W|^2 and the mean
+    // uncertainty of channel 0. Not real-time safe to call concurrently.
+    void getFilterStats(double& energy, double& meanUncertainty) const
+    {
+        const auto& c = channels.front();
+        energy = meanUncertainty = 0.0;
+        const size_t n = static_cast<size_t>(activePartitions * K);
+        for (size_t i = 0; i < n; ++i) {
+            energy += static_cast<double>(c.wr[i]) * c.wr[i] + static_cast<double>(c.wi[i]) * c.wi[i];
+            meanUncertainty += c.psi[i];
+        }
+        meanUncertainty /= static_cast<double>(n);
+    }
+
+    // Tests: corrupt channel 0's filter, as a blow-up would.
+    void poisonFilterForTest() { channels.front().wr[1] = std::numeric_limits<float>::quiet_NaN(); }
+
     // Echo path delay (PA to mic) read off the filter: the lag of its
     // strongest partition, refreshed ~4x/s. -1 until the filter has found
     // the PA in the mic. Safe to call from any thread.
@@ -248,14 +270,57 @@ private:
         startDone = true;
     }
 
+    // A fresh start for one channel (the level-relative start is kept).
+    // Allocation-free: audio thread.
+    void restartChannel(Channel& c)
+    {
+        std::fill(c.wr.begin(), c.wr.end(), 0.0f); std::fill(c.wi.begin(), c.wi.end(), 0.0f);
+        std::fill(c.psi.begin(), c.psi.end(), c.psiStart);
+        std::fill(c.psiS.begin(), c.psiS.end(), 1e-6f);
+        std::fill(c.py.begin(), c.py.end(), 1e-12f); std::fill(c.pe.begin(), c.pe.end(), 1e-12f);
+        std::fill(c.pout.begin(), c.pout.end(), 1e-12f); std::fill(c.gain.begin(), c.gain.end(), 1.0f);
+        std::fill(c.h.begin(), c.h.end(), 0.0f); std::fill(c.hPrev.begin(), c.hPrev.end(), 0.0f);
+        std::fill(c.hist.begin(), c.hist.end(), 0.0f);
+        c.hasPrev = false;
+        ++restartCount;
+        if (&c == &channels.front()) { // the delay readout reads channel 0's filter
+            std::fill(irPeak.begin(), irPeak.end(), 0.0f);
+            std::fill(irPeakIdx.begin(), irPeakIdx.end(), 0);
+            recentDelays.fill(-1);
+        }
+    }
+
     // Tuned on the real recordings
+    //
+    // Long-run stability (1.1.4). Three things together keep the filter
+    // bounded over a whole show; before them it slowly filled with stray
+    // taps (mostly at the end of the tail and in bins with no signal) until
+    // it overflowed: the delay readout ran off to the end of the tail, then
+    // the output went NaN until the plugin was reloaded. On the venue
+    // recordings that took 12 min to a few hours, sooner with a short tail.
+    // Measured with verify's --long mode; each of the three alone was not
+    // enough.
+    // - Decay of the filter itself, W <- Aw W each block (the state
+    //   transition the uncertainty already assumed): ~2.2 min time constant
+    //   at every rate, so stray taps die out instead of building on each
+    //   other through the process noise (1 - A^2)|W|^2.
+    // - The gradient constraint on every partition every constraintStride
+    //   blocks (was 64): the unconstrained half of each partition is what
+    //   drifted. 8 was the slowest that held on LS26 Pub 1 at 200 ms; 4 for
+    //   margin.
+    // - An absolute floor on the noise PSD (-100 dBFS of white noise per
+    //   bin), so bins with neither PA nor mic content (above the converters'
+    //   anti-alias filters, below the HPF) stop adapting instead of fitting
+    //   rounding noise with ever larger gains.
+    static constexpr float Aw = 0.99998f;
     static constexpr float A2 = 0.99999f * 0.99999f;
+    static constexpr float noiseFloorPower = 1e-10f; // mean square, -100 dBFS
     static constexpr float psi0 = 1e-3f;
     static constexpr float lam = 0.9f;          // crowd/noise PSD smoothing
     static constexpr float psiFloor = 1e-10f;
     static constexpr float cPad = 0.5f;         // |X|^2 of a 2N frame vs |E|^2 of N samples zero-padded
     static constexpr float guardSmooth = 0.9f;
-    static constexpr int constraintStride = 64; // gradient constraint on 1 partition in 64 per block
+    static constexpr int constraintStride = 4;  // gradient constraint on 1 partition in 4 per block (see above)
     static constexpr double startSeconds = 3.0;    // PA needed before the level-relative start
     static constexpr double startRefPower = 1e-5;  // a "PA-active" ref block: mean square above -50 dBFS
     static constexpr double startScale = 1.0;
@@ -362,8 +427,8 @@ private:
         for (int k = 0; k < K; ++k) {
             const float g = Ps[k] * D[k];
             const float kr = g * Xr[k], ki = -g * Xi[k];
-            const float wr = Wr[k] + kr * Er[k] - ki * Ei[k];
-            const float wi = Wi[k] + kr * Ei[k] + ki * Er[k];
+            const float wr = Aw * (Wr[k] + kr * Er[k] - ki * Ei[k]);
+            const float wi = Aw * (Wi[k] + kr * Ei[k] + ki * Er[k]);
             Wr[k] = wr;
             Wi[k] = wi;
             Ps[k] = A2 * (1.0f - cPad * g * X2[k]) * Ps[k] + (1.0f - A2) * (wr * wr + wi * wi) + psiFloor;
@@ -410,6 +475,7 @@ private:
 
     void processChannel(Channel& ch, float* y, int P)
     {
+
         // --- one pass over the partitions: echo estimate Yhat = sum_p X_p W_p,
         // and the filter's own uncertainty sum_p Psi_p |X_p|^2 ---
         float* __restrict Yr = yhr.data();
@@ -431,6 +497,32 @@ private:
         inverse(yhr.data(), yhi.data(), timeScratch.data());
         const float* yhat = timeScratch.data() + N;
 
+        // Last line of defence: a filter whose echo estimate is non-finite,
+        // or 60 dB louder than the mic and above -20 dBFS, has blown up.
+        // Restart this channel from zero (it relearns in seconds) instead
+        // of letting it latch a dead or full-scale output for the rest of
+        // the show.
+        {
+            double micSq = 0.0, estSq = 0.0;
+            for (int n = 0; n < N; ++n) {
+                micSq += static_cast<double>(y[n]) * y[n];
+                estSq += static_cast<double>(yhat[n]) * yhat[n];
+            }
+            if (!std::isfinite(estSq) || estSq > 1e6 * micSq + 1e-2 * N) {
+                restartChannel(ch);
+                // The zero filter's estimate, and its fresh uncertainty
+                std::fill_n(Yr, K, 0.0f);
+                std::fill_n(Yi, K, 0.0f);
+                std::fill_n(U, K, 0.0f);
+                for (int p = 0; p < P; ++p) {
+                    const float* X2 = x2.data() + lagIndex(p) * K;
+                    for (int k = 0; k < K; ++k)
+                        U[k] += ch.psiStart * X2[k];
+                }
+                std::fill(timeScratch.begin(), timeScratch.end(), 0.0f);
+            }
+        }
+
         // Spectra of the zero-padded mic, echo estimate and error blocks
         forwardPadded(y, yr.data(), yi.data());
         forwardPadded(yhat, ypr.data(), ypi.data());
@@ -444,7 +536,7 @@ private:
             const float e2 = Er[k] * Er[k] + Ei[k] * Ei[k];
             // crowd/noise PSD: error power the filter's uncertainty can't explain
             ch.psiS[static_cast<size_t>(k)] = lam * ch.psiS[static_cast<size_t>(k)]
-                                            + (1.0f - lam) * std::max(e2 - U[k], 1e-3f * e2 + 1e-12f);
+                                            + (1.0f - lam) * std::max(e2 - U[k], 1e-3f * e2 + noiseFloorPower * static_cast<float>(N));
             D[k] = 1.0f / (U[k] + ch.psiS[static_cast<size_t>(k)]);
         }
 
@@ -462,8 +554,8 @@ private:
         }
         // Gradient constraint (keep each partition causal and N long), on one
         // partition in constraintStride per block in turn: 2 FFTs per
-        // partition is most of the cost, and the round-robin measured no
-        // loss on the real recordings.
+        // partition is most of the cost. Rarer than every 8 blocks lets the
+        // filter drift over long runs (see the constants).
         for (int p = static_cast<int>(blockCount % constraintStride); p < P; p += constraintStride) {
             float* Wr = ch.wr.data() + p * K;
             float* Wi = ch.wi.data() + p * K;
@@ -530,6 +622,16 @@ private:
             y[n] = fade * a + (1.0f - fade) * b;
         }
         ch.hasPrev = true;
+
+        // Belt and braces for the check above: never hand the host a
+        // non-finite block, and never keep the state that made one.
+        bool outFinite = true;
+        for (int n = 0; n < N; ++n)
+            outFinite = outFinite && std::isfinite(y[n]);
+        if (!outFinite) {
+            restartChannel(ch);
+            std::fill_n(y, N, 0.0f);
+        }
     }
 
     double fs = 48000.0;
@@ -537,6 +639,7 @@ private:
     int maxPartitions = 1, activePartitions = 1;
     int head = 0;
     uint64_t blockCount = 0;
+    uint64_t restartCount = 0;
     double accRef = 0.0;
     int accBlocks = 0;
     bool startDone = false;

@@ -3,6 +3,20 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.4]
+
+### Fixed
+
+- After several hours of running, the PA Canceller could drift until it
+  broke down: PA delay crept toward the end of the Tail Length, then the
+  output went silent or full scale and stayed that way until the host was
+  restarted. The filter now decays slightly, enforces its time-domain
+  constraint more often, and ignores bins with no signal, so it stays bounded
+  (2 h runs on three real recordings). If it ever does blow up, the channel
+  restarts by itself, and the output never carries NaN or anything above
+  +60 dBFS. Latency is unchanged. The canceller uses more CPU than before
+  (about 4x for the canceller alone at 800 ms Tail Length).
+
 ## [1.1.3]
 
 ### Fixed
