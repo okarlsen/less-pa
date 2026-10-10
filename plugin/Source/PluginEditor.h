@@ -5,6 +5,10 @@
 #include <array>
 #include "PluginProcessor.h"
 #include "LessPALookAndFeel.h"
+
+#ifndef LESSPA_BUILD_LABEL
+ #define LESSPA_BUILD_LABEL "" // set by CMake; empty for releases
+#endif
 #include "LevelMeterComponent.h"
 
 class PAEchoCancellerAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -38,7 +42,8 @@ private:
 
     static constexpr int helpButtonSize = 24;
     static constexpr int versionHelpGap = 6;
-    static constexpr int versionLabelWidth = 40;
+    // Wider when a test-build label (LESSPA_BUILD_LABEL, set by CMake) follows the version
+    static constexpr int versionLabelWidth = sizeof(LESSPA_BUILD_LABEL) > 1 ? 80 : 40;
 
     static constexpr int columnWidth = 240;
     static constexpr int columnGap = 14;
