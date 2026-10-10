@@ -138,7 +138,11 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     helpButton.onClick = [this] { showHelpDialog(); };
     addAndMakeVisible(helpButton);
 
-    versionLabel.setText("v" JucePlugin_VersionString, juce::dontSendNotification);
+    // A test build's label (CMake LESSPA_BUILD_LABEL, e.g. "PR12") follows
+    // the version so it can't be mistaken for the release.
+    const juce::String version = juce::String("v" JucePlugin_VersionString)
+                               + (juce::String(LESSPA_BUILD_LABEL).isEmpty() ? juce::String() : " " LESSPA_BUILD_LABEL);
+    versionLabel.setText(version, juce::dontSendNotification);
     versionLabel.setJustificationType(juce::Justification::centredRight);
     versionLabel.setColour(juce::Label::textColourId, LessPAColours::secondaryText);
     addAndMakeVisible(versionLabel);
@@ -270,7 +274,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     // to read to be any use mid-show -- and a sentence-length tip becomes a
     // multi-line block sitting over the controls it is meant to explain.
     helpButton.setTooltip("Full control reference");
-    versionLabel.setTooltip("Less PA v" JucePlugin_VersionString);
+    versionLabel.setTooltip("Less PA " + versionLabel.getText());
     tailLengthCombo.setTooltip("Match to the venue's reverb");
     amountSlider.setTooltip("How hard the suppressor ducks leftover PA; 0% = bypassed");
     maxReductionSlider.setTooltip("The deepest any frequency band can be ducked");

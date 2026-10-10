@@ -52,6 +52,11 @@ may need a rescan to pick up a newly built version. For a scratch or test
 build that must not replace the installed plugins, configure with
 `-DLESSPA_INSTALL_AFTER_BUILD=OFF`.
 
+A test build for listening before a release can carry a label after the
+version, shown in the panel and its tooltip: `-DLESSPA_BUILD_LABEL=PR12`
+shows "v1.1.5 PR12". The version number itself stays numeric, since hosts
+read it as major.minor.patch. Leave it empty (the default) for releases.
+
 ### AAX (Pro Tools)
 
 JUCE includes the AAX SDK, so an AAX build needs nothing extra:

@@ -34,6 +34,11 @@ option(LESSPA_BUILD_AAX "Also build the AAX plugin (Pro Tools)" OFF)
 # /Library/Application Support/Avid) so a DAW picks them up. Turn it off
 # for a scratch or test build that must not replace the installed plugins.
 option(LESSPA_INSTALL_AFTER_BUILD "Copy the built plugins into the system plug-in folders" ON)
+
+# Test builds: a label shown after the version in the panel and its tooltip,
+# e.g. -DLESSPA_BUILD_LABEL=PR12 shows "v1.1.5 PR12". The version itself
+# stays numeric (hosts read it as major.minor.patch). Empty for releases.
+set(LESSPA_BUILD_LABEL "" CACHE STRING "Test-build label shown after the version in the panel (empty for releases)")
 set(LESSPA_FORMATS AU VST3)
 if(LESSPA_BUILD_AAX)
     list(APPEND LESSPA_FORMATS AAX)
@@ -76,6 +81,8 @@ target_compile_definitions(PAEchoCanceller
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
+    PRIVATE
+        LESSPA_BUILD_LABEL="${LESSPA_BUILD_LABEL}"
 )
 
 target_link_libraries(PAEchoCanceller
@@ -108,6 +115,7 @@ target_compile_definitions(PAEchoCancellerVerify
     PRIVATE
         JucePlugin_Name="Less PA"
         JucePlugin_VersionString="${PROJECT_VERSION}"
+        LESSPA_BUILD_LABEL="${LESSPA_BUILD_LABEL}"
     PUBLIC
         # --screenshot pumps the message loop so the editor's timer can run
         JUCE_MODAL_LOOPS_PERMITTED=1
