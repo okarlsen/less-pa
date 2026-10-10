@@ -2440,10 +2440,8 @@ bool testBasicCancellation(int rate, double durationS) {
 }
 
 // --bench-kalman: CPU of the Kalman engine alone, and of its FFT, at 48 kHz.
-// Steady state is timed from 30 s on; the first 10 s (the faster gradient
-// constraint while the filter converges) are reported separately.
 static int runKalmanBench() {
-    const int fs = 48000, seconds = 10, steadyFrom = 30;
+    const int fs = 48000, seconds = 10;
     KalmanEchoCanceller k;
     k.prepare(fs, 1, 0.8);
     const int N = k.getBlockSize();
@@ -2452,18 +2450,11 @@ static int runKalmanBench() {
     std::vector<float> ref(static_cast<size_t>(N)), mic(static_cast<size_t>(N));
     float* micPtr = mic.data();
     const int blocks = fs * seconds / N;
-    auto run = [&](int count) {
-        for (int b = 0; b < count; ++b) {
-            for (int i = 0; i < N; ++i) { ref[static_cast<size_t>(i)] = nd(rng); mic[static_cast<size_t>(i)] = 0.3f * ref[static_cast<size_t>(i)] + 0.1f * nd(rng); }
-            k.processFrame(&micPtr, ref.data(), 1);
-        }
-    };
-    const auto ts = juce::Time::getHighResolutionTicks();
-    run(blocks);
-    const double tStart = juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - ts);
-    run(fs * (steadyFrom - seconds) / N);
     const auto t0 = juce::Time::getHighResolutionTicks();
-    run(blocks);
+    for (int b = 0; b < blocks; ++b) {
+        for (int i = 0; i < N; ++i) { ref[static_cast<size_t>(i)] = nd(rng); mic[static_cast<size_t>(i)] = 0.3f * ref[static_cast<size_t>(i)] + 0.1f * nd(rng); }
+        k.processFrame(&micPtr, ref.data(), 1);
+    }
     const double tk = juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t0);
     juce::dsp::FFT fft(8);
     std::vector<float> buf(512, 0.0f);
@@ -2472,7 +2463,6 @@ static int runKalmanBench() {
     for (int i = 0; i < nfft; ++i) { buf[0] = static_cast<float>(i); fft.performRealOnlyForwardTransform(buf.data(), true); }
     const double tf = juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t1);
     printf("Kalman 800 ms, mono: %.3f s for %d s of audio = %.1f%% of one core\n", tk, seconds, 100.0 * tk / seconds);
-    printf("  first %d s after a start (faster constraint): %.1f%% of one core\n", seconds, 100.0 * tStart / seconds);
     printf("  of which ~%d FFTs of 256: %.3f s (%.1f%% of one core)\n", nfft, tf, 100.0 * tf / seconds);
     return 0;
 }
