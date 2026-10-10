@@ -33,7 +33,9 @@ lesspa_check_no_stray_dylibs() {
     local bundle binary strays
     for bundle in "$@"; do
         binary="$bundle/Contents/MacOS/Less PA"
-        strays="$(otool -L "$binary" | tail -n +2 \
+        # otool prints a "<path> (architecture <arch>):" header per slice of
+        # a universal binary; only the indented lines are dependencies.
+        strays="$(otool -L "$binary" | grep $'^\t' \
             | grep -v -e '/System/Library/' -e '/usr/lib/' || true)"
         if [[ -n "$strays" ]]; then
             echo "error: $(basename "$bundle") links against non-system libraries:" >&2
