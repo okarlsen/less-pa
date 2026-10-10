@@ -3,7 +3,7 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.4]
 
 ### Fixed
 

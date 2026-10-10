@@ -292,7 +292,7 @@ private:
 
     // Tuned on the real recordings
     //
-    // Long-run stability (after 1.1.3). Three things together keep the filter
+    // Long-run stability (1.1.4). Three things together keep the filter
     // bounded over a whole show; before them it slowly filled with stray
     // taps (mostly at the end of the tail and in bins with no signal) until
     // it overflowed: the delay readout ran off to the end of the tail, then
