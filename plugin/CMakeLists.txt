@@ -47,6 +47,8 @@ option(LESSPA_INSTALL_AFTER_BUILD "Copy the built plugins into the system plug-i
 # e.g. -DLESSPA_BUILD_LABEL=PR12 shows "v1.1.5 PR12". The version itself
 # stays numeric (hosts read it as major.minor.patch). Empty for releases.
 set(LESSPA_BUILD_LABEL "" CACHE STRING "Test-build label shown after the version in the panel (empty for releases)")
+# The packaging scripts read this to refuse a labelled build as a release.
+file(WRITE "${CMAKE_BINARY_DIR}/lesspa_build_label.txt" "${LESSPA_BUILD_LABEL}")
 set(LESSPA_FORMATS AU VST3)
 if(LESSPA_BUILD_AAX)
     list(APPEND LESSPA_FORMATS AAX)
@@ -138,5 +140,6 @@ target_link_libraries(PAEchoCancellerVerify
         juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags # as the plugin, so the suite tests the code that ships
         juce::juce_recommended_warning_flags
 )

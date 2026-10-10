@@ -38,6 +38,8 @@ REPO_ROOT="$(cd "$HERE/.." && pwd)"
 
 # shellcheck source=packaging/signing.sh
 source "$HERE/signing.sh"
+# shellcheck source=packaging/release_checks.sh
+source "$HERE/release_checks.sh"
 
 ARTEFACTS="$REPO_ROOT/plugin/build/PAEchoCanceller_artefacts/Release"
 AU_BUNDLE="$ARTEFACTS/AU/Less PA.component"
@@ -70,6 +72,8 @@ echo "Less PA $VERSION -- building installer"
 
 lesspa_require_signing_identities --with-installer
 MIN_MACOS="$(lesspa_deployment_target "$REPO_ROOT/plugin/CMakeLists.txt")"
+lesspa_check_release_configuration "$REPO_ROOT/plugin/build"
+lesspa_check_bundle_versions "$VERSION" "$AU_BUNDLE" "$VST3_BUNDLE"
 lesspa_check_no_stray_dylibs "$AU_BUNDLE" "$VST3_BUNDLE"
 lesspa_check_binary_targets "$MIN_MACOS" "$AU_BUNDLE" "$VST3_BUNDLE"
 
@@ -81,6 +85,7 @@ if [[ -d "$AAX_BUNDLE" ]]; then
     if [[ -d "$AAX_BUNDLE/Contents/__Pace_Eden.bundle" ]] \
             && codesign --verify --deep --strict "$AAX_BUNDLE" 2>/dev/null \
             && lesspa_bundles_are_stapled "$AAX_BUNDLE"; then
+        lesspa_check_bundle_versions "$VERSION" "$AAX_BUNDLE"
         lesspa_check_no_stray_dylibs "$AAX_BUNDLE"
         lesspa_check_binary_targets "$MIN_MACOS" "$AAX_BUNDLE"
         INCLUDE_AAX=1

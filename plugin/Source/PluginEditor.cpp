@@ -299,6 +299,10 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 PAEchoCancellerAudioProcessorEditor::~PAEchoCancellerAudioProcessorEditor()
 {
     stopTimer();
+    // The help window belongs to this editor and closes with the plugin
+    // window. Deleting it outright is safe while it is modal (JUCE's modal
+    // manager drops it), and nothing of ours is left running afterwards.
+    delete helpWindow.getComponent();
     setLookAndFeel(nullptr); // JUCE asserts if a component is destroyed still holding one
 }
 
@@ -729,6 +733,12 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
 
 void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
 {
+    // One help window at a time: a second click brings it to the front.
+    if (helpWindow != nullptr) {
+        helpWindow->toFront(true);
+        return;
+    }
+
     // How the two stages work first, then the panel exactly: the columns
     // left to right (the middle one as its two stages), then how to use it
     // live and in post. The order is the thing that has to match the
@@ -901,8 +911,9 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
 
     // Colours are set on the editor directly rather than by handing it our
     // LookAndFeel: the DialogWindow is a separate top-level window (so it does
-    // not inherit ours) and it is launched async, so it can outlive this editor
-    // -- pointing it at a member of ours would leave a dangling LookAndFeel.
+    // not inherit ours) and deletes itself when dismissed, which may be after
+    // this editor is gone -- pointing it at a member of ours would leave a
+    // dangling LookAndFeel.
     content->setColour(juce::TextEditor::backgroundColourId, LessPAColours::panel);
     content->setColour(juce::TextEditor::textColourId, LessPAColours::primaryText);
     content->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
@@ -918,5 +929,5 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = true;
-    options.launchAsync();
+    helpWindow = options.launchAsync();
 }

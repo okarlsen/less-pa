@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <random>
 #include <thread>
@@ -1275,15 +1276,16 @@ bool testOversizedHostBlock(int sampleRate) {
         // output legitimately contains the startup zero-padding.
         if (b >= 4) worstRms = std::min(worstRms, std::sqrt(sumSq / oversizedBlock));
     }
+    const uint64_t fifoXruns = proc.getFifoXrunCount();
     proc.releaseResources();
 
     // Input is uniform(-0.5,0.5) -> RMS ~0.289; the HPF removes only content
     // below 150Hz, so a correct dry path should stay in the same ballpark.
     // A crash never gets here; silent/garbage output fails on the level.
     const double expectedRms = 0.289;
-    printf("  prepared=%d, actual block=%d -> worst steady-state output RMS=%.4f (input ~%.3f)\n",
-           preparedBlock, oversizedBlock, worstRms, expectedRms);
-    const bool pass = worstRms > 0.5 * expectedRms && worstRms < 1.5 * expectedRms;
+    printf("  prepared=%d, actual block=%d -> worst steady-state output RMS=%.4f (input ~%.3f), FIFO xruns %llu\n",
+           preparedBlock, oversizedBlock, worstRms, expectedRms, static_cast<unsigned long long>(fifoXruns));
+    const bool pass = worstRms > 0.5 * expectedRms && worstRms < 1.5 * expectedRms && fifoXruns == 0;
     printf("  %s\n", pass ? "PASS -- survives an oversized block and still produces correct audio"
                           : "CHECK -- oversized block produced wrong/no audio (or the scratch buffers overran)");
     return pass;
@@ -1654,6 +1656,8 @@ bool testStateSaveRestore() {
     proc.getStateInformation(bypassedState);
     const auto parsed = juce::ValueTree::readFromData(bypassedState.getData(), bypassedState.getSize());
     const bool bypassExcluded = parsed.isValid() && !parsed.hasProperty("bypass");
+    // The version tag a future range change would key a conversion on
+    const bool versioned = parsed.isValid() && static_cast<int>(parsed.getProperty("stateVersion", 0)) == 1;
 
     juce::ValueTree crafted("PAEchoCancellerState");
     crafted.setProperty("bypass", 1.0f, nullptr);
@@ -1671,7 +1675,8 @@ bool testStateSaveRestore() {
     printf("  %s\n", (bypassExcluded && bypassNotRestored)
                           ? "PASS -- bypass stays out of saved state in both directions"
                           : "CHECK -- bypass leaked into state save/restore");
-    return pass && bypassExcluded && bypassNotRestored;
+    printf("  stateVersion in saved state: %s\n", versioned ? "1" : "MISSING");
+    return pass && bypassExcluded && bypassNotRestored && versioned;
 }
 
 // A session saved by 1.0.x: the controls that carried over (same IDs) come
@@ -2481,7 +2486,7 @@ namespace latencymatrix {
 struct Case {
     int rate; int block; bool stereo; float mixPct; bool bypass; bool nonRealtime; bool paActive;
 };
-struct Result { int reported = -1; int measured[2] = { -1, -1 }; double peakRatio[2] = { 0, 0 }; bool positive[2] = { false, false }; };
+struct Result { int reported = -1; int measured[2] = { -1, -1 }; double peakRatio[2] = { 0, 0 }; bool positive[2] = { false, false }; uint64_t fifoXruns = 0; };
 
 Result run(const Case& c, double durationS = 2.0) {
     const int n = static_cast<int>(c.rate * durationS);
@@ -2542,6 +2547,7 @@ Result run(const Case& c, double durationS = 2.0) {
         pos += bs;
     }
     if (proc.getLatencySamples() != r.reported) r.reported = -2; // must not change while running
+    r.fifoXruns = proc.getFifoXrunCount();
     proc.releaseResources();
 
     // Correlate over a window in the second half, where the canceller has
@@ -2590,16 +2596,17 @@ bool runMatrix(bool full, bool verbose) {
             for (const auto& v : variants) {
                 const Case c{ rate, block, v.stereo, v.mix, v.bypass, v.nonRealtime, v.pa };
                 const auto r = run(c);
-                bool ok = r.reported > 0;
+                bool ok = r.reported > 0 && r.fifoXruns == 0;
                 for (int ch = 0; ch < (v.stereo ? 2 : 1); ++ch)
                     ok = ok && r.measured[ch] == r.reported && r.positive[ch] && r.peakRatio[ch] > 6.0;
                 ++cases;
                 if (!ok) { ++failures; allOk = false; }
                 if (verbose || !ok)
-                    printf("  %6d Hz  block %-7s %-34s reported %4d  measured %4d/%4d  peak +%.0f dB%s  %s\n", rate,
+                    printf("  %6d Hz  block %-7s %-34s reported %4d  measured %4d/%4d  peak +%.0f dB%s%s  %s\n", rate,
                            block > 0 ? std::to_string(block).c_str() : "varying", v.name, r.reported, r.measured[0],
                            v.stereo ? r.measured[1] : r.measured[0], r.peakRatio[0],
-                           (r.positive[0] && (!v.stereo || r.positive[1])) ? "" : " INVERTED", ok ? "ok" : "MISMATCH");
+                           (r.positive[0] && (!v.stereo || r.positive[1])) ? "" : " INVERTED",
+                           r.fifoXruns == 0 ? "" : " FIFO XRUNS", ok ? "ok" : "MISMATCH");
             }
     printf("  %d cases, %d mismatches\n", cases, failures);
     return allOk;
@@ -2617,7 +2624,8 @@ bool testLatencyMatrix() {
 // None and feed it the track's own input. That copy must count as no
 // reference: output identical to a silent Reference bus, and the flag the
 // editor shows set. A real PA reference must not trip it, and a stereo
-// input folded to mono (L+R)/2 must be caught too.
+// input folded to mono must be caught too, at any gain a host's pan law or
+// trim gives the fold-down (a missed one cancels the mic with itself).
 bool testReferenceIsCopyOfMainInput(int sampleRate) {
     printf("\n=== Reference is a copy of the main input (Logic Side Chain: None) @ %d Hz ===\n", sampleRate);
     const auto signals = makeSignals(sampleRate, 6.0, { { 5.0, 0.6f }, { 22.0, 0.3f } });
@@ -2636,35 +2644,258 @@ bool testReferenceIsCopyOfMainInput(int sampleRate) {
     for (size_t i = 0; i < outCopy.size(); ++i)
         maxDiff = std::max(maxDiff, std::abs(outCopy[i] - outSilent[i]));
 
-    // Stereo input with different channels, Reference = (L+R)/2.
-    bool foldFlagged = false;
-    {
+    // Stereo input with different channels, the Reference a fold-down of it
+    // at whatever gain a host's pan law or trim gives it. pattern: the host
+    // block sizes, cycled.
+    const auto flaggedFor = [&](const std::function<float(float, float)>& refOf, std::vector<int> pattern,
+                                bool independentRef = false) {
         PAEchoCancellerAudioProcessor proc;
-        const int blockSize = 256;
-        proc.prepareToPlay(sampleRate, blockSize);
-        juce::AudioBuffer<float> buffer(std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels()), blockSize);
+        const int maxBlock = *std::max_element(pattern.begin(), pattern.end());
+        proc.prepareToPlay(sampleRate, maxBlock);
+        juce::AudioBuffer<float> buffer(std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels()), maxBlock);
         juce::MidiBuffer midi;
-        for (int pos = 0; pos + blockSize <= static_cast<int>(mic.size()); pos += blockSize) {
+        size_t idx = 0;
+        for (int pos = 0; pos + maxBlock <= static_cast<int>(mic.size());) {
+            const int bs = pattern[idx++ % pattern.size()];
+            buffer.setSize(buffer.getNumChannels(), bs, false, false, true);
             buffer.clear();
             auto mainIn = proc.getBusBuffer(buffer, true, 0);
             auto refIn = proc.getBusBuffer(buffer, true, 1);
-            for (int s = 0; s < blockSize; ++s) {
+            for (int s = 0; s < bs; ++s) {
+                // R: another stretch of the PA noise, so it is neither the
+                // reference nor a copy of L
                 const float l = mic[static_cast<size_t>(pos + s)];
-                const float r = 0.5f * reference[static_cast<size_t>(pos + s)];
+                const float r = 0.5f * reference[(static_cast<size_t>(pos + s) + reference.size() / 2) % reference.size()];
                 mainIn.setSample(0, s, l);
                 mainIn.setSample(1, s, r);
-                refIn.setSample(0, s, 0.5f * (l + r));
+                refIn.setSample(0, s, independentRef ? reference[static_cast<size_t>(pos + s)] : refOf(l, r));
             }
             proc.processBlock(buffer, midi);
+            pos += bs;
         }
-        foldFlagged = proc.isReferenceCopyOfMainInput();
+        const bool flagged = proc.isReferenceCopyOfMainInput();
         proc.releaseResources();
+        return flagged;
+    };
+    const std::vector<int> hostBlocks = { 256 }, tinyBlocks = { 512, 7, 1, 3 }, onlyTinyBlocks = { 1, 7, 3 };
+    struct Fold { const char* name; std::function<float(float, float)> refOf; };
+    const Fold folds[] = {
+        { "(L+R)/2", [](float l, float r) { return 0.5f * (l + r); } },
+        { "L+R", [](float l, float r) { return l + r; } },
+        { "L", [](float l, float) { return l; } },
+        { "R", [](float, float r) { return r; } },
+        { "-3 dB (L+R)", [](float l, float r) { return 0.70710678f * (l + r); } },
+        { "-6 dB L", [](float l, float) { return 0.5f * l; } },
+        { "+6 dB R", [](float, float r) { return 2.0f * r; } },
+        { "R, polarity inverted", [](float, float r) { return -r; } },
+    };
+    bool foldsFlagged = true;
+    for (const auto& fold : folds) {
+        const bool flagged = flaggedFor(fold.refOf, hostBlocks) && flaggedFor(fold.refOf, tinyBlocks);
+        if (!flagged) printf("  fold-down %s NOT flagged\n", fold.name);
+        foldsFlagged = foldsFlagged && flagged;
     }
+    // A gain fitted to a handful of samples proves nothing: blocks of 1-7
+    // samples alone must never flag a real PA feed (with 1-sample blocks,
+    // every reference is a scaled copy of the input).
+    const bool realFlaggedTinyBlocks = flaggedFor({}, onlyTinyBlocks, true);
+    const bool realFlaggedStereo = flaggedFor({}, hostBlocks, true);
 
-    printf("  Copy flagged=%d  real PA flagged=%d  (L+R)/2 flagged=%d  max |copy - silent ref| = %.3g\n",
-           copyFlagged, realFlagged, foldFlagged, static_cast<double>(maxDiff));
-    const bool pass = copyFlagged && !realFlagged && foldFlagged && juce::exactlyEqual(maxDiff, 0.0f);
-    printf("  %s\n", pass ? "PASS -- a copy of the input is treated as no reference" : "FAIL");
+    printf("  Copy flagged=%d  real PA flagged=%d (stereo %d, 1-7 sample blocks %d)  scaled fold-downs flagged=%d"
+           "  max |copy - silent ref| = %.3g\n",
+           copyFlagged, realFlagged, realFlaggedStereo, realFlaggedTinyBlocks, foldsFlagged, static_cast<double>(maxDiff));
+    const bool pass = copyFlagged && !realFlagged && !realFlaggedStereo && !realFlaggedTinyBlocks && foldsFlagged
+                   && juce::exactlyEqual(maxDiff, 0.0f);
+    printf("  %s\n", pass ? "PASS -- a copy of the input, at any gain, is treated as no reference" : "FAIL");
+    return pass;
+}
+
+// A venue for the mic-silence tests: a coloured-noise PA, a 50 ms + 77 ms
+// echo path at echoGain, and a crowd 30 dB below the PA feed. The mic is
+// digital silence (exact zeros, as a DAW region gap, a mute or a dropout
+// upstream give) from silentFromS to silentToS.
+struct SilenceScene {
+    std::vector<float> ref, mic, micUngapped;
+};
+
+SilenceScene makeSilenceScene(int sampleRate, double seconds, float echoGain, double silentFromS, double silentToS) {
+    const size_t n = static_cast<size_t>(seconds * sampleRate);
+    std::mt19937 rng(5);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    std::vector<float> white(n), crowd(n);
+    for (auto& v : white) v = dist(rng);
+    for (auto& v : crowd) v = dist(rng);
+    SilenceScene sc;
+    sc.ref = onePoleLowpass(onePoleLowpass(white, 0.5f), 0.5f);
+    crowd = onePoleLowpass(crowd, 0.3f);
+    const auto rmsOf = [](const std::vector<float>& x) {
+        double a = 0;
+        for (float v : x) a += static_cast<double>(v) * v;
+        return std::sqrt(a / static_cast<double>(x.size()));
+    };
+    const float refScale = static_cast<float>(0.1 / rmsOf(sc.ref)), crowdScale = static_cast<float>(0.1 * 0.0316 / rmsOf(crowd));
+    for (auto& v : sc.ref) v *= refScale;
+    const size_t d1 = static_cast<size_t>(0.050 * sampleRate), d2 = static_cast<size_t>(0.077 * sampleRate);
+    sc.micUngapped.assign(n, 0.0f);
+    for (size_t i = 0; i < n; ++i)
+        sc.micUngapped[i] = echoGain * ((i >= d1 ? 0.8f * sc.ref[i - d1] : 0.0f) + (i >= d2 ? -0.45f * sc.ref[i - d2] : 0.0f))
+                          + crowdScale * crowd[i];
+    sc.mic = sc.micUngapped;
+    for (size_t i = static_cast<size_t>(silentFromS * sampleRate); i < std::min(n, static_cast<size_t>(silentToS * sampleRate)); ++i)
+        sc.mic[i] = 0.0f;
+    return sc;
+}
+
+// Cancellation over [fromS, toS): the ungapped mic's power over the
+// output's, the output taken outDelay samples later.
+double cancellationDb(const SilenceScene& sc, const std::vector<float>& out, int sampleRate, double fromS, double toS,
+                      int outDelay) {
+    double m = 0, o = 0;
+    for (size_t i = static_cast<size_t>(fromS * sampleRate); i < static_cast<size_t>(toS * sampleRate); ++i) {
+        m += static_cast<double>(sc.micUngapped[i]) * sc.micUngapped[i];
+        const size_t j = i + static_cast<size_t>(outDelay);
+        if (j < out.size()) o += static_cast<double>(out[j]) * out[j];
+    }
+    return 10.0 * std::log10(m / std::max(o, 1e-30));
+}
+
+// The bare filter (Strength 0, Tail 800 ms) over a scene, block by block.
+std::vector<float> runCancellerOnScene(const SilenceScene& sc, int sampleRate, uint64_t& restarts) {
+    KalmanEchoCanceller k;
+    k.prepare(sampleRate, 1, 0.8);
+    k.setSuppressor(KalmanEchoCanceller::settingsForAmount(0.0f, -12.0f, 30.0f));
+    const int N = k.getBlockSize();
+    std::vector<float> out(sc.mic.size(), 0.0f), block(static_cast<size_t>(N));
+    float* bp = block.data();
+    for (size_t pos = 0; pos + static_cast<size_t>(N) <= sc.mic.size(); pos += static_cast<size_t>(N)) {
+        std::copy_n(sc.mic.begin() + static_cast<std::ptrdiff_t>(pos), N, block.begin());
+        k.processFrame(&bp, sc.ref.data() + pos, 1);
+        std::copy(block.begin(), block.end(), out.begin() + static_cast<std::ptrdiff_t>(pos));
+    }
+    restarts = k.getRestartCount();
+    return out;
+}
+
+// Post: the ambience region often starts after the PA track. Live: the mic
+// channel is still muted when the PA starts. The level-relative start must
+// wait for the mic instead of measuring silence, which used to leave the
+// filter unable to learn for the rest of the session (0.3 dB instead of
+// 20 dB).
+bool testSilentMicAtStart(int sampleRate) {
+    printf("\n=== Mic silent for the first 10 s of PA (%d Hz) ===\n", sampleRate);
+    const auto normal = makeSilenceScene(sampleRate, 40.0, 0.3f, 0.0, 0.0);
+    const auto gapped = makeSilenceScene(sampleRate, 40.0, 0.3f, 0.0, 10.0);
+    uint64_t restartsNormal = 0, restartsGapped = 0;
+    const auto outNormal = runCancellerOnScene(normal, sampleRate, restartsNormal);
+    const auto outGapped = runCancellerOnScene(gapped, sampleRate, restartsGapped);
+    const int delay = KalmanEchoCanceller::suppressorDelaySamples;
+    // 20-29 s after the mic comes in, in both runs
+    const double dbNormal = cancellationDb(normal, outNormal, sampleRate, 20.0, 29.0, delay);
+    const double dbGapped = cancellationDb(gapped, outGapped, sampleRate, 30.0, 39.0, delay);
+    printf("  Cancellation 20-29 s after the mic comes in: present from the start %.1f dB, silent for the first 10 s %.1f dB,"
+           " restarts %llu\n",
+           dbNormal, dbGapped, static_cast<unsigned long long>(restartsGapped));
+    const bool pass = dbNormal > 10.0 && std::abs(dbGapped - dbNormal) <= 1.0 && restartsGapped == 0 && restartsNormal == 0;
+    printf("  %s\n", pass ? "PASS -- learns as if the mic had been there from the start" : "FAIL");
+    return pass;
+}
+
+// A region gap, a mute or a dropout while the PA keeps playing. The filter
+// must neither restart (at echo gain 1.0 the blow-up guard used to mistake
+// the converged filter for a runaway one) nor unlearn, and must cancel as
+// before as soon as the mic is back.
+bool testMicGapKeepsFilter(int sampleRate, float echoGain) {
+    printf("\n=== Mic silent for 5 s mid-session, echo gain %.1f (%d Hz) ===\n", static_cast<double>(echoGain), sampleRate);
+    const auto sc = makeSilenceScene(sampleRate, 35.0, echoGain, 20.0, 25.0);
+    uint64_t restarts = 0;
+    const auto out = runCancellerOnScene(sc, sampleRate, restarts);
+    const int delay = KalmanEchoCanceller::suppressorDelaySamples;
+    const double before = cancellationDb(sc, out, sampleRate, 18.0, 20.0, delay);
+    const double after = cancellationDb(sc, out, sampleRate, 25.0, 27.0, delay);
+    const double later = cancellationDb(sc, out, sampleRate, 30.0, 34.0, delay);
+    double gapOut = 0;
+    for (size_t i = static_cast<size_t>(20.0 * sampleRate) + 512; i < static_cast<size_t>(25.0 * sampleRate); ++i)
+        gapOut = std::max(gapOut, static_cast<double>(std::abs(out[i])));
+    printf("  Cancellation: before the gap %.1f dB, first 2 s after %.1f dB, 5-9 s after %.1f dB; restarts %llu; "
+           "output peak during the gap %.2g\n",
+           before, after, later, static_cast<unsigned long long>(restarts), gapOut);
+    const bool pass = before > 10.0 && restarts == 0 && after >= before - 1.5 && later >= before - 1.0 && gapOut < 1e-6;
+    printf("  %s\n", pass ? "PASS -- the filter holds through the gap" : "FAIL");
+    return pass;
+}
+
+// The same through the whole plugin (input HPF, FIFOs, Strength 80%).
+bool testMicGapThroughPlugin(int sampleRate) {
+    printf("\n=== Mic silent for 5 s mid-session, through processBlock (%d Hz) ===\n", sampleRate);
+    const auto sc = makeSilenceScene(sampleRate, 35.0, 1.0f, 20.0, 25.0);
+    const auto normal = makeSilenceScene(sampleRate, 35.0, 1.0f, 0.0, 0.0);
+    PAEchoCancellerAudioProcessor proc, procNormal;
+    if (!setMonoLayout(proc) || !setMonoLayout(procNormal)) {
+        printf("  FAILED to set mono layout\n");
+        return false;
+    }
+    const auto out = runThroughProcessor(proc, sampleRate, sc.ref, sc.mic);
+    const auto outNormal = runThroughProcessor(procNormal, sampleRate, normal.ref, normal.mic);
+    const int delay = proc.getLatencySamples();
+    const double after = cancellationDb(sc, out, sampleRate, 25.0, 27.0, delay);
+    const double afterNormal = cancellationDb(normal, outNormal, sampleRate, 25.0, 27.0, delay);
+    printf("  Cancellation 25-27 s: with the gap %.1f dB, without %.1f dB; restarts %llu\n", after, afterNormal,
+           static_cast<unsigned long long>(proc.getCancellerRestartCount()));
+    const bool pass = afterNormal > 10.0 && after >= afterNormal - 1.5 && proc.getCancellerRestartCount() == 0;
+    printf("  %s\n", pass ? "PASS -- the filter holds through the gap" : "FAIL");
+    return pass;
+}
+
+// isBusesLayoutSupported keeps the output as wide as the input, but a host
+// can still hand a wider buffer to a processor prepared narrower (a layout
+// change without prepareToPlay). The FIFO reads are destructive, so each
+// must happen once per channel: the extra channel gets a copy, and the
+// prepared channel must come out exactly as it would on its own.
+bool testExtraOutputChannels(int sampleRate) {
+    printf("\n=== More output channels than prepared (%d Hz) ===\n", sampleRate);
+    const auto signals = makeSignals(sampleRate, 3.0);
+    PAEchoCancellerAudioProcessor monoProc, wideProc; // monoProc: the same input on its own, for comparison
+    if (!setMonoLayout(monoProc) || !setMonoLayout(wideProc)) {
+        printf("  FAILED to set mono layout\n");
+        return false;
+    }
+    const int blockSize = 256;
+    monoProc.prepareToPlay(sampleRate, blockSize);
+    wideProc.prepareToPlay(sampleRate, blockSize);
+    PAEchoCancellerAudioProcessor::BusesLayout stereo;
+    stereo.inputBuses.add(juce::AudioChannelSet::stereo());
+    stereo.inputBuses.add(juce::AudioChannelSet::mono());
+    stereo.outputBuses.add(juce::AudioChannelSet::stereo());
+    const bool relaid = wideProc.setBusesLayout(stereo); // no prepareToPlay after it
+    juce::AudioBuffer<float> buffer(3, blockSize);
+    juce::MidiBuffer midi;
+    juce::AudioBuffer<float> monoBuffer(2, blockSize);
+    float maxDiff = 0.0f, maxChannelDiff = 0.0f;
+    for (int pos = 0; pos + blockSize <= static_cast<int>(signals.mic.size()); pos += blockSize) {
+        buffer.clear();
+        auto mainIn = wideProc.getBusBuffer(buffer, true, 0);
+        auto refIn = wideProc.getBusBuffer(buffer, true, 1);
+        for (int ch = 0; ch < mainIn.getNumChannels(); ++ch)
+            mainIn.copyFrom(ch, 0, signals.mic.data() + pos, blockSize);
+        refIn.copyFrom(0, 0, signals.reference.data() + pos, blockSize);
+        wideProc.processBlock(buffer, midi);
+
+        monoBuffer.clear();
+        monoProc.getBusBuffer(monoBuffer, true, 0).copyFrom(0, 0, signals.mic.data() + pos, blockSize);
+        monoProc.getBusBuffer(monoBuffer, true, 1).copyFrom(0, 0, signals.reference.data() + pos, blockSize);
+        monoProc.processBlock(monoBuffer, midi);
+
+        auto wideOut = wideProc.getBusBuffer(buffer, false, 0);
+        for (int s = 0; s < blockSize; ++s) {
+            maxDiff = std::max(maxDiff, std::abs(wideOut.getSample(0, s) - monoBuffer.getSample(0, s)));
+            maxChannelDiff = std::max(maxChannelDiff, std::abs(wideOut.getSample(1, s) - wideOut.getSample(0, s)));
+        }
+    }
+    const uint64_t xruns = wideProc.getFifoXrunCount();
+    printf("  layout changed=%d  max |out L - mono run| = %.3g  max |out R - out L| = %.3g  FIFO xruns %llu\n",
+           relaid, static_cast<double>(maxDiff), static_cast<double>(maxChannelDiff), static_cast<unsigned long long>(xruns));
+    const bool pass = relaid && juce::exactlyEqual(maxDiff, 0.0f) && juce::exactlyEqual(maxChannelDiff, 0.0f) && xruns == 0;
+    printf("  %s\n", pass ? "PASS -- each channel read once, extra output channel copied" : "FAIL");
     return pass;
 }
 
@@ -3254,6 +3485,17 @@ int main(int argc, char* argv[]) {
         return ok ? 0 : 1;
     }
 
+    // --mic-silence: just the mic-silence tests (digital silence at the
+    // start and mid-session), for fast iteration on the canceller.
+    if (argc >= 2 && std::string(argv[1]) == "--mic-silence") {
+        bool ok = testSilentMicAtStart(48000);
+        for (int rate : { 48000, 96000 })
+            for (float gain : { 0.3f, 1.0f }) ok = testMicGapKeepsFilter(rate, gain) && ok;
+        ok = testMicGapThroughPlugin(48000) && ok;
+        printf("\n%s\n", ok ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
+        return ok ? 0 : 1;
+    }
+
     printDefaultBusLayout();
 
     const int rates[] = { 44100, 48000, 96000 };
@@ -3295,6 +3537,11 @@ int main(int argc, char* argv[]) {
     for (int rate : rates) allPass = testProcessBlockNeverAllocates(rate) && allPass;
     allPass = testCorruptStateRestore() && allPass;
     for (int rate : rates) allPass = testCancellerRestartsAfterBlowUp(rate) && allPass;
+    allPass = testSilentMicAtStart(48000) && allPass;
+    for (int rate : { 48000, 96000 })
+        for (float gain : { 0.3f, 1.0f }) allPass = testMicGapKeepsFilter(rate, gain) && allPass;
+    allPass = testMicGapThroughPlugin(48000) && allPass;
+    allPass = testExtraOutputChannels(48000) && allPass;
 
     printf("\n%s\n", allPass ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
 

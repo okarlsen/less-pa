@@ -5,11 +5,45 @@ All notable changes to Less PA are documented here. Versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- A mic that is digitally silent while the PA starts no longer leaves the PA
+  Canceller unable to learn for the rest of the session. This happened in
+  post when the ambience region starts after the PA track, and live when
+  the mic channel is still muted or unpatched as the PA starts: the
+  canceller measured its starting point on the silent mic and never
+  recovered (with the first 10 s of the mic silent, about half its usual
+  cancellation in dB on the LS26 and Oslo recordings for as long as they
+  ran). It now waits until the mic carries signal.
+- Digital silence on the mic mid-session (a gap between regions, a mute or
+  a network audio dropout upstream, the mic region ending before the PA
+  track) no longer unlearns the PA Canceller or restarts it. At high PA
+  levels a single silent block could restart the canceller, and longer gaps
+  made it unlearn: on the Oslo recording a 5 s gap cost up to 8.6 dB of
+  cancellation in the 5 s after it, and the canceller took about 30 s to
+  get back. The canceller and the Bleed Suppressor now hold their state
+  while the mic is below -100 dBFS (no real microphone gets there) and
+  carry on where they were.
+- The check for a reference that is a copy of the plugin's own input
+  (Logic or MainStage with Side Chain set to None) now also catches copies
+  at other gains, such as a -3 dB or -6 dB pan-law fold-down or a polarity
+  flip. Before, those would make the plugin cancel the mic with itself.
+
+With the mic present from the start and no gaps, the output is
+bit-identical to 1.1.5 (checked on the LS26 and Oslo recordings at every
+setting). Latency is unchanged.
+
 ### Changed
 
 - The help says "at sample rates of 88.2 kHz and above" where it describes
   the Bleed Suppressor's band width and the latency, so it reads as the
   session's sample rate rather than audio content at 88.2 kHz.
+- The "?" button opens one help window at a time and closes it with the
+  plugin window.
+- Saved sessions carry a state version, so a future change to a control's
+  range can convert older sessions instead of moving their values.
+- The packaging scripts refuse a test-labelled, non-Release or out-of-date
+  build folder, so a test build can't be shipped as a release.
 
 ## [1.1.5]
 
