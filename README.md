@@ -15,7 +15,7 @@ by a per-band bleed suppressor, adding about 4 ms of latency. Built by SGTM on t
 
 ## Requirements
 
-- macOS 13 (Ventura) or newer, on Apple Silicon.
+- macOS 13 (Ventura) or newer, on Apple Silicon or Intel.
 - A DAW/host supporting AU, VST3 or AAX plugins with a sidechain/second input
   bus (e.g. Logic Pro, Reaper, Ableton Live). Some hosts need the PA
   reference explicitly wired to the plugin's second input in their own

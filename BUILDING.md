@@ -1,7 +1,6 @@
 # Building Less PA from source
 
-Less PA builds on macOS (Apple Silicon) and produces an AU component and a
-VST3 bundle. It is a single CMake build of the JUCE plugin; the echo
+Less PA builds on macOS and produces an AU component and a VST3 bundle. It is a single CMake build of the JUCE plugin; the echo
 canceller is the plugin's own code (`plugin/Source/KalmanEchoCanceller.h`),
 with no external DSP library to build first.
 
@@ -37,10 +36,16 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target PAEchoCanceller_AU PAEchoCanceller_VST3 -j8
 ```
 
-The deployment target is macOS 13 and the architecture is arm64, both set in
-`plugin/CMakeLists.txt`. The packaging scripts refuse binaries built for
-anything else, and the installer refuses to run on an Intel Mac or on a
-macOS older than the deployment target.
+The deployment target is macOS 13 and the build is universal (arm64 and
+x86_64), both set in `plugin/CMakeLists.txt`. The packaging scripts refuse
+binaries built for anything else, and the installer refuses to run on a
+macOS older than the deployment target. For a faster local build of one
+architecture only, configure with `-DCMAKE_OSX_ARCHITECTURES=arm64`; such a
+build can't be packaged.
+
+The Intel part runs on Apple Silicon under Rosetta, which is how it is
+tested: `arch -x86_64 <command>` runs a universal binary's Intel part, for
+example `arch -x86_64 auval -v aufx LesP Sgtm`.
 
 The build products land in:
 
@@ -258,5 +263,5 @@ script if you want to test against the signed build locally.
 
 ## Not currently supported
 
-Intel/universal builds, Windows and Linux. The released plugin is Apple
-Silicon: AU, VST3 and AAX.
+Windows and Linux. The released plugin is macOS only: AU, VST3 and AAX,
+universal (Apple Silicon and Intel).

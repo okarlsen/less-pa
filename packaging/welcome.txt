@@ -18,8 +18,8 @@ Upgrading from 1.1.2 or older: those versions installed into your own home
 folder (~/Library/Audio/Plug-Ins). This installer removes that older copy of
 each format it installs, so your DAW doesn't keep loading the old version.
 
-Requirements: macOS 13 or newer on Apple Silicon, and a DAW that supports AU,
-VST3 or AAX plugins with a sidechain / second input bus.
+Requirements: macOS 13 or newer, on Apple Silicon or Intel, and a DAW that
+supports AU, VST3 or AAX plugins with a sidechain / second input bus.
 
 
 Signing

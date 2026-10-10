@@ -18,11 +18,12 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-# Likewise, CMake builds for the architecture of the shell it runs in, so a
-# Terminal under Rosetta would quietly produce an Intel build. Released
-# builds are Apple Silicon only, and the installer refuses Intel Macs.
+# Likewise, CMake builds only for the architecture of the shell it runs in.
+# Released builds are universal: Apple Silicon, plus Intel for Intel Macs and
+# for DAWs run under Rosetta on Apple Silicon, which can only load an Intel
+# plugin. A quick local build can pass -DCMAKE_OSX_ARCHITECTURES=arm64.
 if(NOT CMAKE_OSX_ARCHITECTURES)
-    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Target architectures" FORCE)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Target architectures" FORCE)
 endif()
 
 project(PAEchoCanceller VERSION 1.1.5)

@@ -189,12 +189,10 @@ if [[ -f "$LOGO" ]]; then
     BACKGROUND_XML='<background file="background.png" alignment="bottomleft" scaling="proportional"/>'
 fi
 
-# The installer stops before anything is written on a Mac it doesn't
-# support. hostArchitectures="arm64" alone makes Installer refuse an Intel
-# Mac with a generic "can't be installed on this computer"; the
-# installation-check script says why, and also refuses a macOS older than
-# the deployment target, which nothing else checks: the plugins would
-# install and then fail to load in the DAW.
+# The installer stops before anything is written on a macOS older than the
+# deployment target, with a message saying why; otherwise the plugins would
+# install and then fail to load in the DAW. The plugins are universal, so
+# both Apple Silicon and Intel Macs are allowed.
 #
 # customize="always" opens the Installation Type step on the format choice
 # list itself. With "allow" the list hid behind a Customize button that
@@ -205,17 +203,11 @@ cat > "$BUILD_DIR/distribution.xml" <<XML
     <title>Less PA $VERSION</title>
     <welcome file="welcome.txt" mime-type="text/plain"/>
     $BACKGROUND_XML
-    <options customize="always" require-scripts="false" hostArchitectures="arm64"/>
+    <options customize="always" require-scripts="false" hostArchitectures="arm64,x86_64"/>
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <installation-check script="lesspa_system_supported()"/>
     <script><![CDATA[
     function lesspa_system_supported() {
-        if (system.sysctl('hw.optional.arm64') != 1) {
-            my.result.type = 'Fatal';
-            my.result.title = 'Less PA needs a Mac with Apple Silicon';
-            my.result.message = 'This Mac has an Intel processor. Less PA $VERSION is built for Apple Silicon (M-series) only.';
-            return false;
-        }
         if (system.compareVersions(system.version.ProductVersion, '$MIN_MACOS') < 0) {
             my.result.type = 'Fatal';
             my.result.title = 'Less PA needs macOS $MIN_MACOS or newer';

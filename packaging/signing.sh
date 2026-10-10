@@ -59,31 +59,33 @@ lesspa_deployment_target() {
     echo "$target"
 }
 
-# The packages promise "macOS <target> or newer on Apple Silicon", so refuse
-# to ship a binary that is anything else: an Intel or universal slice (a
-# build from a Rosetta terminal, or a stray CMAKE_OSX_ARCHITECTURES), or a
-# minimum macOS other than the release target (a build directory configured
-# with a different -DCMAKE_OSX_DEPLOYMENT_TARGET).
+# The packages promise "macOS <target> or newer, Apple Silicon and Intel",
+# so refuse to ship a binary that is anything else: a single-architecture
+# build (a build directory configured with -DCMAKE_OSX_ARCHITECTURES=arm64
+# for speed), or a slice whose minimum macOS is not the release target (a
+# build directory configured with a different -DCMAKE_OSX_DEPLOYMENT_TARGET).
 lesspa_check_binary_targets() {
-    local target="$1" bundle binary archs minos
+    local target="$1" bundle binary archs arch minos
     shift
     for bundle in "$@"; do
         binary="$bundle/Contents/MacOS/Less PA"
-        archs="$(lipo -archs "$binary")"
-        if [[ "$archs" != "arm64" ]]; then
-            echo "error: $(basename "$bundle") is built for '$archs', expected arm64 only." >&2
-            echo "       Configure with -DCMAKE_OSX_ARCHITECTURES=arm64. See BUILDING.md." >&2
+        archs="$(lipo -archs "$binary" | tr ' ' '\n' | sort | tr '\n' ' ')"
+        if [[ "$archs" != "arm64 x86_64 " ]]; then
+            echo "error: $(basename "$bundle") is built for '${archs% }', expected arm64 and x86_64." >&2
+            echo "       Configure with -DCMAKE_OSX_ARCHITECTURES=\"arm64;x86_64\". See BUILDING.md." >&2
             return 1
         fi
-        minos="$(otool -l "$binary" \
-            | awk '$2 == "LC_BUILD_VERSION" { found = 1 } found && $1 == "minos" { print $2; exit }')"
-        if [[ "$minos" != "$target" ]]; then
-            echo "error: $(basename "$bundle") has minimum macOS '${minos:-unknown}', expected $target." >&2
-            echo "       Reconfigure the build with -DCMAKE_OSX_DEPLOYMENT_TARGET=$target. See BUILDING.md." >&2
-            return 1
-        fi
+        for arch in arm64 x86_64; do
+            minos="$(otool -arch "$arch" -l "$binary" \
+                | awk '$2 == "LC_BUILD_VERSION" { found = 1 } found && $1 == "minos" { print $2; exit }')"
+            if [[ "$minos" != "$target" ]]; then
+                echo "error: $(basename "$bundle") ($arch) has minimum macOS '${minos:-unknown}', expected $target." >&2
+                echo "       Reconfigure the build with -DCMAKE_OSX_DEPLOYMENT_TARGET=$target. See BUILDING.md." >&2
+                return 1
+            fi
+        done
     done
-    echo "  checked: arm64 only, minimum macOS $target"
+    echo "  checked: universal (arm64 + x86_64), minimum macOS $target"
 }
 
 # Fail early and clearly if the machine can't sign, rather than part way
