@@ -37,7 +37,10 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target PAEchoCanceller_AU PAEchoCanceller_VST3 -j8
 ```
 
-The deployment target is macOS 13, set in `plugin/CMakeLists.txt`.
+The deployment target is macOS 13 and the architecture is arm64, both set in
+`plugin/CMakeLists.txt`. The packaging scripts refuse binaries built for
+anything else, and the installer refuses to run on an Intel Mac or on a
+macOS older than the deployment target.
 
 The build products land in:
 
