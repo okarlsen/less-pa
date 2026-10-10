@@ -3,6 +3,14 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The help says "at sample rates of 88.2 kHz and above" where it describes
+  the Bleed Suppressor's band width and the latency, so it reads as the
+  session's sample rate rather than audio content at 88.2 kHz.
+
 ## [1.1.5]
 
 ### Changed
