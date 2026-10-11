@@ -3,7 +3,15 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.6]
+
+### Added
+
+- Intel Macs. The AU, VST3 and AAX are universal (Apple Silicon and Intel)
+  and one installer covers both; releases up to 1.1.5 were Apple Silicon
+  only and the installer refused Intel Macs. A DAW running under Rosetta on
+  Apple Silicon can load the plugin too. The Intel part is tested under
+  Rosetta, not yet on a real Intel Mac. macOS 13 is still the minimum.
 
 ### Fixed
 
