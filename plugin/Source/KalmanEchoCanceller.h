@@ -88,6 +88,7 @@ public:
         timeScratch.assign(static_cast<size_t>(M), 0.0f);
         timeScratch2.assign(static_cast<size_t>(M), 0.0f);
         dScratch.assign(static_cast<size_t>(K), 0.0f);
+        dFullScratch.assign(static_cast<size_t>(K), 0.0f);
         mScratch.assign(static_cast<size_t>(K), 0.0f);
         egScratchR.assign(static_cast<size_t>(K), 0.0f);
         egScratchI.assign(static_cast<size_t>(K), 0.0f);
@@ -130,6 +131,7 @@ public:
             c.hasPrev = false;
             c.accMic = 0.0;
             c.psiStart = psi0;
+            c.startupBlocks = 0;
         }
         std::fill(irPeak.begin(), irPeak.end(), 0.0f);
         std::fill(irPeakIdx.begin(), irPeakIdx.end(), 0);
@@ -220,6 +222,11 @@ public:
             xbar[static_cast<size_t>(k)] = xbarSmooth * xbar[static_cast<size_t>(k)] + (1.0f - xbarSmooth) * x2[i];
         }
 
+        double refPower = 0.0;
+        for (int n = 0; n < N; ++n)
+            refPower += static_cast<double>(ref[n]) * ref[n];
+        refActive = refPower > startRefPower * N;
+
         const int numCh = std::min(numChannels, static_cast<int>(channels.size()));
         if (!startDone)
             updateStartUncertainty(mic, ref, numCh);
@@ -239,7 +246,9 @@ private:
         std::vector<float> wr, wi, psi, psiS, py, pe, pout, gain, h, hPrev, hist;
         bool hasPrev = false;
         double accMic = 0.0;   // mic power summed over the PA-active start blocks
+        double startBlockPower = 0.0; // this block's mic power, while the start is being measured
         float psiStart = psi0; // the uncertainty newly started partitions get
+        int startupBlocks = 0; // PA blocks this filter has learned from since its (re)start, up to the start-up phase
     };
 
     // Level-relative start. A fixed starting uncertainty only suits one
@@ -249,6 +258,13 @@ private:
     // seen, the uncertainty restarts at
     // startScale * mic power / ref power -- the echo-path gain it may have to
     // learn. Tested on five recordings with the ref trimmed -10/0/+10 dB.
+    //
+    // Only blocks where the mic carries something count: a mic that is
+    // digitally silent while the PA plays (an ambience region that starts
+    // after the PA track, a mute or an unpatched channel at sound check)
+    // says nothing about the echo path. Counted, it would start the filter
+    // at psiFloor, and the process-noise cap (a multiple of psiStart) would
+    // then keep it from ever learning.
     void updateStartUncertainty(float* const* mic, const float* ref, int numCh)
     {
         double px = 0.0;
@@ -257,17 +273,23 @@ private:
         px /= N;
         if (px <= startRefPower)
             return;
-        accRef += px;
+        double pyAll = 0.0;
         for (int c = 0; c < numCh; ++c) {
             double py = 0.0;
             for (int n = 0; n < N; ++n)
                 py += static_cast<double>(mic[c][n]) * mic[c][n];
-            channels[static_cast<size_t>(c)].accMic += py / N;
+            pyAll += py;
+            channels[static_cast<size_t>(c)].startBlockPower = py / N;
         }
+        if (pyAll < static_cast<double>(noiseFloorPower) * N)
+            return;
+        accRef += px;
+        for (int c = 0; c < numCh; ++c)
+            channels[static_cast<size_t>(c)].accMic += channels[static_cast<size_t>(c)].startBlockPower;
         if (++accBlocks * N < static_cast<int>(startSeconds * fs))
             return;
         for (auto& c : channels) {
-            c.psiStart = std::max(psiFloor, static_cast<float>(startScale * c.accMic / accRef));
+            c.psiStart = std::max(psiStartFloor, static_cast<float>(startScale * c.accMic / accRef));
             std::fill(c.psi.begin(), c.psi.end(), c.psiStart);
         }
         startDone = true;
@@ -285,6 +307,7 @@ private:
         std::fill(c.h.begin(), c.h.end(), 0.0f); std::fill(c.hPrev.begin(), c.hPrev.end(), 0.0f);
         std::fill(c.hist.begin(), c.hist.end(), 0.0f);
         c.hasPrev = false;
+        c.startupBlocks = 0;
         ++restartCount;
         if (&c == &channels.front()) { // the delay readout reads channel 0's filter
             std::fill(irPeak.begin(), irPeak.end(), 0.0f);
@@ -319,11 +342,44 @@ private:
     //   the reference power. The leakage-only bins above the PA band adapt
     //   slowly or not at all. The filter can't inflate xbar, unlike U.
     // - A weak decay of the filter, W <- Aw W each block (~9 min time
-    //   constant at 48 kHz), which only bounds the slow drift that is left
-    //   and keeps the filter from memorising hours-old material.
+    //   constant), which only bounds the slow drift that is left and keeps
+    //   the filter from memorising hours-old material.
     // - An absolute floor on the noise PSD (-100 dBFS of white noise per
     //   bin), so bins with neither PA nor mic content stop adapting instead
     //   of fitting rounding noise.
+    // The per-block constants below (Aw, A2, xbarSmooth) give the same time
+    // constants at every rate: N doubles at 88.2 kHz and above, so a block
+    // is 2.67 ms at both 48 and 96 kHz (2.9 ms, 9% longer, at 44.1 and
+    // 88.2 kHz).
+    //
+    // Start-up noise (after 1.1.5). A filter that has just (re)started is
+    // very unsure, so its gain sat near 1 and it learned in large steps: for
+    // the first seconds it changed its echo estimate by more than half from
+    // one block to the next. That was heard as digital noise for the first
+    // 5 to 15 s of a cold start or an offline bounce (and, fainter, for the
+    // first half minute):
+    // - the estimate jumped at every block edge, and each step left
+    //   wrap-around in the partitions the gradient constraint had not
+    //   reached yet, which lands on the block edges as well: a click every
+    //   block (375 a second);
+    // - in bins where the mic has little of the PA, the steps were mostly
+    //   noise, and the filter put up to 10 dB of the reference's top end
+    //   into the output.
+    // Three things remove it (measured on LS26 Pub 1 and 2 and Oslo, and by
+    // ear):
+    // - Step cap: the filter takes at most stepCap of a bin's error per
+    //   block. A settled filter is far below it.
+    // - The uncertainty still shrinks by the uncapped gain, as before.
+    //   Shrinking it by the capped gain keeps it (and with it the
+    //   suppressor's residual-echo estimate) high for minutes, and the
+    //   suppressor then cuts the audience up to 4 dB deeper than it should.
+    // - Start-up constraint: for the first startupSeconds of PA a filter
+    //   learns from, the gradient constraint visits 1 partition in
+    //   startupConstraintStride each block instead of 1 in constraintStride
+    //   (about twice the CPU while it lasts).
+    // Smoothing what is subtracted across block edges instead (a crossfade
+    // from the previous block's filter, with every partition constrained)
+    // removes the clicks but not the noise in the filter, at 5x the CPU.
     // Never zero bin 0 to "fix" it: it is the DC of each partition's 2N-point
     // spectrum, and dropping it costs 4 to 5 dB of cancellation.
     static constexpr float Aw = 0.999995f;
@@ -332,13 +388,17 @@ private:
     static constexpr float psi0 = 1e-3f;
     static constexpr float lam = 0.9f;          // crowd/noise PSD smoothing
     static constexpr float psiFloor = 1e-10f;
+    static constexpr float psiStartFloor = psi0 * 1e-2f; // lowest level-relative start: it must still be able to learn
     static constexpr float cPad = 0.5f;         // |X|^2 of a 2N frame vs |E|^2 of N samples zero-padded
     static constexpr float guardSmooth = 0.9f;
     static constexpr int constraintStride = 64; // gradient constraint on 1 partition in 64 per block
+    static constexpr int startupConstraintStride = 4; // ... and on 1 in 4 while the filter starts up
+    static constexpr double startupSeconds = 30.0;    // PA a filter learns from before its start-up phase ends
+    static constexpr float stepCap = 0.1f;            // most of a bin's error the filter takes in one block
     static constexpr float regRho = 0.05f;          // step-size regularisation vs the band's mean uncertainty power
     static constexpr float procNoiseCapMul = 4.0f;  // |W|^2 in the process noise is capped at this multiple of psiStart
     static constexpr float freezeRho = 1e-2f;       // bins with reference power 20 dB or more below the band mean adapt slowly
-    static constexpr float xbarSmooth = 0.99947f;   // reference power average: ~5 s at 48 kHz (N = 128), ~2.5 s at 96 kHz
+    static constexpr float xbarSmooth = 0.99947f;   // reference power average: ~5 s
     static constexpr double startSeconds = 3.0;    // PA needed before the level-relative start
     static constexpr double startRefPower = 1e-5;  // a "PA-active" ref block: mean square above -50 dBFS
     static constexpr double startScale = 1.0;
@@ -440,8 +500,8 @@ private:
     static void updatePartition(float* __restrict Wr, float* __restrict Wi, float* __restrict Ps,
                                 const float* __restrict Xr, const float* __restrict Xi,
                                 const float* __restrict X2, const float* __restrict Er,
-                                const float* __restrict Ei, const float* __restrict D, int K,
-                                float w2Cap) noexcept
+                                const float* __restrict Ei, const float* __restrict D,
+                                const float* __restrict Dfull, int K, float w2Cap) noexcept
     {
         for (int k = 0; k < K; ++k) {
             const float g = Ps[k] * D[k];
@@ -450,7 +510,7 @@ private:
             const float wi = Aw * (Wi[k] + kr * Ei[k] + ki * Er[k]);
             Wr[k] = wr;
             Wi[k] = wi;
-            Ps[k] = A2 * (1.0f - cPad * g * X2[k]) * Ps[k] + (1.0f - A2) * std::min(wr * wr + wi * wi, w2Cap) + psiFloor;
+            Ps[k] = A2 * (1.0f - cPad * Ps[k] * Dfull[k] * X2[k]) * Ps[k] + (1.0f - A2) * std::min(wr * wr + wi * wi, w2Cap) + psiFloor;
         }
     }
 
@@ -521,13 +581,23 @@ private:
         // Restart this channel from zero (it relearns in seconds) instead
         // of letting it latch a dead or full-scale output for the rest of
         // the show.
+        //
+        // A mic block below -100 dBFS is digital silence (a mute or a dropout
+        // upstream, a gap between regions); a real mic never gets there. It
+        // carries no information about the echo path, so the filter, its
+        // uncertainty, the noise PSD and the guard's averages hold still
+        // until the mic is back: learning from it would unlearn the filter
+        // (E = -Yhat) and collapse its uncertainty, and the blow-up test
+        // would mistake a well-converged filter for a runaway one.
+        bool micSilent = false;
         {
             double micSq = 0.0, estSq = 0.0;
             for (int n = 0; n < N; ++n) {
                 micSq += static_cast<double>(y[n]) * y[n];
                 estSq += static_cast<double>(yhat[n]) * yhat[n];
             }
-            if (!std::isfinite(estSq) || estSq > 1e6 * micSq + 1e-2 * N) {
+            micSilent = micSq < static_cast<double>(noiseFloorPower) * N;
+            if (!std::isfinite(estSq) || (!micSilent && estSq > 1e6 * micSq + 1e-2 * N)) {
                 restartChannel(ch);
                 // The zero filter's estimate, and its fresh uncertainty
                 std::fill_n(Yr, K, 0.0f);
@@ -548,6 +618,7 @@ private:
         float* __restrict Er = er.data();
         float* __restrict Ei = ei.data();
         float* __restrict D = dScratch.data();
+        float* __restrict Dfull = dFullScratch.data();
         // Regularisation and excitation freeze (see the constants): bins whose
         // uncertainty power or reference power is far below the band mean
         // must not take steps of |E|/|X|.
@@ -561,15 +632,19 @@ private:
             U[k] *= cPad;
             const float e2 = Er[k] * Er[k] + Ei[k] * Ei[k];
             // crowd/noise PSD: error power the filter's uncertainty can't explain
-            ch.psiS[static_cast<size_t>(k)] = lam * ch.psiS[static_cast<size_t>(k)]
-                                            + (1.0f - lam) * std::max(e2 - U[k], 1e-3f * e2 + noiseFloorPower * static_cast<float>(N));
-            D[k] = std::min(1.0f, xbar[static_cast<size_t>(k)] / (xbarMean + 1e-30f))
-                 / (U[k] + ch.psiS[static_cast<size_t>(k)] + delta);
+            if (!micSilent)
+                ch.psiS[static_cast<size_t>(k)] = lam * ch.psiS[static_cast<size_t>(k)]
+                                                + (1.0f - lam) * std::max(e2 - U[k], 1e-3f * e2 + noiseFloorPower * static_cast<float>(N));
+            Dfull[k] = std::min(1.0f, xbar[static_cast<size_t>(k)] / (xbarMean + 1e-30f))
+                     / (U[k] + ch.psiS[static_cast<size_t>(k)] + delta);
+            D[k] = std::min(Dfull[k], stepCap / (U[k] + 1e-30f)); // the step cap, see the constants
         }
 
-        // --- Kalman update, one pass: W += Kg E with Kg = Psi conj(X) / D,
-        // then Psi <- A^2 (1 - c Re(Kg X)) Psi + (1 - A^2) |W|^2 ---
-        for (int p = 0; p < P; ++p) {
+        // --- Kalman update, one pass: W += Kg E with Kg = Psi conj(X) / D
+        // (step-capped), then Psi <- A^2 (1 - c Re(Kg X)) Psi + (1 - A^2) |W|^2
+        // (with the uncapped Kg) ---
+        // (none of it while the mic is silent, see above)
+        for (int p = 0; !micSilent && p < P; ++p) {
             const int x = lagIndex(p) * K;
             const float* __restrict Xr = xr.data() + x;
             const float* __restrict Xi = xi.data() + x;
@@ -577,13 +652,18 @@ private:
             float* __restrict Wr = ch.wr.data() + p * K;
             float* __restrict Wi = ch.wi.data() + p * K;
             float* __restrict Ps = ch.psi.data() + p * K;
-            updatePartition(Wr, Wi, Ps, Xr, Xi, X2, Er, Ei, D, K, procNoiseCapMul * ch.psiStart);
+            updatePartition(Wr, Wi, Ps, Xr, Xi, X2, Er, Ei, D, Dfull, K, procNoiseCapMul * ch.psiStart);
         }
         // Gradient constraint (keep each partition causal and N long), on one
         // partition in constraintStride per block in turn: 2 FFTs per
         // partition is most of the cost. The stability terms above keep the
         // unconstrained half from drifting at this rate (see the constants).
-        for (int p = static_cast<int>(blockCount % constraintStride); p < P; p += constraintStride) {
+        // More often while the filter starts up (see the constants).
+        const bool startingUp = ch.startupBlocks * N < static_cast<int>(startupSeconds * fs);
+        if (startingUp && refActive && !micSilent)
+            ++ch.startupBlocks;
+        const int stride = startingUp ? startupConstraintStride : constraintStride;
+        for (int p = static_cast<int>(blockCount % static_cast<uint64_t>(stride)); !micSilent && p < P; p += stride) {
             float* Wr = ch.wr.data() + p * K;
             float* Wi = ch.wi.data() + p * K;
             auto& w = timeScratch2;
@@ -599,9 +679,14 @@ private:
             const size_t kk = static_cast<size_t>(k);
             const float y2 = yr[kk] * yr[kk] + yi[kk] * yi[kk];
             const float e2 = er[kk] * er[kk] + ei[kk] * ei[kk];
-            ch.py[kk] = guardSmooth * ch.py[kk] + (1.0f - guardSmooth) * y2;
-            ch.pe[kk] = guardSmooth * ch.pe[kk] + (1.0f - guardSmooth) * e2;
-            m[kk] = std::min(1.0f, ch.py[kk] / (ch.pe[kk] + 1e-20f));
+            // While the mic is silent the averages hold (so the guard is right
+            // as soon as it is back) and nothing is subtracted: the output
+            // stays as silent as the input.
+            if (!micSilent) {
+                ch.py[kk] = guardSmooth * ch.py[kk] + (1.0f - guardSmooth) * y2;
+                ch.pe[kk] = guardSmooth * ch.pe[kk] + (1.0f - guardSmooth) * e2;
+            }
+            m[kk] = micSilent ? 0.0f : std::min(1.0f, ch.py[kk] / (ch.pe[kk] + 1e-20f));
             egr[kk] = yr[kk] - m[kk] * ypr[kk];
             egi[kk] = yi[kk] - m[kk] * ypi[kk];
         }
@@ -609,8 +694,10 @@ private:
         const float* e = timeScratch.data() + N;
 
         // --- suppressor: per-bin Wiener gain from the Kalman residual-echo estimate ---
+        // (held while the mic is silent: there is nothing to suppress, and it
+        // picks up where it was when the mic is back)
         const float gmin = floorGain;
-        for (int k = 0; k < K; ++k) {
+        for (int k = 0; !micSilent && k < K; ++k) {
             const size_t kk = static_cast<size_t>(k);
             const float mm = m[kk];
             const float r = unc[kk] * mm * mm + supp.beta * mm * mm * (ypr[kk] * ypr[kk] + ypi[kk] * ypi[kk]);
@@ -670,6 +757,7 @@ private:
     double accRef = 0.0;
     int accBlocks = 0;
     bool startDone = false;
+    bool refActive = false; // this block's reference is above startRefPower
     uint64_t probeIndex = 0;
     int probeLoBin = 1, probeHiBin = 1;
     std::vector<float> irPeak, probeR, probeI;
@@ -686,5 +774,5 @@ private:
     std::vector<float> xr, xi, x2, xbuf, xbar; // xbar: K floats, ~5 s average of the reference |X_k|^2
     std::vector<Channel> channels;
     std::vector<float> fftScratch, fftScratch2, yhr, yhi, unc, er, ei, yr, yi, ypr, ypi, gl, cosTable;
-    std::vector<float> timeScratch, timeScratch2, dScratch, mScratch, egScratchR, egScratchI;
+    std::vector<float> timeScratch, timeScratch2, dScratch, dFullScratch, mScratch, egScratchR, egScratchI;
 };

@@ -245,30 +245,42 @@ bool PAEchoCancellerAudioProcessor::isBusesLayoutSupported(const BusesLayout& la
 }
 
 bool PAEchoCancellerAudioProcessor::referenceDuplicatesMainInput(const juce::AudioBuffer<float>& mainIn,
-                                                                const float* ref, int numSamples) noexcept
+                                                                const float* ref, int numSamples,
+                                                                bool previous) noexcept
 {
     // The mono Reference bus may get the left channel, the right, or a
-    // mono fold-down of a stereo input; any of them counts. The tolerance
-    // only absorbs float rounding in a host's fold-down; a real PA feed
-    // differs from the mic by orders of magnitude more.
+    // mono fold-down of a stereo input, at any gain a host's pan law or
+    // trim gives it (-3 dB, -6 dB, a phase flip); any of them counts. Each
+    // candidate x (L, R, L+R) gets a least-squares gain a = <ref,x> / <x,x>,
+    // and the reference is a copy when what a x leaves unexplained is below
+    // -100 dB of the reference power (the same 1e-5 amplitude tolerance as
+    // exact comparisons had: float rounding in a host's fold-down, where a
+    // real PA feed differs from the mic by orders of magnitude more).
     const int numChannels = mainIn.getNumChannels();
-    if (numChannels == 0)
+    if (numChannels == 0 || numSamples <= 0)
         return false;
 
     const float* left = mainIn.getReadPointer(0);
     const float* right = mainIn.getReadPointer(juce::jmin(1, numChannels - 1));
-    bool matchesLeft = true, matchesRight = true, matchesAverage = true, matchesSum = true;
-
+    double rr = 0.0, ll = 0.0, qq = 0.0, lq = 0.0, rl = 0.0, rq = 0.0;
     for (int s = 0; s < numSamples; ++s) {
-        const float tolerance = 1.0e-5f * std::abs(ref[s]) + 1.0e-10f;
-        matchesLeft = matchesLeft && std::abs(ref[s] - left[s]) <= tolerance;
-        matchesRight = matchesRight && std::abs(ref[s] - right[s]) <= tolerance;
-        matchesAverage = matchesAverage && std::abs(ref[s] - 0.5f * (left[s] + right[s])) <= tolerance;
-        matchesSum = matchesSum && std::abs(ref[s] - (left[s] + right[s])) <= tolerance;
-        if (!(matchesLeft || matchesRight || matchesAverage || matchesSum))
-            return false;
+        const double r = ref[s], l = left[s], q = right[s];
+        rr += r * r; ll += l * l; qq += q * q; lq += l * q; rl += r * l; rq += r * q;
     }
-    return true;
+
+    const double tolerance = 1.0e-10 * rr + 1.0e-20 * numSamples;
+    const auto isScaledCopyOf = [&](double rx, double xx) {
+        if (!(xx > 0.0))
+            return rr <= tolerance; // a silent candidate only matches a (near) silent reference
+        const double a = rx / xx;
+        return std::abs(a) >= 0.1 && std::abs(a) <= 10.0 && rr - rx * a <= tolerance;
+    };
+    const bool matches = isScaledCopyOf(rl, ll) || isScaledCopyOf(rq, qq) || isScaledCopyOf(rl + rq, ll + qq + 2.0 * lq);
+
+    // A gain fitted to a handful of samples proves nothing (one sample is a
+    // scaled copy of anything), so a short host block can keep a match
+    // found earlier but not start one.
+    return matches && (numSamples >= minCopyCheckSamples || previous);
 }
 
 void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -312,7 +324,8 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         const float* ref = refIn.getReadPointer(0);
         if (!juce::exactlyEqual(juce::FloatVectorOperations::findMaximum(ref, totalNumSamples), 0.0f)
             || !juce::exactlyEqual(juce::FloatVectorOperations::findMinimum(ref, totalNumSamples), 0.0f))
-            referenceIsMainInput.store(referenceDuplicatesMainInput(mainIn, ref, totalNumSamples),
+            referenceIsMainInput.store(referenceDuplicatesMainInput(mainIn, ref, totalNumSamples,
+                                                                    referenceIsMainInput.load(std::memory_order_relaxed)),
                                        std::memory_order_relaxed);
         useReference = !referenceIsMainInput.load(std::memory_order_relaxed);
     } else {
@@ -434,24 +447,31 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
             bypassMixCurrent = mix;
         }
 
-        for (int ch = 0; ch < mainOut.getNumChannels(); ++ch) {
-            const int srcCh = juce::jmin(ch, numMicChannels - 1);
+        // Each channel's FIFOs are read exactly once per chunk: the reads
+        // are destructive, so a second read would take the next samples and
+        // shift that channel for good. isBusesLayoutSupported keeps the
+        // output as wide as the input, so extra output channels only come
+        // from a host changing layout without prepareToPlay; they get a copy
+        // of channel 0.
+        jassert(mainOut.getNumChannels() <= numMicChannels);
+        const int numProcessedOut = juce::jmin(mainOut.getNumChannels(), numMicChannels);
+        for (int ch = 0; ch < numProcessedOut; ++ch) {
             float* out = mainOut.getWritePointer(ch) + chunkStart;
-            micOutFifos[static_cast<size_t>(srcCh)].read(out, numSamples);
+            micOutFifos[static_cast<size_t>(ch)].read(out, numSamples);
 
             // Always drain the dry delay line at the same pace as the wet
             // output, even at 100% wet -- otherwise it silently backs up and
             // the two paths fall out of alignment for whenever the mix is
             // later turned down.
-            float* dry = dryOutputScratch[static_cast<size_t>(srcCh)].data();
-            dryDelayFifos[static_cast<size_t>(srcCh)].read(dry, numSamples);
+            float* dry = dryOutputScratch[static_cast<size_t>(ch)].data();
+            dryDelayFifos[static_cast<size_t>(ch)].read(dry, numSamples);
 
             // Push through the separate fixed delay line too, compensating for
             // the suppressor FIR's delay (see the comment on internalDelayFifos
             // in PluginProcessor.h) -- also drained unconditionally, for the
             // same reason as above.
-            internalDelayFifos[static_cast<size_t>(srcCh)].write(dry, numSamples);
-            internalDelayFifos[static_cast<size_t>(srcCh)].read(dry, numSamples);
+            internalDelayFifos[static_cast<size_t>(ch)].write(dry, numSamples);
+            internalDelayFifos[static_cast<size_t>(ch)].read(dry, numSamples);
 
             if (wetMix < 0.999f)
                 for (int s = 0; s < numSamples; ++s)
@@ -463,10 +483,10 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
             // fade (mix at exactly 0 must leave the processed output
             // byte-identical to a build without this feature; mix at
             // exactly 1 hands over the raw delayed input untouched).
-            float* byp = bypassOutputScratch[static_cast<size_t>(srcCh)].data();
-            bypassDelayFifos[static_cast<size_t>(srcCh)].read(byp, numSamples);
-            bypassCompFifos[static_cast<size_t>(srcCh)].write(byp, numSamples);
-            bypassCompFifos[static_cast<size_t>(srcCh)].read(byp, numSamples);
+            float* byp = bypassOutputScratch[static_cast<size_t>(ch)].data();
+            bypassDelayFifos[static_cast<size_t>(ch)].read(byp, numSamples);
+            bypassCompFifos[static_cast<size_t>(ch)].write(byp, numSamples);
+            bypassCompFifos[static_cast<size_t>(ch)].read(byp, numSamples);
 
             if (bypassActive)
                 for (int s = 0; s < numSamples; ++s) {
@@ -474,6 +494,8 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
                     out[s] = (1.0f - b) * out[s] + b * byp[s];
                 }
         }
+        for (int ch = numProcessedOut; ch < mainOut.getNumChannels(); ++ch)
+            std::copy_n(mainOut.getReadPointer(0) + chunkStart, numSamples, mainOut.getWritePointer(ch) + chunkStart);
     }
 
     // Output guard: whatever happens inside, the host never gets a
@@ -555,6 +577,10 @@ void PAEchoCancellerAudioProcessor::getStateInformation(juce::MemoryBlock& destD
     // than list position, so adding/reordering parameters later can't shift
     // a saved project's values onto the wrong control.
     juce::ValueTree state("PAEchoCancellerState");
+    // Values are stored normalised, so they are tied to today's parameter
+    // ranges. If a range ever changes, bump this and convert older states
+    // in setStateInformation (a state without it is version 1 too).
+    state.setProperty(stateVersionKey, currentStateVersion, nullptr);
     for (auto* param : getParameters())
         if (auto* withId = dynamic_cast<juce::AudioProcessorParameterWithID*>(param))
             if (param != bypassParam) // hosts own bypass state (AU/VST3's own bypass mechanism); persisting our copy would fight theirs on reload
@@ -667,6 +693,16 @@ void PAEchoCancellerAudioProcessor::setStateInformation(const void* data, int si
             }
         }
     }
+}
+
+uint64_t PAEchoCancellerAudioProcessor::getFifoXrunCount() const noexcept
+{
+    uint64_t n = refInFifo.getXrunCount();
+    for (const auto* fifos : { &micInFifos, &micOutFifos, &dryDelayFifos, &internalDelayFifos,
+                               &bypassInFifos, &bypassDelayFifos, &bypassCompFifos })
+        for (const auto& fifo : *fifos)
+            n += fifo.getXrunCount();
+    return n;
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

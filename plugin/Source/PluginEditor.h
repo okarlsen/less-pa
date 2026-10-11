@@ -139,6 +139,7 @@ private:
     void dryWetSliderChanged();
     void updateSliders();
     void showHelpDialog();
+    juce::Component::SafePointer<juce::DialogWindow> helpWindow; // the open help window, if any
     void updateResetButton();
     void resetSuppressorToDefaults();
 

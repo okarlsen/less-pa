@@ -102,9 +102,10 @@ cmake --build build --target PAEchoCancellerVerify -j8
 ./build/PAEchoCancellerVerify_artefacts/Release/PAEchoCancellerVerify
 ```
 
-It must report 46 individual `PASS` results and end with `ALL TESTS PASS`.
-(`grep -c PASS` reports 47, because it counts the closing `ALL TESTS PASS`
-line as well.)
+It must report 66 individual `PASS` results and end with `ALL TESTS PASS`.
+(`grep -c PASS` reports 67, because it counts the closing `ALL TESTS PASS`
+line as well.) `--mic-silence` runs only the tests of a mic that is digitally
+silent at the start or mid-session, for quick iteration on the canceller.
 
 To check the plugin's real delay against what it reports to the host across
 every sample rate (44.1 to 192 kHz), buffer sizes from 16 to 2048 samples,
@@ -174,10 +175,17 @@ scripts.
 
 ### What the scripts do
 
-`packaging/signing.sh` holds the shared logic; both packaging scripts source
-it. Running either one will:
+`packaging/signing.sh` holds the shared logic and `packaging/release_checks.sh`
+the release-build checks; both packaging scripts source them. Running either
+one will:
 
-1. Verify the bundles link nothing outside `/System/Library` and `/usr/lib`.
+1. Refuse a build folder that is not a release build: configured with a test
+   label (`LESSPA_BUILD_LABEL`, read from `plugin/build/lesspa_build_label.txt`,
+   which CMake writes at configure time), not configured as Release, or with
+   bundles whose version is not the one in `plugin/CMakeLists.txt` (built
+   before a version bump). Then verify the bundles link nothing outside
+   `/System/Library` and `/usr/lib`, and are universal with the right
+   minimum macOS.
 2. Sign both bundles with the Developer ID Application certificate, with the
    hardened runtime (`--options runtime`) and a secure timestamp.
 3. Submit both bundles to Apple in a **single** notarization submission —

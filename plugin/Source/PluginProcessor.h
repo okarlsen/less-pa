@@ -112,8 +112,15 @@ public:
     // Canceller restarts after a blow-up (see KalmanEchoCanceller). Tests.
     uint64_t getCancellerRestartCount() const noexcept { return kalman.getRestartCount(); }
 
+    // Samples dropped or padded by any of the internal FIFOs since
+    // prepareToPlay (see FrameFifo). Must stay 0; a non-zero count is a
+    // latency shift. Tests, audio thread only.
+    uint64_t getFifoXrunCount() const noexcept;
+
 private:
     static constexpr float maxOutputLevel = 1000.0f; // +60 dBFS, the input clamp
+    static constexpr const char* stateVersionKey = "stateVersion"; // see getStateInformation
+    static constexpr int currentStateVersion = 1;
 
     // The echo canceller: a full-band partitioned-block frequency-domain
     // Kalman filter plus a low-latency Wiener suppressor. Allocated for the
@@ -250,7 +257,11 @@ private:
     // isReferenceCopyOfMainInput). An all-zero reference block can't tell
     // either way and keeps the previous answer, so the status line doesn't
     // flicker through silence.
-    static bool referenceDuplicatesMainInput(const juce::AudioBuffer<float>& mainIn, const float* ref, int numSamples) noexcept;
+    // A block shorter than minCopyCheckSamples can keep an earlier match but
+    // not start one.
+    static bool referenceDuplicatesMainInput(const juce::AudioBuffer<float>& mainIn, const float* ref, int numSamples,
+                                             bool previous) noexcept;
+    static constexpr int minCopyCheckSamples = 16;
     std::atomic<bool> referenceIsMainInput{ false };
 
     std::atomic<float> inputPeakLevelPre{ 0.0f };
