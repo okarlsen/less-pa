@@ -28,10 +28,22 @@ All notable changes to Less PA are documented here. Versions follow
   (Logic or MainStage with Side Chain set to None) now also catches copies
   at other gains, such as a -3 dB or -6 dB pan-law fold-down or a polarity
   flip. Before, those would make the plugin cancel the mic with itself.
+- Digital noise for the first 5 to 15 seconds after a cold start (opening
+  a session, an offline bounce, or the PA Canceller restarting) is gone.
+  While the canceller was still learning the room it learned in steps so
+  large that its output clicked at every processing block (375 times a
+  second) and it added up to 10 dB of the PA feed's top end to the mic. It
+  now learns in smaller steps and tidies its filter more often during the
+  first 30 seconds of PA. On the LS26 and Oslo recordings the clicks drop
+  from 17-20 dB above the rest of the signal to 2-7 dB, and the added top
+  end from 6-10 dB to about 1 dB. The price is a slightly slower start:
+  for the first 20 seconds the total reduction is up to 2 dB lower than
+  before, then the same. It costs about twice the PA Canceller's CPU for
+  the first 30 seconds of PA, and nothing after.
 
-With the mic present from the start and no gaps, the output is
-bit-identical to 1.1.5 (checked on the LS26 and Oslo recordings at every
-setting). Latency is unchanged.
+The output is no longer bit-identical to 1.1.5. From a minute in it
+measures the same (within 0.3 dB on the LS26 and Oslo recordings).
+Latency is unchanged.
 
 ### Changed
 

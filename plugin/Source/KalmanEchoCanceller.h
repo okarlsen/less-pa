@@ -88,6 +88,7 @@ public:
         timeScratch.assign(static_cast<size_t>(M), 0.0f);
         timeScratch2.assign(static_cast<size_t>(M), 0.0f);
         dScratch.assign(static_cast<size_t>(K), 0.0f);
+        dFullScratch.assign(static_cast<size_t>(K), 0.0f);
         mScratch.assign(static_cast<size_t>(K), 0.0f);
         egScratchR.assign(static_cast<size_t>(K), 0.0f);
         egScratchI.assign(static_cast<size_t>(K), 0.0f);
@@ -130,6 +131,7 @@ public:
             c.hasPrev = false;
             c.accMic = 0.0;
             c.psiStart = psi0;
+            c.startupBlocks = 0;
         }
         std::fill(irPeak.begin(), irPeak.end(), 0.0f);
         std::fill(irPeakIdx.begin(), irPeakIdx.end(), 0);
@@ -220,6 +222,11 @@ public:
             xbar[static_cast<size_t>(k)] = xbarSmooth * xbar[static_cast<size_t>(k)] + (1.0f - xbarSmooth) * x2[i];
         }
 
+        double refPower = 0.0;
+        for (int n = 0; n < N; ++n)
+            refPower += static_cast<double>(ref[n]) * ref[n];
+        refActive = refPower > startRefPower * N;
+
         const int numCh = std::min(numChannels, static_cast<int>(channels.size()));
         if (!startDone)
             updateStartUncertainty(mic, ref, numCh);
@@ -241,6 +248,7 @@ private:
         double accMic = 0.0;   // mic power summed over the PA-active start blocks
         double startBlockPower = 0.0; // this block's mic power, while the start is being measured
         float psiStart = psi0; // the uncertainty newly started partitions get
+        int startupBlocks = 0; // PA blocks this filter has learned from since its (re)start, up to the start-up phase
     };
 
     // Level-relative start. A fixed starting uncertainty only suits one
@@ -299,6 +307,7 @@ private:
         std::fill(c.h.begin(), c.h.end(), 0.0f); std::fill(c.hPrev.begin(), c.hPrev.end(), 0.0f);
         std::fill(c.hist.begin(), c.hist.end(), 0.0f);
         c.hasPrev = false;
+        c.startupBlocks = 0;
         ++restartCount;
         if (&c == &channels.front()) { // the delay readout reads channel 0's filter
             std::fill(irPeak.begin(), irPeak.end(), 0.0f);
@@ -342,6 +351,35 @@ private:
     // constants at every rate: N doubles at 88.2 kHz and above, so a block
     // is 2.67 ms at both 48 and 96 kHz (2.9 ms, 9% longer, at 44.1 and
     // 88.2 kHz).
+    //
+    // Start-up noise (after 1.1.5). A filter that has just (re)started is
+    // very unsure, so its gain sat near 1 and it learned in large steps: for
+    // the first seconds it changed its echo estimate by more than half from
+    // one block to the next. That was heard as digital noise for the first
+    // 5 to 15 s of a cold start or an offline bounce (and, fainter, for the
+    // first half minute):
+    // - the estimate jumped at every block edge, and each step left
+    //   wrap-around in the partitions the gradient constraint had not
+    //   reached yet, which lands on the block edges as well: a click every
+    //   block (375 a second);
+    // - in bins where the mic has little of the PA, the steps were mostly
+    //   noise, and the filter put up to 10 dB of the reference's top end
+    //   into the output.
+    // Three things remove it (measured on LS26 Pub 1 and 2 and Oslo, and by
+    // ear):
+    // - Step cap: the filter takes at most stepCap of a bin's error per
+    //   block. A settled filter is far below it.
+    // - The uncertainty still shrinks by the uncapped gain, as before.
+    //   Shrinking it by the capped gain keeps it (and with it the
+    //   suppressor's residual-echo estimate) high for minutes, and the
+    //   suppressor then cuts the audience up to 4 dB deeper than it should.
+    // - Start-up constraint: for the first startupSeconds of PA a filter
+    //   learns from, the gradient constraint visits 1 partition in
+    //   startupConstraintStride each block instead of 1 in constraintStride
+    //   (about twice the CPU while it lasts).
+    // Smoothing what is subtracted across block edges instead (a crossfade
+    // from the previous block's filter, with every partition constrained)
+    // removes the clicks but not the noise in the filter, at 5x the CPU.
     // Never zero bin 0 to "fix" it: it is the DC of each partition's 2N-point
     // spectrum, and dropping it costs 4 to 5 dB of cancellation.
     static constexpr float Aw = 0.999995f;
@@ -354,6 +392,9 @@ private:
     static constexpr float cPad = 0.5f;         // |X|^2 of a 2N frame vs |E|^2 of N samples zero-padded
     static constexpr float guardSmooth = 0.9f;
     static constexpr int constraintStride = 64; // gradient constraint on 1 partition in 64 per block
+    static constexpr int startupConstraintStride = 4; // ... and on 1 in 4 while the filter starts up
+    static constexpr double startupSeconds = 30.0;    // PA a filter learns from before its start-up phase ends
+    static constexpr float stepCap = 0.1f;            // most of a bin's error the filter takes in one block
     static constexpr float regRho = 0.05f;          // step-size regularisation vs the band's mean uncertainty power
     static constexpr float procNoiseCapMul = 4.0f;  // |W|^2 in the process noise is capped at this multiple of psiStart
     static constexpr float freezeRho = 1e-2f;       // bins with reference power 20 dB or more below the band mean adapt slowly
@@ -459,8 +500,8 @@ private:
     static void updatePartition(float* __restrict Wr, float* __restrict Wi, float* __restrict Ps,
                                 const float* __restrict Xr, const float* __restrict Xi,
                                 const float* __restrict X2, const float* __restrict Er,
-                                const float* __restrict Ei, const float* __restrict D, int K,
-                                float w2Cap) noexcept
+                                const float* __restrict Ei, const float* __restrict D,
+                                const float* __restrict Dfull, int K, float w2Cap) noexcept
     {
         for (int k = 0; k < K; ++k) {
             const float g = Ps[k] * D[k];
@@ -469,7 +510,7 @@ private:
             const float wi = Aw * (Wi[k] + kr * Ei[k] + ki * Er[k]);
             Wr[k] = wr;
             Wi[k] = wi;
-            Ps[k] = A2 * (1.0f - cPad * g * X2[k]) * Ps[k] + (1.0f - A2) * std::min(wr * wr + wi * wi, w2Cap) + psiFloor;
+            Ps[k] = A2 * (1.0f - cPad * Ps[k] * Dfull[k] * X2[k]) * Ps[k] + (1.0f - A2) * std::min(wr * wr + wi * wi, w2Cap) + psiFloor;
         }
     }
 
@@ -577,6 +618,7 @@ private:
         float* __restrict Er = er.data();
         float* __restrict Ei = ei.data();
         float* __restrict D = dScratch.data();
+        float* __restrict Dfull = dFullScratch.data();
         // Regularisation and excitation freeze (see the constants): bins whose
         // uncertainty power or reference power is far below the band mean
         // must not take steps of |E|/|X|.
@@ -593,12 +635,14 @@ private:
             if (!micSilent)
                 ch.psiS[static_cast<size_t>(k)] = lam * ch.psiS[static_cast<size_t>(k)]
                                                 + (1.0f - lam) * std::max(e2 - U[k], 1e-3f * e2 + noiseFloorPower * static_cast<float>(N));
-            D[k] = std::min(1.0f, xbar[static_cast<size_t>(k)] / (xbarMean + 1e-30f))
-                 / (U[k] + ch.psiS[static_cast<size_t>(k)] + delta);
+            Dfull[k] = std::min(1.0f, xbar[static_cast<size_t>(k)] / (xbarMean + 1e-30f))
+                     / (U[k] + ch.psiS[static_cast<size_t>(k)] + delta);
+            D[k] = std::min(Dfull[k], stepCap / (U[k] + 1e-30f)); // the step cap, see the constants
         }
 
-        // --- Kalman update, one pass: W += Kg E with Kg = Psi conj(X) / D,
-        // then Psi <- A^2 (1 - c Re(Kg X)) Psi + (1 - A^2) |W|^2 ---
+        // --- Kalman update, one pass: W += Kg E with Kg = Psi conj(X) / D
+        // (step-capped), then Psi <- A^2 (1 - c Re(Kg X)) Psi + (1 - A^2) |W|^2
+        // (with the uncapped Kg) ---
         // (none of it while the mic is silent, see above)
         for (int p = 0; !micSilent && p < P; ++p) {
             const int x = lagIndex(p) * K;
@@ -608,13 +652,18 @@ private:
             float* __restrict Wr = ch.wr.data() + p * K;
             float* __restrict Wi = ch.wi.data() + p * K;
             float* __restrict Ps = ch.psi.data() + p * K;
-            updatePartition(Wr, Wi, Ps, Xr, Xi, X2, Er, Ei, D, K, procNoiseCapMul * ch.psiStart);
+            updatePartition(Wr, Wi, Ps, Xr, Xi, X2, Er, Ei, D, Dfull, K, procNoiseCapMul * ch.psiStart);
         }
         // Gradient constraint (keep each partition causal and N long), on one
         // partition in constraintStride per block in turn: 2 FFTs per
         // partition is most of the cost. The stability terms above keep the
         // unconstrained half from drifting at this rate (see the constants).
-        for (int p = static_cast<int>(blockCount % constraintStride); !micSilent && p < P; p += constraintStride) {
+        // More often while the filter starts up (see the constants).
+        const bool startingUp = ch.startupBlocks * N < static_cast<int>(startupSeconds * fs);
+        if (startingUp && refActive && !micSilent)
+            ++ch.startupBlocks;
+        const int stride = startingUp ? startupConstraintStride : constraintStride;
+        for (int p = static_cast<int>(blockCount % static_cast<uint64_t>(stride)); !micSilent && p < P; p += stride) {
             float* Wr = ch.wr.data() + p * K;
             float* Wi = ch.wi.data() + p * K;
             auto& w = timeScratch2;
@@ -708,6 +757,7 @@ private:
     double accRef = 0.0;
     int accBlocks = 0;
     bool startDone = false;
+    bool refActive = false; // this block's reference is above startRefPower
     uint64_t probeIndex = 0;
     int probeLoBin = 1, probeHiBin = 1;
     std::vector<float> irPeak, probeR, probeI;
@@ -724,5 +774,5 @@ private:
     std::vector<float> xr, xi, x2, xbuf, xbar; // xbar: K floats, ~5 s average of the reference |X_k|^2
     std::vector<Channel> channels;
     std::vector<float> fftScratch, fftScratch2, yhr, yhi, unc, er, ei, yr, yi, ypr, ypi, gl, cosTable;
-    std::vector<float> timeScratch, timeScratch2, dScratch, mScratch, egScratchR, egScratchI;
+    std::vector<float> timeScratch, timeScratch2, dScratch, dFullScratch, mScratch, egScratchR, egScratchI;
 };
