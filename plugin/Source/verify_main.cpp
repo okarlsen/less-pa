@@ -41,10 +41,15 @@ void* operator new(std::size_t size)
 void* operator new[](std::size_t size) { return operator new(size); }
 // Not inlined, so GCC doesn't see free() meet a pointer from operator new
 // at the call sites and warn (-Wmismatched-new-delete) about the pair.
-__attribute__((noinline)) void operator delete(void* p) noexcept { std::free(p); }
-__attribute__((noinline)) void operator delete[](void* p) noexcept { std::free(p); }
-__attribute__((noinline)) void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-__attribute__((noinline)) void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+#if defined(_MSC_VER)
+ #define LESSPA_NOINLINE __declspec(noinline)
+#else
+ #define LESSPA_NOINLINE __attribute__((noinline))
+#endif
+LESSPA_NOINLINE void operator delete(void* p) noexcept { std::free(p); }
+LESSPA_NOINLINE void operator delete[](void* p) noexcept { std::free(p); }
+LESSPA_NOINLINE void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+LESSPA_NOINLINE void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -318,7 +323,7 @@ bool testSuppressionMeterAfterReferenceMute(int sampleRate, float amountPercent,
     juce::AudioBuffer<float> buffer(totalChannels, blockSize);
     juce::MidiBuffer midi;
 
-    constexpr float levelFloorLinear = 1.0e-6f;
+    static constexpr float levelFloorLinear = 1.0e-6f; // static: MSVC rejects a captureless lambda reading a local constexpr through jmax's reference
     const std::vector<double> checkpointsS = { 0.0, 0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 3.9 }; // seconds after mute
     size_t nextCheckpoint = 0;
     std::vector<float> suppressionAtCheckpoint;
@@ -413,7 +418,7 @@ bool testSuppressionMeterTransientAlignment(int sampleRate) {
     juce::AudioBuffer<float> buffer(totalChannels, blockSize);
     juce::MidiBuffer midi;
 
-    constexpr float levelFloorLinear = 1.0e-6f;
+    static constexpr float levelFloorLinear = 1.0e-6f; // static: MSVC rejects a captureless lambda reading a local constexpr through jmax's reference
     auto toDb = [](float linear) { return juce::Decibels::gainToDecibels(juce::jmax(linear, levelFloorLinear)); };
 
     float worstNaiveDb = 0.0f;

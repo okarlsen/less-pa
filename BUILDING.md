@@ -1,6 +1,7 @@
 # Building Less PA from source
 
-Less PA builds on macOS and produces an AU component and a VST3 bundle. It is a single CMake build of the JUCE plugin; the echo
+Less PA builds on macOS and produces an AU component and a VST3 bundle. A
+Windows VST3 is built by GitHub for each release; see [Windows (VST3)](#windows-vst3). It is a single CMake build of the JUCE plugin; the echo
 canceller is the plugin's own code (`plugin/Source/KalmanEchoCanceller.h`),
 with no external DSP library to build first.
 
@@ -269,7 +270,37 @@ copies are the ad-hoc signed ones. Re-copy them from
 `plugin/build/PAEchoCanceller_artefacts/Release/` after running a packaging
 script if you want to test against the signed build locally.
 
+## Windows (VST3)
+
+Windows builds are made by GitHub, not on a local machine: the
+[Windows VST3 workflow](.github/workflows/windows-vst3.yml) runs on
+`windows-latest` with Visual Studio. It builds the VST3 (64-bit Intel/AMD)
+and the test harness, runs the full suite and the latency sweep
+(`--latency-matrix`), and packages
+`packaging/build/Less-PA-<version>-Windows-VST3.zip` with
+`packaging/build_windows_zip.ps1`. A run takes about an hour, most of it the
+latency sweep.
+
+- On every pull request it builds and tests, and keeps the zip as a workflow
+  artifact for a test install.
+- When a GitHub release is published, it builds from the release tag and
+  attaches the zip to that release. The tag must be a plain version
+  (`v1.1.7`) equal to the version in `plugin/CMakeLists.txt`, and the build
+  carries no test label; otherwise nothing is attached. A failed run can be
+  rerun from the Actions tab; the upload replaces any earlier zip.
+
+The same build runs on a Windows machine with Visual Studio 2022 or newer
+and CMake:
+
+```powershell
+cmake -B plugin/build -S plugin -A x64 -DLESSPA_INSTALL_AFTER_BUILD=OFF -DLESSPA_BUILD_LABEL=
+cmake --build plugin/build --config Release --target PAEchoCanceller_VST3 PAEchoCancellerVerify
+pwsh packaging/build_windows_zip.ps1
+```
+
+The Windows VST3 is not code-signed. AU and AAX are macOS-only formats and
+are not built on Windows.
+
 ## Not currently supported
 
-Windows and Linux. The released plugin is macOS only: AU, VST3 and AAX,
-universal (Apple Silicon and Intel).
+Linux, and AAX on Windows.
