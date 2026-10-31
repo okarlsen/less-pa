@@ -25,6 +25,16 @@ All notable changes to Less PA are documented here. Versions follow
 - Help: Tail Length now says the default 800 ms suits almost every venue,
   and that shorter settings only save a little CPU.
 
+### Fixed
+
+- Muting the mic (or a mic region ending) while the PA plays on could make
+  the PA Canceller restart from scratch. The input HPF's ringing as the mic
+  dies away looked like a filter blow-up to the safety guard. A mic that
+  suddenly drops 60 dB below its level of the last few seconds is now held
+  like digital silence, and the guard compares with that recent level.
+  Lower HPF settings ring longer, which is how the new 120 Hz default
+  exposed it.
+
 ## [1.1.6]
 
 ### Added

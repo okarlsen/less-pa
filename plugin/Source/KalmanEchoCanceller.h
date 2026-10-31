@@ -58,6 +58,7 @@ public:
         fftOrder = static_cast<int>(std::round(std::log2(static_cast<double>(M))));
         fft = std::make_unique<juce::dsp::FFT>(fftOrder);
         fs = sampleRate;
+        guardDecay = std::exp(-static_cast<double>(N) / (2.0 * sampleRate));
         maxPartitions = partitionsFor(maxTailSeconds);
         activePartitions = maxPartitions;
 
@@ -132,6 +133,7 @@ public:
             c.accMic = 0.0;
             c.psiStart = psi0;
             c.startupBlocks = 0;
+            c.guardMicSq = 0.0;
         }
         std::fill(irPeak.begin(), irPeak.end(), 0.0f);
         std::fill(irPeakIdx.begin(), irPeakIdx.end(), 0);
@@ -249,6 +251,7 @@ private:
         double startBlockPower = 0.0; // this block's mic power, while the start is being measured
         float psiStart = psi0; // the uncertainty newly started partitions get
         int startupBlocks = 0; // PA blocks this filter has learned from since its (re)start, up to the start-up phase
+        double guardMicSq = 0.0; // the blow-up guard's mic level: a peak of recent blocks' mic power, decaying ~2 s
     };
 
     // Level-relative start. A fixed starting uncertainty only suits one
@@ -385,6 +388,7 @@ private:
     static constexpr float Aw = 0.999995f;
     static constexpr float A2 = 0.99999f * 0.99999f;
     static constexpr float noiseFloorPower = 1e-10f; // mean square, -100 dBFS
+    double guardDecay = 0.99; // per block, ~2 s; set in prepare
     static constexpr float psi0 = 1e-3f;
     static constexpr float lam = 0.9f;          // crowd/noise PSD smoothing
     static constexpr float psiFloor = 1e-10f;
@@ -596,8 +600,16 @@ private:
                 micSq += static_cast<double>(y[n]) * y[n];
                 estSq += static_cast<double>(yhat[n]) * yhat[n];
             }
-            micSilent = micSq < static_cast<double>(noiseFloorPower) * N;
-            if (!std::isfinite(estSq) || (!micSilent && estSq > 1e6 * micSq + 1e-2 * N)) {
+            // A mic 60 dB below its own level of the last ~2 s has been cut
+            // (a hard mute or the end of a region, seen through the input
+            // HPF's ringing as it dies away), not quietened by the room: it
+            // is treated like digital silence until it is back or has stayed
+            // that low long enough to be the new normal. The blow-up test
+            // also compares with that recent level, not this block's alone.
+            const bool micCut = micSq < 1e-6 * ch.guardMicSq;
+            micSilent = micSq < static_cast<double>(noiseFloorPower) * N || micCut;
+            ch.guardMicSq = micSilent ? guardDecay * ch.guardMicSq : std::max(micSq, guardDecay * ch.guardMicSq);
+            if (!std::isfinite(estSq) || (!micSilent && estSq > 1e6 * std::max(micSq, ch.guardMicSq) + 1e-2 * N)) {
                 restartChannel(ch);
                 // The zero filter's estimate, and its fresh uncertainty
                 std::fill_n(Yr, K, 0.0f);
