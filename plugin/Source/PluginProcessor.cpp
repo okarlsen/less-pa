@@ -34,10 +34,10 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
     addParameter(responseParam = new juce::AudioParameterFloat(
         "response", "Suppressor Time",
         juce::NormalisableRange<float>(3.0f, 50.0f, 0.1f), 30.0f));
-    auto hpfRange = juce::NormalisableRange<float>(80.0f, 300.0f, 0.1f);
+    auto hpfRange = juce::NormalisableRange<float>(30.0f, 300.0f, 0.1f);
     hpfRange.setSkewForCentre(150.0f);
     addParameter(hpfFrequencyParam = new juce::AudioParameterFloat(
-        "hpfFrequency", "HPF Frequency", hpfRange, 150.0f));
+        "hpfFrequency", "HPF Frequency", hpfRange, 120.0f));
     addParameter(referenceGainParam = new juce::AudioParameterFloat(
         "referenceGain", "PA Reference Trim",
         juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f));

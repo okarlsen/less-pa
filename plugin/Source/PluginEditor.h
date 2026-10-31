@@ -187,6 +187,8 @@ private:
     // canceller's learned filter is untouched. Greyed out when they already
     // are, so it also answers "have I changed anything here?" at a glance.
     juce::TextButton resetButton{ "Defaults" };
+    juce::TextButton suppressorOnButton{ "ON" }; // MOCKUP
+    juce::TextButton hpfOnButton{ "ON" }; // MOCKUP
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };
     juce::ComboBox tailLengthCombo;

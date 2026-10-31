@@ -266,6 +266,12 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     resetButton.onClick = [this] { resetSuppressorToDefaults(); };
     addAndMakeVisible(resetButton);
+    for (auto* b : { &suppressorOnButton, &hpfOnButton }) { // MOCKUP
+        b->setClickingTogglesState(true);
+        b->setToggleState(true, juce::dontSendNotification);
+        b->onStateChange = [b] { b->setButtonText(b->getToggleState() ? "ON" : "OFF"); };
+        addAndMakeVisible(*b);
+    }
 
     // A few words each, deliberately much shorter than the corresponding
     // section of showHelpDialog(): a tooltip answers "what is this?" while the
@@ -427,6 +433,7 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     statusLabel.setFont(juce::FontOptions(scale * 12.5f).withStyle("Bold"));
     resetButton.getProperties().set("fontHeight", scale * 12.0f);
     resetButton.repaint(); // a property change alone doesn't invalidate it
+    for (auto* b : { &suppressorOnButton, &hpfOnButton }) { b->getProperties().set("fontHeight", scale * 11.0f); b->repaint(); }
 
     juce::Slider* const sliders[] = { &amountSlider, &maxReductionSlider, &responseSlider,
                                       &hpfSlider, &referenceGainSlider, &dryWetSlider };
@@ -476,6 +483,11 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         addLabelled(grid, controlGap, referenceGainLabel, referenceGainSlider, sliderRow);
         addLabelled(grid, controlGap, hpfLabel, hpfSlider, sliderRow);
         grid.performLayout(body);
+        {
+            auto hl = hpfLabel.getBounds();
+            hpfOnButton.setBounds(hl.removeFromRight(sc(40)).withSizeKeepingCentre(sc(40), sc(buttonRow - 4)));
+            hpfLabel.setBounds(hl);
+        }
 
         const int used = sc(sectionHeaderRow + 2 * (controlGap + labelledSlider) + meterBlockGap);
         layoutMeters(body.withTrimmedTop(used).withHeight(sc(meterPair)),
@@ -500,6 +512,9 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         auto header = suppressorSectionLabel.getBounds();
         resetButton.setBounds(header.removeFromRight(sc(resetButtonWidth))
                                   .withSizeKeepingCentre(sc(resetButtonWidth), sc(buttonRow - 4)));
+        header.removeFromRight(sc(6));
+        suppressorOnButton.setBounds(header.removeFromRight(sc(40))
+                                  .withSizeKeepingCentre(sc(40), sc(buttonRow - 4)));
         suppressorSectionLabel.setBounds(header);
     }
 
