@@ -268,7 +268,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     addAndMakeVisible(resetButton);
     // On/off switches for the HPF and the Bleed Suppressor. A click is
     // one host gesture; the timer keeps them in step with automation.
-    const auto setUpSwitch = [this](juce::TextButton& button, juce::AudioParameterBool& param) {
+    const auto setUpSwitch = [this](OnOffSwitch& button, juce::AudioParameterBool& param) {
         button.setClickingTogglesState(false);
         button.onClick = [this, &param] {
             param.beginChangeGesture();
@@ -444,10 +444,6 @@ void PAEchoCancellerAudioProcessorEditor::resized()
     statusLabel.setFont(juce::FontOptions(scale * 12.5f).withStyle("Bold"));
     resetButton.getProperties().set("fontHeight", scale * 12.0f);
     resetButton.repaint(); // a property change alone doesn't invalidate it
-    for (auto* button : { &suppressorOnButton, &hpfOnButton }) {
-        button->getProperties().set("fontHeight", scale * 11.0f);
-        button->repaint();
-    }
 
     juce::Slider* const sliders[] = { &amountSlider, &maxReductionSlider, &responseSlider,
                                       &hpfSlider, &referenceGainSlider, &dryWetSlider };
@@ -498,9 +494,13 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         addLabelled(grid, controlGap, hpfLabel, hpfSlider, sliderRow);
         grid.performLayout(body);
         {
-            auto hl = hpfLabel.getBounds();
-            hpfOnButton.setBounds(hl.removeFromRight(sc(40)).withSizeKeepingCentre(sc(40), sc(buttonRow - 4)));
-            hpfLabel.setBounds(hl);
+            // The HPF switch sits just after its label's text.
+            const auto labelArea = hpfLabel.getBounds();
+            const int textWidth = juce::roundToInt(juce::TextLayout::getStringWidth(
+                hpfLabel.getFont(), hpfLabel.getText())) + hpfLabel.getBorderSize().getLeftAndRight();
+            hpfOnButton.setBounds(juce::Rectangle<int>(labelArea.getX() + textWidth + sc(8), labelArea.getY(),
+                                                       sc(OnOffSwitch::designWidth), labelArea.getHeight())
+                                      .withSizeKeepingCentre(sc(OnOffSwitch::designWidth), sc(OnOffSwitch::designHeight)));
         }
 
         const int used = sc(sectionHeaderRow + 2 * (controlGap + labelledSlider) + meterBlockGap);
@@ -527,8 +527,8 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         resetButton.setBounds(header.removeFromRight(sc(resetButtonWidth))
                                   .withSizeKeepingCentre(sc(resetButtonWidth), sc(buttonRow - 4)));
         header.removeFromRight(sc(6));
-        suppressorOnButton.setBounds(header.removeFromRight(sc(40))
-                                  .withSizeKeepingCentre(sc(40), sc(buttonRow - 4)));
+        suppressorOnButton.setBounds(header.removeFromRight(sc(OnOffSwitch::designWidth))
+                                  .withSizeKeepingCentre(sc(OnOffSwitch::designWidth), sc(OnOffSwitch::designHeight)));
         suppressorSectionLabel.setBounds(header);
     }
 
@@ -555,11 +555,9 @@ void PAEchoCancellerAudioProcessorEditor::updateSwitches()
 {
     // Each switch shows its parameter, and the controls it governs grey out
     // while it is off (they stay adjustable from the host).
-    const auto show = [](juce::TextButton& button, bool on, std::initializer_list<juce::Component*> governed) {
-        if (button.getToggleState() != on || button.getButtonText().isEmpty()) {
+    const auto show = [](OnOffSwitch& button, bool on, std::initializer_list<juce::Component*> governed) {
+        if (button.getToggleState() != on)
             button.setToggleState(on, juce::dontSendNotification);
-            button.setButtonText(on ? "ON" : "OFF");
-        }
         for (auto* c : governed)
             if (c->isEnabled() != on)
                 c->setEnabled(on);

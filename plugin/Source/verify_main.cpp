@@ -2459,11 +2459,11 @@ int runRealMaterialMode(const char* micPath, const char* refPath, double maxSeco
     return 0;
 }
 
-// --screenshot <out.png> [--adjusted]: renders the editor to a PNG after
+// --screenshot <out.png> [--adjusted] [--off]: renders the editor to a PNG after
 // a few seconds of the synthetic test signals have run through the
 // processor, so the meters and status line show a realistic mid-show state.
 // For reviewing panel changes without a host; needs a display (or xvfb-run).
-int runScreenshotMode(const char* outPath, bool adjusted) {
+int runScreenshotMode(const char* outPath, bool adjusted, bool switchesOff) {
     juce::ScopedJuceInitialiser_GUI gui;
     const int sampleRate = 48000;
     const int blockSize = 512;
@@ -2497,6 +2497,11 @@ int runScreenshotMode(const char* outPath, bool adjusted) {
     if (adjusted)
         proc.getResponseParameter()->setValueNotifyingHost(
             proc.getResponseParameter()->convertTo0to1(35.0f));
+    // --off turns the HPF and Bleed Suppressor switches off.
+    if (switchesOff) {
+        proc.getHpfEnabledParameter()->setValueNotifyingHost(0.0f);
+        proc.getSuppressorEnabledParameter()->setValueNotifyingHost(0.0f);
+    }
     juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
 
     const auto image = editor->createComponentSnapshot(editor->getLocalBounds(), true, 2.0f);
@@ -3538,10 +3543,12 @@ int main(int argc, char* argv[]) {
     if (argc >= 2 && std::string(argv[1]) == "--bench-kalman")
         return runKalmanBench();
     if (argc >= 3 && std::string(argv[1]) == "--screenshot") {
-        bool adjusted = false;
-        for (int i = 3; i < argc; ++i)
+        bool adjusted = false, switchesOff = false;
+        for (int i = 3; i < argc; ++i) {
             adjusted |= std::string(argv[i]) == "--adjusted";
-        return runScreenshotMode(argv[2], adjusted);
+            switchesOff |= std::string(argv[i]) == "--off";
+        }
+        return runScreenshotMode(argv[2], adjusted, switchesOff);
     }
 
     // --real <mic.wav> <ref.wav>: run the real-material harness instead of
