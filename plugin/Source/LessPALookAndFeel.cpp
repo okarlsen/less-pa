@@ -132,12 +132,15 @@ void LessPALookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int wi
         return;
     }
 
+    // A slider whose stage is switched off is drawn faded, like its label.
+    const float alpha = slider.isEnabled() ? 1.0f : 0.35f;
+
     constexpr float trackThickness = 3.0f;
     const float centreY = static_cast<float>(y) + static_cast<float>(height) * 0.5f;
     const juce::Rectangle<float> track(static_cast<float>(x), centreY - trackThickness * 0.5f,
                                        static_cast<float>(width), trackThickness);
 
-    g.setColour(slider.findColour(juce::Slider::backgroundColourId));
+    g.setColour(slider.findColour(juce::Slider::backgroundColourId).withMultipliedAlpha(alpha));
     g.fillRoundedRectangle(track, trackThickness * 0.5f);
 
     // jlimit rather than trusting sliderPos: it is clamped to the *thumb*
@@ -145,13 +148,13 @@ void LessPALookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int wi
     // extremes it can land marginally outside this rectangle.
     const auto filled = track.withRight(juce::jlimit(track.getX(), track.getRight(), sliderPos));
     if (filled.getWidth() > 0.0f) {
-        g.setColour(slider.findColour(juce::Slider::trackColourId));
+        g.setColour(slider.findColour(juce::Slider::trackColourId).withMultipliedAlpha(alpha));
         g.fillRoundedRectangle(filled, trackThickness * 0.5f);
     }
 
     // Flat filled circle -- no bevel, no gradient, no shadow.
     const auto thumbDiameter = static_cast<float>(getSliderThumbRadius(slider));
-    g.setColour(slider.findColour(juce::Slider::thumbColourId));
+    g.setColour(slider.findColour(juce::Slider::thumbColourId).withMultipliedAlpha(alpha));
     g.fillEllipse(juce::Rectangle<float>(thumbDiameter, thumbDiameter)
                       .withCentre({ sliderPos, centreY }));
 }

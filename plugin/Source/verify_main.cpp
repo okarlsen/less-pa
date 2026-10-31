@@ -1657,7 +1657,7 @@ bool testStateSaveRestore() {
     const auto parsed = juce::ValueTree::readFromData(bypassedState.getData(), bypassedState.getSize());
     const bool bypassExcluded = parsed.isValid() && !parsed.hasProperty("bypass");
     // The version tag a future range change would key a conversion on
-    const bool versioned = parsed.isValid() && static_cast<int>(parsed.getProperty("stateVersion", 0)) == 1;
+    const bool versioned = parsed.isValid() && static_cast<int>(parsed.getProperty("stateVersion", 0)) == 2;
 
     juce::ValueTree crafted("PAEchoCancellerState");
     crafted.setProperty("bypass", 1.0f, nullptr);
@@ -1675,7 +1675,7 @@ bool testStateSaveRestore() {
     printf("  %s\n", (bypassExcluded && bypassNotRestored)
                           ? "PASS -- bypass stays out of saved state in both directions"
                           : "CHECK -- bypass leaked into state save/restore");
-    printf("  stateVersion in saved state: %s\n", versioned ? "1" : "MISSING");
+    printf("  stateVersion in saved state: %s\n", versioned ? "2" : "MISSING OR WRONG");
     return pass && bypassExcluded && bypassNotRestored && versioned;
 }
 
@@ -1714,13 +1714,16 @@ bool testOldSessionRestore() {
     const auto atDefault = [](juce::RangedAudioParameter* a) {
         return std::abs(a->getValue() - a->getDefaultValue()) < 1e-4f;
     };
+    // 0.5 was 150 Hz in the 80-300 Hz range these sessions were saved with
     const bool kept = restored.getTailLengthParameter()->getIndex() == 1
-                      && same(restored.getHpfFrequencyParameter(), 0.5f)
+                      && std::abs(restored.getHpfFrequencyParameter()->get() - 150.0f) < 0.5f
                       && same(restored.getReferenceGainParameter(), 0.75f)
                       && same(restored.getDryWetMixParameter(), 0.8f);
     const bool newAtDefaults = atDefault(restored.getAmountParameter())
                                && atDefault(restored.getMaxReductionParameter())
-                               && atDefault(restored.getResponseParameter());
+                               && atDefault(restored.getResponseParameter())
+                               && restored.getHpfEnabledParameter()->get()
+                               && restored.getSuppressorEnabledParameter()->get();
     const bool sameParameterCount = restored.getParameters().size() == fresh.getParameters().size();
 
     printf("  Tail=%d HPF=%.1fHz Trim=%.1fdB Mix=%.1f%% | Strength=%.1f%% Range=%.1fdB Time=%.1fms\n",
@@ -1827,6 +1830,114 @@ bool testSuppressorControls(int sampleRate) {
     printf("  %s%s%s%s%s\n", pass ? "PASS" : "CHECK", zeroIsFilterOnly ? "" : " -- 0 dB/0% DIFFER",
            amountWorks ? "" : " -- STRENGTH NOT MONOTONIC", floorWorks ? "" : " -- RANGE HAS NO EFFECT",
            liveClean ? "" : " -- LIVE CHANGE GLITCHED");
+    return pass;
+}
+
+// The HPF and Bleed Suppressor switches (1.1.7):
+//  - Suppressor Off is exactly Strength 0% (stage 1 only), whatever Strength
+//    is set to, so it keeps the latency and alignment Strength 0% has.
+//  - HPF Off lets a 40 Hz tone through that HPF On (default 120 Hz) removes.
+//  - Toggling the HPF mid-stream is click-free: no sample-to-sample step
+//    larger than the signal itself produces.
+//  - A 1.1.6 session (stateVersion 1) keeps its HPF frequency in Hz.
+bool testSwitches(int sampleRate) {
+    printf("\n=== HPF and Bleed Suppressor switches test (%d Hz) ===\n", sampleRate);
+    const double durationS = 6.0;
+    auto signals = makeSignals(sampleRate, durationS);
+
+    auto runSuppressor = [&](float amount, bool on) {
+        PAEchoCancellerAudioProcessor proc;
+        setMonoLayout(proc);
+        proc.getAmountParameter()->setValueNotifyingHost(proc.getAmountParameter()->convertTo0to1(amount));
+        proc.getSuppressorEnabledParameter()->setValueNotifyingHost(on ? 1.0f : 0.0f);
+        return runThroughProcessor(proc, sampleRate, signals.reference, signals.mic);
+    };
+    const auto strength0 = runSuppressor(0.0f, true);
+    const auto off = runSuppressor(80.0f, false);
+    const auto on = runSuppressor(80.0f, true);
+    double maxDiffOff = 0.0, maxDiffOn = 0.0;
+    for (size_t i = 0; i < strength0.size(); ++i) {
+        maxDiffOff = std::max(maxDiffOff, static_cast<double>(std::abs(strength0[i] - off[i])));
+        maxDiffOn = std::max(maxDiffOn, static_cast<double>(std::abs(strength0[i] - on[i])));
+    }
+    printf("  Max difference vs Strength 0%%: Suppressor Off (80%%) %.3g, Suppressor On (80%%) %.3g\n",
+           maxDiffOff, maxDiffOn);
+    const bool suppressorOffOk = maxDiffOff < 1e-7 && maxDiffOn > 1e-4;
+
+    // 40 Hz tone on the mic, silent reference: only the HPF acts on it.
+    const int n = static_cast<int>(durationS * sampleRate);
+    std::vector<float> tone(static_cast<size_t>(n)), silence(static_cast<size_t>(n), 0.0f);
+    for (int i = 0; i < n; ++i)
+        tone[static_cast<size_t>(i)] = 0.25f * static_cast<float>(std::sin(2.0 * M_PI * 40.0 * i / sampleRate));
+    auto runHpf = [&](bool hpfOn) {
+        PAEchoCancellerAudioProcessor proc;
+        setMonoLayout(proc);
+        proc.getHpfEnabledParameter()->setValueNotifyingHost(hpfOn ? 1.0f : 0.0f);
+        return runThroughProcessor(proc, sampleRate, silence, tone);
+    };
+    const double toneDb = rmsDbfs(tone, sampleRate, 2.0, durationS - 0.5);
+    const double hpfOnDb = rmsDbfs(runHpf(true), sampleRate, 2.0, durationS - 0.5) - toneDb;
+    const double hpfOffDb = rmsDbfs(runHpf(false), sampleRate, 2.0, durationS - 0.5) - toneDb;
+    printf("  40 Hz tone through the plugin: HPF On %.1f dB, HPF Off %.1f dB\n", hpfOnDb, hpfOffDb);
+    const bool hpfOk = hpfOnDb < -25.0 && hpfOffDb > -1.0 && hpfOffDb < 1.0;
+
+    // Toggle the HPF every 0.5 s on a 40 Hz + 1 kHz mix; compare the largest
+    // sample step with the one the signal has on its own.
+    std::vector<float> mix(static_cast<size_t>(n));
+    float signalStep = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        mix[static_cast<size_t>(i)] = tone[static_cast<size_t>(i)]
+                                      + 0.1f * static_cast<float>(std::sin(2.0 * M_PI * 1000.0 * i / sampleRate));
+        if (i > 0) signalStep = std::max(signalStep, std::abs(mix[static_cast<size_t>(i)] - mix[static_cast<size_t>(i - 1)]));
+    }
+    PAEchoCancellerAudioProcessor live;
+    setMonoLayout(live);
+    const int blockSize = 256;
+    live.prepareToPlay(sampleRate, blockSize);
+    const int totalChannels = std::max(live.getTotalNumInputChannels(), live.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer(totalChannels, blockSize);
+    juce::MidiBuffer midi;
+    float prev = 0.0f, outputStep = 0.0f;
+    for (int pos = 0; pos + blockSize <= n; pos += blockSize) {
+        live.getHpfEnabledParameter()->setValueNotifyingHost((pos / (sampleRate / 2)) % 2 == 0 ? 1.0f : 0.0f);
+        buffer.clear();
+        auto mainIn = live.getBusBuffer(buffer, true, 0);
+        for (int ch = 0; ch < mainIn.getNumChannels(); ++ch)
+            mainIn.copyFrom(ch, 0, mix.data() + pos, blockSize);
+        live.processBlock(buffer, midi);
+        auto mainOut = live.getBusBuffer(buffer, false, 0);
+        for (int s = 0; s < blockSize; ++s) {
+            const float v = mainOut.getSample(0, s);
+            if (pos > sampleRate / 10)
+                outputStep = std::max(outputStep, std::abs(v - prev));
+            prev = v;
+        }
+    }
+    live.releaseResources();
+    printf("  HPF toggled every 0.5 s: largest output step %.4f vs signal's own %.4f\n", outputStep, signalStep);
+    const bool toggleClean = outputStep < signalStep * 1.2f;
+
+    // A 1.1.6 session: stateVersion 1, HPF 0.5 = 150 Hz in the old range.
+    juce::ValueTree old("PAEchoCancellerState");
+    old.setProperty("stateVersion", 1, nullptr);
+    old.setProperty("hpfFrequency", 0.5f, nullptr);
+    juce::MemoryBlock block;
+    {
+        juce::MemoryOutputStream stream(block, false);
+        old.writeToStream(stream);
+    }
+    PAEchoCancellerAudioProcessor restored;
+    restored.setStateInformation(block.getData(), static_cast<int>(block.getSize()));
+    const float restoredHz = restored.getHpfFrequencyParameter()->get();
+    printf("  1.1.6 session with HPF 150 Hz restores as %.1f Hz, switches %s\n", static_cast<double>(restoredHz),
+           restored.getHpfEnabledParameter()->get() && restored.getSuppressorEnabledParameter()->get() ? "On" : "NOT ON");
+    const bool migrated = std::abs(restoredHz - 150.0f) < 0.5f && restored.getHpfEnabledParameter()->get()
+                          && restored.getSuppressorEnabledParameter()->get();
+
+    const bool pass = suppressorOffOk && hpfOk && toggleClean && migrated;
+    printf("  %s%s%s%s%s\n", pass ? "PASS" : "CHECK", suppressorOffOk ? "" : " -- SUPPRESSOR OFF IS NOT STRENGTH 0",
+           hpfOk ? "" : " -- HPF SWITCH HAS WRONG EFFECT", toggleClean ? "" : " -- HPF TOGGLE CLICKS",
+           migrated ? "" : " -- OLD HPF VALUE NOT KEPT");
     return pass;
 }
 
@@ -3523,6 +3634,7 @@ int main(int argc, char* argv[]) {
     allPass = testReferenceMeterIncludesTrim() && allPass;
     allPass = testStateSaveRestore() && allPass;
     allPass = testOldSessionRestore() && allPass;
+    for (int rate : rates) allPass = testSwitches(rate) && allPass;
     for (int rate : rates) allPass = testBypassRawPassthrough(rate) && allPass;
     allPass = testBypassToggleClickFree(48000) && allPass;
     allPass = testReferenceGainTrim() && allPass;

@@ -34,8 +34,7 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
     addParameter(responseParam = new juce::AudioParameterFloat(
         "response", "Suppressor Time",
         juce::NormalisableRange<float>(3.0f, 50.0f, 0.1f), 30.0f));
-    auto hpfRange = juce::NormalisableRange<float>(30.0f, 300.0f, 0.1f);
-    hpfRange.setSkewForCentre(150.0f);
+    auto hpfRange = makeHpfRange();
     addParameter(hpfFrequencyParam = new juce::AudioParameterFloat(
         "hpfFrequency", "HPF Frequency", hpfRange, 120.0f));
     addParameter(referenceGainParam = new juce::AudioParameterFloat(
@@ -46,6 +45,18 @@ PAEchoCancellerAudioProcessor::PAEchoCancellerAudioProcessor()
         juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 100.0f));
     addParameter(bypassParam = new juce::AudioParameterBool(
         "bypass", "Bypass", false));
+    // Added in 1.1.7; older sessions have no value saved and start On.
+    addParameter(hpfEnabledParam = new juce::AudioParameterBool(
+        "hpfEnabled", "HPF On", true));
+    addParameter(suppressorEnabledParam = new juce::AudioParameterBool(
+        "suppressorEnabled", "Suppressor On", true));
+}
+
+juce::NormalisableRange<float> PAEchoCancellerAudioProcessor::makeHpfRange()
+{
+    auto range = juce::NormalisableRange<float>(30.0f, 300.0f, 0.1f);
+    range.setSkewForCentre(100.0f);
+    return range;
 }
 
 PAEchoCancellerAudioProcessor::~PAEchoCancellerAudioProcessor() = default;
@@ -120,6 +131,9 @@ void PAEchoCancellerAudioProcessor::prepareToPlay(double sampleRate, int samples
     // already bypassed when playback began.
     bypassMixCurrent = bypassParam->get() ? 1.0f : 0.0f;
     bypassRampStep = 1.0f / static_cast<float>(std::max(1.0, 0.005 * sampleRate)); // ~5ms
+    hpfMixCurrent = hpfEnabledParam->get() ? 1.0f : 0.0f;
+    hpfRampStep = 1.0f / static_cast<float>(std::max(1.0, 0.01 * sampleRate)); // ~10ms
+    hpfMixScratch.assign(static_cast<size_t>(samplesPerBlock), 1.0f);
 
     // The true input-to-output delay: one frame of FIFO buffering (primed in
     // resyncDryDelay, so it holds at any host block size) plus the
@@ -221,8 +235,9 @@ void PAEchoCancellerAudioProcessor::updateKalmanSettings()
     static constexpr double tailSeconds[] = { 0.05, 0.2, 0.4, 0.8 };
     kalman.setTailSeconds(tailSeconds[juce::jlimit(0, 3, tailLengthParam->getIndex())]);
 
+    const float amount = suppressorEnabledParam->get() ? amountParam->get() / 100.0f : 0.0f;
     kalman.setSuppressor(KalmanEchoCanceller::settingsForAmount(
-        amountParam->get() / 100.0f, maxReductionParam->get(), responseParam->get()));
+        amount, maxReductionParam->get(), responseParam->get()));
 }
 
 bool PAEchoCancellerAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -363,6 +378,19 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         // reads must happen before the first write. Filtered into scratch
         // buffers rather than in place, since the pre-filter peak levels above
         // (and potentially the host's own buffer) still need the original data.
+        // HPF On/Off ramp for this chunk, shared by every mic channel and
+        // the reference so both stay filtered alike.
+        {
+            const float target = hpfEnabledParam->get() ? 1.0f : 0.0f;
+            float mix = hpfMixCurrent;
+            for (int s = 0; s < numSamples; ++s) {
+                mix = mix < target ? std::min(target, mix + hpfRampStep) : std::max(target, mix - hpfRampStep);
+                hpfMixScratch[static_cast<size_t>(s)] = mix;
+            }
+            hpfMixCurrent = mix;
+        }
+        const float* hpfMix = hpfMixScratch.data();
+
         float chunkInputPeak = 0.0f;
         for (int ch = 0; ch < numMicChannels; ++ch) {
             const int srcCh = juce::jmin(ch, mainIn.getNumChannels() - 1);
@@ -374,7 +402,8 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
             float* scratch = inputFilterScratch[static_cast<size_t>(ch)].data();
             auto& chain = inputHpfChains[static_cast<size_t>(ch)];
             for (int s = 0; s < numSamples; ++s) {
-                scratch[s] = chain.processSample(src[s]);
+                const float filtered = chain.processSample(src[s]);
+                scratch[s] = src[s] + hpfMix[s] * (filtered - src[s]);
                 chunkInputPeak = std::max(chunkInputPeak, std::abs(scratch[s]));
             }
             micInFifos[static_cast<size_t>(ch)].write(scratch, numSamples);
@@ -398,7 +427,8 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
                                                           : silenceBuffer.data();
             float* scratch = referenceFilterScratch.data();
             for (int s = 0; s < numSamples; ++s) {
-                scratch[s] = referenceHpfChain.processSample(src[s]) * refGainLinear;
+                const float filtered = referenceHpfChain.processSample(src[s]);
+                scratch[s] = (src[s] + hpfMix[s] * (filtered - src[s])) * refGainLinear;
                 sidechainPostPeak = std::max(sidechainPostPeak, std::abs(scratch[s]));
             }
             refInFifo.write(scratch, numSamples);
@@ -674,6 +704,19 @@ void PAEchoCancellerAudioProcessor::setStateInformation(const void* data, int si
     auto state = juce::ValueTree::readFromData(data, static_cast<size_t>(sizeInBytes));
     if (!state.isValid())
         return;
+
+    // Version 1 (1.0.x-1.1.6) saved HPF Frequency normalised to the old
+    // 80-300 Hz range: turn it back into Hz and re-normalise to today's.
+    const int savedVersion = static_cast<int>(state.getProperty(stateVersionKey, 1));
+    if (savedVersion < 2 && state.hasProperty(hpfFrequencyParam->paramID)) {
+        const auto old = static_cast<double>(state.getProperty(hpfFrequencyParam->paramID));
+        if (std::isfinite(old)) {
+            auto oldRange = juce::NormalisableRange<float>(80.0f, 300.0f, 0.1f);
+            oldRange.setSkewForCentre(150.0f);
+            const float hz = oldRange.convertFrom0to1(static_cast<float>(juce::jlimit(0.0, 1.0, old)));
+            state.setProperty(hpfFrequencyParam->paramID, makeHpfRange().convertTo0to1(hz), nullptr);
+        }
+    }
 
     for (auto* param : getParameters()) {
         if (param == bypassParam)

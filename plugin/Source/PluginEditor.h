@@ -135,6 +135,7 @@ private:
     void maxReductionSliderChanged();
     void responseSliderChanged();
     void hpfSliderChanged();
+    void updateSwitches();
     void referenceGainSliderChanged();
     void dryWetSliderChanged();
     void updateSliders();
@@ -187,8 +188,10 @@ private:
     // canceller's learned filter is untouched. Greyed out when they already
     // are, so it also answers "have I changed anything here?" at a glance.
     juce::TextButton resetButton{ "Defaults" };
-    juce::TextButton suppressorOnButton{ "ON" }; // MOCKUP
-    juce::TextButton hpfOnButton{ "ON" }; // MOCKUP
+    // On/off switches: the suppressor's sits left of Defaults, the HPF's at
+    // the right of its label row. See updateSwitches().
+    juce::TextButton suppressorOnButton;
+    juce::TextButton hpfOnButton;
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };
     juce::ComboBox tailLengthCombo;
