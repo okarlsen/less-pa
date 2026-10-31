@@ -3,6 +3,38 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.7]
+
+### Added
+
+- An ON/OFF switch for the Input HPF, next to its label. Off removes the
+  high-pass from both the mic and the PA reference. Switching is
+  click-free (a 10 ms crossfade).
+- An ON/OFF switch for the Bleed Suppressor, in its header. Off leaves the
+  PA Canceller running alone (the same as Strength 0%), keeps Strength,
+  Range and Time as set, and does not change the latency. Both switches are
+  On by default and can be automated (HPF On, Suppressor On).
+
+### Changed
+
+- The Input HPF now goes down to 30 Hz (range 30-300 Hz, was 80-300 Hz),
+  and new instances start at 120 Hz (was 150 Hz). Saved sessions keep the
+  frequency they were saved with. Existing HPF Frequency automation may
+  play back at different frequencies, because the control's range changed;
+  check it in sessions that automate the HPF.
+- Help: Tail Length now says the default 800 ms suits almost every venue,
+  and that shorter settings only save a little CPU.
+
+### Fixed
+
+- Muting the mic (or a mic region ending) while the PA plays on could make
+  the PA Canceller restart from scratch. The input HPF's ringing as the mic
+  dies away looked like a filter blow-up to the safety guard. A mic that
+  suddenly drops 60 dB below its level of the last few seconds is now held
+  like digital silence, and the guard compares with that recent level.
+  Lower HPF settings ring longer, which is how the new 120 Hz default
+  exposed it.
+
 ## [1.1.6]
 
 ### Added

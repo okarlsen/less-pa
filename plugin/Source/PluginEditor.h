@@ -11,6 +11,36 @@
 #endif
 #include "LevelMeterComponent.h"
 
+
+// A small slide toggle for a stage's on/off parameter: the knob to the
+// right on a cyan track is On, to the left on a grey track is Off.
+class OnOffSwitch : public juce::Button
+{
+public:
+    OnOffSwitch() : juce::Button({}) { setClickingTogglesState(false); }
+
+    static constexpr int designWidth = 28;
+    static constexpr int designHeight = 14;
+
+    void paintButton(juce::Graphics& g, bool shouldDrawButtonAsHighlighted, bool) override
+    {
+        const bool on = getToggleState();
+        const auto bounds = getLocalBounds().toFloat();
+        const float height = bounds.getHeight();
+        auto track = on ? LessPAColours::accent : LessPAColours::border.brighter(0.3f);
+        if (shouldDrawButtonAsHighlighted)
+            track = track.brighter(0.12f);
+        g.setColour(track);
+        g.fillRoundedRectangle(bounds, height * 0.5f);
+
+        const float inset = juce::jmax(1.0f, height / 7.0f);
+        const float knob = height - 2.0f * inset;
+        const float x = on ? bounds.getRight() - inset - knob : bounds.getX() + inset;
+        g.setColour(on ? juce::Colours::white : LessPAColours::secondaryText);
+        g.fillEllipse(x, bounds.getY() + inset, knob, knob);
+    }
+};
+
 class PAEchoCancellerAudioProcessorEditor : public juce::AudioProcessorEditor,
                                              private juce::Timer
 {
@@ -135,6 +165,7 @@ private:
     void maxReductionSliderChanged();
     void responseSliderChanged();
     void hpfSliderChanged();
+    void updateSwitches();
     void referenceGainSliderChanged();
     void dryWetSliderChanged();
     void updateSliders();
@@ -187,6 +218,10 @@ private:
     // canceller's learned filter is untouched. Greyed out when they already
     // are, so it also answers "have I changed anything here?" at a glance.
     juce::TextButton resetButton{ "Defaults" };
+    // On/off switches: the suppressor's sits left of Defaults, the HPF's at
+    // the right of its label row. See updateSwitches().
+    OnOffSwitch suppressorOnButton;
+    OnOffSwitch hpfOnButton;
 
     juce::Label tailLengthLabel{ "tailLengthLabel", "Tail Length" };
     juce::ComboBox tailLengthCombo;

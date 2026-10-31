@@ -51,6 +51,9 @@ public:
     juce::AudioParameterFloat* getHpfFrequencyParameter() const noexcept { return hpfFrequencyParam; }
     juce::AudioParameterFloat* getReferenceGainParameter() const noexcept { return referenceGainParam; }
     juce::AudioParameterFloat* getDryWetMixParameter() const noexcept { return dryWetMixParam; }
+    static juce::NormalisableRange<float> makeHpfRange(); // HPF Frequency's range, also used to migrate old sessions
+    juce::AudioParameterBool* getHpfEnabledParameter() const noexcept { return hpfEnabledParam; }
+    juce::AudioParameterBool* getSuppressorEnabledParameter() const noexcept { return suppressorEnabledParam; }
 
     // Latency-matched internal bypass. Without this override, hosts
     // synthesize their own bypass by routing around the plugin entirely,
@@ -120,7 +123,7 @@ public:
 private:
     static constexpr float maxOutputLevel = 1000.0f; // +60 dBFS, the input clamp
     static constexpr const char* stateVersionKey = "stateVersion"; // see getStateInformation
-    static constexpr int currentStateVersion = 1;
+    static constexpr int currentStateVersion = 2; // 2: HPF range 30-300 Hz (was 80-300)
 
     // The echo canceller: a full-band partitioned-block frequency-domain
     // Kalman filter plus a low-latency Wiener suppressor. Allocated for the
@@ -210,10 +213,21 @@ private:
     float bypassMixCurrent = 0.0f; // 0 = processing, 1 = bypassed; audio thread only
     float bypassRampStep = 0.0f;   // per-sample increment for the ~5ms ramp
 
-    // Shared 80-300Hz, 24dB/octave high-pass applied identically to Input
+    // Shared 30-300Hz, 24dB/octave high-pass applied identically to Input
     // and Reference before the canceller sees them. A coefficient change
     // is a live, click-free swap: the IIR state persists across it.
     juce::AudioParameterFloat* hpfFrequencyParam = nullptr;
+    // HPF On: the filters keep running while off, and their output is
+    // crossfaded with the unfiltered signal over ~10ms, so toggling is
+    // click-free and the canceller sees the same change on mic and reference.
+    juce::AudioParameterBool* hpfEnabledParam = nullptr;
+    float hpfMixCurrent = 1.0f; // 1 = filtered, 0 = unfiltered; audio thread only
+    float hpfRampStep = 0.0f;
+    std::vector<float> hpfMixScratch; // [sample], the ramp for this chunk, sized to samplesPerBlock
+
+    // Suppressor On: off runs the suppressor at Strength 0 (unity gains,
+    // reached through its own Time smoothing), so latency is unchanged.
+    juce::AudioParameterBool* suppressorEnabledParam = nullptr;
 
     // Plain gain-staging utility for the reference feed: for a reference
     // that's clipping, or too quiet to sit in the meter's target zone.

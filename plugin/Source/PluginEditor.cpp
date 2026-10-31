@@ -205,8 +205,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     addAndMakeVisible(hpfLabel);
 
-    hpfSlider.setRange(80.0, 300.0);
-    hpfSlider.setSkewFactorFromMidPoint(150.0);
+    hpfSlider.setRange(30.0, 300.0);
+    hpfSlider.setSkewFactorFromMidPoint(100.0); // matches the parameter's range
     hpfSlider.setTextValueSuffix(" Hz");
     hpfSlider.setNumDecimalPlacesToDisplay(0);
     hpfSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 24);
@@ -266,6 +266,20 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     resetButton.onClick = [this] { resetSuppressorToDefaults(); };
     addAndMakeVisible(resetButton);
+    // On/off switches for the HPF and the Bleed Suppressor. A click is
+    // one host gesture; the timer keeps them in step with automation.
+    const auto setUpSwitch = [this](OnOffSwitch& button, juce::AudioParameterBool& param) {
+        button.setClickingTogglesState(false);
+        button.onClick = [this, &param] {
+            param.beginChangeGesture();
+            param.setValueNotifyingHost(param.get() ? 0.0f : 1.0f);
+            param.endChangeGesture();
+            updateSwitches();
+        };
+        addAndMakeVisible(button);
+    };
+    setUpSwitch(suppressorOnButton, *pluginProcessor.getSuppressorEnabledParameter());
+    setUpSwitch(hpfOnButton, *pluginProcessor.getHpfEnabledParameter());
 
     // A few words each, deliberately much shorter than the corresponding
     // section of showHelpDialog(): a tooltip answers "what is this?" while the
@@ -283,6 +297,8 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
     referenceGainSlider.setTooltip("Reference gain only");
     dryWetSlider.setTooltip("Blend cancelled vs original");
     resetButton.setTooltip("Strength, Range and Time back to defaults; the canceller keeps what it learned");
+    hpfOnButton.setTooltip("HPF on mic + reference on or off");
+    suppressorOnButton.setTooltip("Bleed Suppressor on or off; the PA Canceller keeps running");
     inputMeter.setTooltip("Mic, after the HPF");
     sidechainMeter.setTooltip("After HPF and trim; aim for the zone");
     suppressionMeter.setTooltip("Total reduction of both stages, in vs out");
@@ -292,6 +308,7 @@ PAEchoCancellerAudioProcessorEditor::PAEchoCancellerAudioProcessorEditor(PAEchoC
 
     updateTailLengthCombo();
     updateSliders();
+    updateSwitches();
     updateResetButton();
     startTimerHz(30); // meter ballistics + keeps controls in sync with host automation
 }
@@ -476,6 +493,15 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         addLabelled(grid, controlGap, referenceGainLabel, referenceGainSlider, sliderRow);
         addLabelled(grid, controlGap, hpfLabel, hpfSlider, sliderRow);
         grid.performLayout(body);
+        {
+            // The HPF switch sits just after its label's text.
+            const auto labelArea = hpfLabel.getBounds();
+            const int textWidth = juce::roundToInt(juce::TextLayout::getStringWidth(
+                hpfLabel.getFont(), hpfLabel.getText())) + hpfLabel.getBorderSize().getLeftAndRight();
+            hpfOnButton.setBounds(juce::Rectangle<int>(labelArea.getX() + textWidth + sc(8), labelArea.getY(),
+                                                       sc(OnOffSwitch::designWidth), labelArea.getHeight())
+                                      .withSizeKeepingCentre(sc(OnOffSwitch::designWidth), sc(OnOffSwitch::designHeight)));
+        }
 
         const int used = sc(sectionHeaderRow + 2 * (controlGap + labelledSlider) + meterBlockGap);
         layoutMeters(body.withTrimmedTop(used).withHeight(sc(meterPair)),
@@ -500,6 +526,9 @@ void PAEchoCancellerAudioProcessorEditor::resized()
         auto header = suppressorSectionLabel.getBounds();
         resetButton.setBounds(header.removeFromRight(sc(resetButtonWidth))
                                   .withSizeKeepingCentre(sc(resetButtonWidth), sc(buttonRow - 4)));
+        header.removeFromRight(sc(6));
+        suppressorOnButton.setBounds(header.removeFromRight(sc(OnOffSwitch::designWidth))
+                                  .withSizeKeepingCentre(sc(OnOffSwitch::designWidth), sc(OnOffSwitch::designHeight)));
         suppressorSectionLabel.setBounds(header);
     }
 
@@ -522,6 +551,23 @@ void PAEchoCancellerAudioProcessorEditor::resized()
 
 }
 
+void PAEchoCancellerAudioProcessorEditor::updateSwitches()
+{
+    // Each switch shows its parameter, and the controls it governs grey out
+    // while it is off (they stay adjustable from the host).
+    const auto show = [](OnOffSwitch& button, bool on, std::initializer_list<juce::Component*> governed) {
+        if (button.getToggleState() != on)
+            button.setToggleState(on, juce::dontSendNotification);
+        for (auto* c : governed)
+            if (c->isEnabled() != on)
+                c->setEnabled(on);
+    };
+    const bool suppressorOn = pluginProcessor.getSuppressorEnabledParameter()->get();
+    show(hpfOnButton, pluginProcessor.getHpfEnabledParameter()->get(), { &hpfSlider, &hpfLabel });
+    show(suppressorOnButton, suppressorOn,
+         { &amountSlider, &amountLabel, &maxReductionSlider, &maxReductionLabel, &responseSlider, &responseLabel });
+}
+
 void PAEchoCancellerAudioProcessorEditor::updateResetButton()
 {
     // Greyed out when the suppressor is at its defaults, so the button also
@@ -529,6 +575,7 @@ void PAEchoCancellerAudioProcessorEditor::updateResetButton()
     bool modified = false;
     for (auto* param : getSuppressorParameters())
         modified = modified || std::abs(param->getValue() - param->getDefaultValue()) >= 1.0e-4f;
+    modified = modified && pluginProcessor.getSuppressorEnabledParameter()->get(); // greyed with the suppressor
     if (resetButton.isEnabled() != modified)
         resetButton.setEnabled(modified);
 }
@@ -634,6 +681,7 @@ void PAEchoCancellerAudioProcessorEditor::timerCallback()
     updateTailLengthCombo();
     updateSliders();
     updateResetButton();
+    updateSwitches();
 
     // Two different ways "nothing is happening" can look, both of which
     // need catching:
@@ -802,9 +850,10 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "further. Not a substitute for Strength.\n"
         "\n"
         "INPUT HPF\n"
-        "A 24dB/octave high-pass filter (80-300Hz), applied identically to "
-        "the mic and the PA reference before cancellation, to keep rumble "
-        "and handling noise from confusing the canceller.\n"
+        "A 24dB/octave high-pass filter (30-300Hz, default 120Hz), applied "
+        "identically to the mic and the PA reference before cancellation, "
+        "to keep rumble and handling noise from confusing the canceller. "
+        "The ON/OFF switch turns it off for both; switching is click-free.\n"
         "\n"
         "MIC / PA REF METERS\n"
         "Levels after the HPF (and, for the PA ref, after the trim) -- i.e. "
@@ -816,12 +865,18 @@ void PAEchoCancellerAudioProcessorEditor::showHelpDialog()
         "=== PA CANCELLER ===\n"
         "\n"
         "TAIL LENGTH\n"
-        "How long a room response stage 1 models. Pick by venue: 50 ms for "
-        "a small room, up to 800 ms for an arena or outdoor rig. Longer "
-        "costs a little more CPU. Applies live.\n"
+        "How long a room response stage 1 models. The default, 800 ms, suits "
+        "almost every venue. Shorter settings only save a little CPU, and "
+        "anything in the room's response beyond the setting isn't "
+        "cancelled. Applies live.\n"
         "\n"
         "\n"
         "=== BLEED SUPPRESSOR ===\n"
+        "\n"
+        "ON / OFF\n"
+        "Turns stage 2 off; the PA Canceller keeps running and you hear "
+        "stage 1 only. Strength, Range and Time keep their settings. The "
+        "latency stays the same, so the mix stays aligned.\n"
         "\n"
         "STRENGTH\n"
         "How hard the bleed suppressor ducks. It scales both the estimate of "
