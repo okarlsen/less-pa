@@ -276,7 +276,8 @@ Windows builds are made by GitHub, not on a local machine: the
 [Windows VST3 workflow](.github/workflows/windows-vst3.yml) runs on
 `windows-latest` with Visual Studio. It builds the VST3 (64-bit Intel/AMD)
 and the test harness, runs the full suite and the latency sweep
-(`--latency-matrix`), and packages
+(`--latency-matrix`), and packages it; a run takes about an hour, most of it
+the latency sweep. It packages
 `packaging/build/Less-PA-<version>-Windows-VST3.zip` with
 `packaging/build_windows_zip.ps1`.
 
