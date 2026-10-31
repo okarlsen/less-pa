@@ -49,7 +49,11 @@ option(LESSPA_INSTALL_AFTER_BUILD "Copy the built plugins into the system plug-i
 set(LESSPA_BUILD_LABEL "" CACHE STRING "Test-build label shown after the version in the panel (empty for releases)")
 # The packaging scripts read this to refuse a labelled build as a release.
 file(WRITE "${CMAKE_BINARY_DIR}/lesspa_build_label.txt" "${LESSPA_BUILD_LABEL}")
-set(LESSPA_FORMATS AU VST3)
+# AU is macOS-only; Windows builds produce the VST3 alone.
+set(LESSPA_FORMATS VST3)
+if(APPLE)
+    list(APPEND LESSPA_FORMATS AU)
+endif()
 if(LESSPA_BUILD_AAX)
     list(APPEND LESSPA_FORMATS AAX)
 endif()
@@ -124,6 +128,7 @@ target_sources(PAEchoCancellerVerify
 target_compile_definitions(PAEchoCancellerVerify
     PRIVATE
         JucePlugin_Name="Less PA"
+        _USE_MATH_DEFINES # M_PI in the harness under MSVC
         JucePlugin_VersionString="${PROJECT_VERSION}"
         LESSPA_BUILD_LABEL="${LESSPA_BUILD_LABEL}"
     PUBLIC

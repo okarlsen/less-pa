@@ -1,0 +1,107 @@
+# Windows VST3: built, tested and attached to every published release.
+#
+# macOS releases are built, signed and notarized on the Mac and published
+# with the .pkg and .zip. Publishing that GitHub release starts this
+# workflow, which builds the Windows VST3 from the release tag, runs the
+# full test suite and the latency sweep on Windows, and attaches
+# Less-PA-<version>-Windows-VST3.zip to the same release.
+#
+# On pull requests it builds and tests only, so a change that breaks the
+# Windows build shows up before it is merged. The zip is kept as a workflow
+# artifact for a test install.
+
+name: Windows VST3
+
+on:
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-vst3-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows-vst3:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write # gh release upload
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # A release tag must be a plain version (v1.1.7, never v1.1.7-RC) and
+      # match the version in plugin/CMakeLists.txt, or nothing is attached.
+      - name: Check release tag
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag '$TAG' is not a plain version like v1.1.7; labelled test builds are not released."
+            exit 1
+          fi
+          version="$(sed -n 's/^project(PAEchoCanceller VERSION \([0-9.]*\)).*/\1/p' plugin/CMakeLists.txt)"
+          if [[ "v$version" != "$TAG" ]]; then
+            echo "::error::Tag $TAG does not match plugin/CMakeLists.txt version $version."
+            exit 1
+          fi
+          echo "Release $TAG, CMake version $version"
+
+      # No test label, and no copy into C:\Program Files\Common Files\VST3.
+      - name: Configure
+        run: cmake -B plugin/build -S plugin -A x64 -DLESSPA_INSTALL_AFTER_BUILD=OFF -DLESSPA_BUILD_LABEL=
+
+      - name: Build VST3 and test harness
+        run: cmake --build plugin/build --config Release --target PAEchoCanceller_VST3 PAEchoCancellerVerify --parallel
+
+      - name: Test suite
+        shell: bash
+        run: |
+          exe="$(find plugin/build/PAEchoCancellerVerify_artefacts/Release -name '*.exe' | head -n 1)"
+          "$exe" | tee verify.log
+          passes="$(grep -c '^ *PASS' verify.log || true)"
+          echo "PASS lines: $passes"
+          grep -q '^ALL TESTS PASS$' verify.log
+
+      - name: Latency sweep
+        shell: bash
+        run: |
+          exe="$(find plugin/build/PAEchoCancellerVerify_artefacts/Release -name '*.exe' | head -n 1)"
+          "$exe" --latency-matrix > latency.log
+          tail -n 5 latency.log
+
+      - name: Package
+        shell: pwsh
+        run: ./packaging/build_windows_zip.ps1 -BuildDir plugin/build
+
+      - name: Keep test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-logs
+          path: |
+            verify.log
+            latency.log
+          if-no-files-found: ignore
+
+      - name: Keep zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Less-PA-Windows-VST3
+          path: packaging/build/Less-PA-*-Windows-VST3.zip
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" packaging/build/Less-PA-*-Windows-VST3.zip --clobber --repo "$GITHUB_REPOSITORY"
