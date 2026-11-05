@@ -2565,31 +2565,139 @@ bool testBasicCancellation(int rate, double durationS) {
     }
 }
 
-// --bench-kalman: CPU of the Kalman engine alone, and of its FFT, at 48 kHz.
-static int runKalmanBench() {
-    const int fs = 48000, seconds = 10;
-    KalmanEchoCanceller k;
-    k.prepare(fs, 1, 0.8);
-    const int N = k.getBlockSize();
-    std::mt19937 rng(1);
+// At host buffers shorter than the canceller's frame, the processor runs
+// the filter's learning step in a callback that completes no frame (see
+// KalmanEchoCanceller::beginFrame), so the CPU load is spread instead of
+// landing in every other callback. That must not change a single sample:
+// stereo, PA that stops and starts (with a stop longer than the tail, so
+// the start-up phase pauses), a Tail Length change mid-stream, at buffers
+// of 128, 64, 32, 1 and an irregular pattern, against a 512-sample buffer
+// (where every callback completes frames, so nothing is split).
+bool testSmallBuffersSplitWorkSameOutput(int sampleRate) {
+    printf("\n=== Small host buffers: canceller work split, output bit-identical (%d Hz) ===\n", sampleRate);
+    const int n = sampleRate * 12;
+    std::mt19937 rng(77);
     std::normal_distribution<float> nd(0.0f, 0.1f);
-    std::vector<float> ref(static_cast<size_t>(N)), mic(static_cast<size_t>(N));
-    float* micPtr = mic.data();
-    const int blocks = fs * seconds / N;
-    const auto t0 = juce::Time::getHighResolutionTicks();
-    for (int b = 0; b < blocks; ++b) {
-        for (int i = 0; i < N; ++i) { ref[static_cast<size_t>(i)] = nd(rng); mic[static_cast<size_t>(i)] = 0.3f * ref[static_cast<size_t>(i)] + 0.1f * nd(rng); }
-        k.processFrame(&micPtr, ref.data(), 1);
+    std::vector<float> ref(static_cast<size_t>(n)), micL(static_cast<size_t>(n)), micR(static_cast<size_t>(n));
+    const int d = sampleRate / 200;
+    for (int i = 0; i < n; ++i) {
+        const double t = static_cast<double>(i) / sampleRate;
+        ref[static_cast<size_t>(i)] = (t > 4.0 && t < 6.0) ? 0.0f : 2.0f * nd(rng);
     }
-    const double tk = juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t0);
-    juce::dsp::FFT fft(8);
-    std::vector<float> buf(512, 0.0f);
-    const int nfft = blocks * 43;
-    const auto t1 = juce::Time::getHighResolutionTicks();
-    for (int i = 0; i < nfft; ++i) { buf[0] = static_cast<float>(i); fft.performRealOnlyForwardTransform(buf.data(), true); }
-    const double tf = juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t1);
-    printf("Kalman 800 ms, mono: %.3f s for %d s of audio = %.1f%% of one core\n", tk, seconds, 100.0 * tk / seconds);
-    printf("  of which ~%d FFTs of 256: %.3f s (%.1f%% of one core)\n", nfft, tf, 100.0 * tf / seconds);
+    for (int i = 0; i < n; ++i) {
+        const float echo = i >= d ? ref[static_cast<size_t>(i - d)] : 0.0f;
+        micL[static_cast<size_t>(i)] = 0.5f * echo + nd(rng);
+        micR[static_cast<size_t>(i)] = (i >= 2 * d ? 0.3f * ref[static_cast<size_t>(i - 2 * d)] : 0.0f) + nd(rng);
+    }
+    const int tailChangeAt = sampleRate * 8;
+
+    auto run = [&](int fixedBlock) {
+        PAEchoCancellerAudioProcessor proc;
+        PAEchoCancellerAudioProcessor::BusesLayout layout;
+        layout.inputBuses.add(juce::AudioChannelSet::stereo());
+        layout.inputBuses.add(juce::AudioChannelSet::mono());
+        layout.outputBuses.add(juce::AudioChannelSet::stereo());
+        proc.setBusesLayout(layout);
+        static const int pattern[] = { 64, 1, 33, 200, 7, 128, 500 };
+        const int maxBlock = fixedBlock > 0 ? fixedBlock : 512;
+        proc.prepareToPlay(sampleRate, maxBlock);
+        const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+        juce::AudioBuffer<float> buffer(totalChannels, maxBlock);
+        juce::MidiBuffer midi;
+        std::vector<float> out[2] = { std::vector<float>(static_cast<size_t>(n)), std::vector<float>(static_cast<size_t>(n)) };
+        int pos = 0, idx = 0;
+        bool changed = false;
+        while (pos < n) {
+            int bs = std::min(fixedBlock > 0 ? fixedBlock : pattern[idx++ % 7], n - pos);
+            if (pos < tailChangeAt)
+                bs = std::min(bs, tailChangeAt - pos); // the change lands on the same frame for every buffer size
+            if (!changed && pos >= tailChangeAt) {
+                auto* param = proc.getTailLengthParameter();
+                param->setValueNotifyingHost(param->convertTo0to1(1.0f));
+                changed = true;
+            }
+            buffer.setSize(totalChannels, bs, false, false, true);
+            buffer.clear();
+            auto mainIn = proc.getBusBuffer(buffer, true, 0);
+            auto refIn = proc.getBusBuffer(buffer, true, 1);
+            mainIn.copyFrom(0, 0, micL.data() + pos, bs);
+            mainIn.copyFrom(1, 0, micR.data() + pos, bs);
+            refIn.copyFrom(0, 0, ref.data() + pos, bs);
+            proc.processBlock(buffer, midi);
+            auto mainOut = proc.getBusBuffer(buffer, false, 0);
+            for (int ch = 0; ch < 2; ++ch)
+                std::copy_n(mainOut.getReadPointer(ch), bs, out[ch].data() + pos);
+            pos += bs;
+        }
+        return std::array<std::vector<float>, 2>{ out[0], out[1] };
+    };
+
+    const auto base = run(512);
+    bool pass = true;
+    for (int block : { 128, 64, 32, 1, 0 }) {
+        const auto o = run(block);
+        int64_t firstDiff = -1;
+        for (int ch = 0; ch < 2 && firstDiff < 0; ++ch)
+            for (int i = 0; i < n; ++i)
+                if (std::memcmp(&o[static_cast<size_t>(ch)][static_cast<size_t>(i)], &base[static_cast<size_t>(ch)][static_cast<size_t>(i)], sizeof(float)) != 0) {
+                    firstDiff = i;
+                    break;
+                }
+        if (block > 0)
+            printf("  buffer %4d vs 512: %s\n", block, firstDiff < 0 ? "identical" : "DIFFERS");
+        else
+            printf("  irregular  vs 512: %s\n", firstDiff < 0 ? "identical" : "DIFFERS");
+        if (firstDiff >= 0)
+            printf("    first difference at sample %lld\n", static_cast<long long>(firstDiff));
+        pass = pass && firstDiff < 0;
+    }
+    printf("  %s\n", pass ? "PASS" : "CHECK");
+    return pass;
+}
+
+// --bench-kalman: CPU of the Kalman engine alone (800 ms, mono, 48 kHz),
+// with denormals flushed as in processBlock. Three situations: the first
+// 10 s of PA (the start-up phase), PA after 40 s (steady state), and a mic
+// with no PA at all. Also the split between beginFrame (the output) and
+// finishFrame (the learning step), which at host buffers shorter than a
+// frame run in different callbacks.
+static int runKalmanBench() {
+    juce::ScopedNoDenormals noDenormals;
+    const int fs = 48000;
+    struct Case { const char* name; bool pa; int skipSeconds; };
+    const Case cases[] = { { "start-up, first 10 s of PA", true, 0 },
+                           { "steady state, PA after 40 s", true, 40 },
+                           { "no PA, mic only, after 40 s", false, 40 } };
+    for (const auto& c : cases) {
+        KalmanEchoCanceller k;
+        k.prepare(fs, 1, 0.8);
+        const int N = k.getBlockSize();
+        std::mt19937 rng(1);
+        std::normal_distribution<float> nd(0.0f, 0.1f);
+        std::vector<float> ref(static_cast<size_t>(N)), mic(static_cast<size_t>(N));
+        float* micPtr = mic.data();
+        auto fill = [&] {
+            for (int i = 0; i < N; ++i) {
+                ref[static_cast<size_t>(i)] = c.pa ? nd(rng) : 0.0f;
+                mic[static_cast<size_t>(i)] = 0.3f * ref[static_cast<size_t>(i)] + 0.1f * nd(rng);
+            }
+        };
+        for (int b = 0; b < fs * c.skipSeconds / N; ++b) { fill(); k.processFrame(&micPtr, ref.data(), 1); }
+        const int blocks = fs * 10 / N;
+        double tBegin = 0.0, tFinish = 0.0;
+        for (int b = 0; b < blocks; ++b) {
+            fill();
+            const auto t0 = juce::Time::getHighResolutionTicks();
+            k.beginFrame(&micPtr, ref.data(), 1);
+            const auto t1 = juce::Time::getHighResolutionTicks();
+            k.finishFrame();
+            const auto t2 = juce::Time::getHighResolutionTicks();
+            tBegin += juce::Time::highResolutionTicksToSeconds(t1 - t0);
+            tFinish += juce::Time::highResolutionTicksToSeconds(t2 - t1);
+        }
+        printf("Kalman 800 ms, mono, %s: %.1f%% of one core (output %.1f%%, learning %.1f%%)\n",
+               c.name, 10.0 * (tBegin + tFinish), 10.0 * tBegin, 10.0 * tFinish);
+    }
     return 0;
 }
 
@@ -3619,6 +3727,14 @@ int main(int argc, char* argv[]) {
         return ok ? 0 : 1;
     }
 
+    // --small-buffers: just the split-work bit-identity test.
+    if (argc >= 2 && std::string(argv[1]) == "--small-buffers") {
+        bool ok = true;
+        for (int rate : { 48000, 96000 }) ok = testSmallBuffersSplitWorkSameOutput(rate) && ok;
+        printf("\n%s\n", ok ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
+        return ok ? 0 : 1;
+    }
+
     printDefaultBusLayout();
 
     const int rates[] = { 44100, 48000, 96000 };
@@ -3666,6 +3782,7 @@ int main(int argc, char* argv[]) {
         for (float gain : { 0.3f, 1.0f }) allPass = testMicGapKeepsFilter(rate, gain) && allPass;
     allPass = testMicGapThroughPlugin(48000) && allPass;
     allPass = testExtraOutputChannels(48000) && allPass;
+    for (int rate : { 48000, 96000 }) allPass = testSmallBuffersSplitWorkSameOutput(rate) && allPass;
 
     printf("\n%s\n", allPass ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
 
