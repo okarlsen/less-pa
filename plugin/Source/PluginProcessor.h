@@ -114,6 +114,7 @@ public:
 
     // Canceller restarts after a blow-up (see KalmanEchoCanceller). Tests.
     uint64_t getCancellerRestartCount() const noexcept { return kalman.getRestartCount(); }
+    uint64_t getCancellerFftCount() const noexcept { return kalman.getFftCount(); } // tests: see KalmanEchoCanceller::getFftCount
 
     // Samples dropped or padded by any of the internal FIFOs since
     // prepareToPlay (see FrameFifo). Must stay 0; a non-zero count is a

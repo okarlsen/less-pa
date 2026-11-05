@@ -370,6 +370,7 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     float inputPostPeak = 0.0f;
     float sidechainPostPeak = 0.0f;
 
+    bool frameCompleted = false;
     for (int chunkStart = 0; chunkStart < totalNumSamples; chunkStart += preparedBlockSize) {
         const int numSamples = juce::jmin(preparedBlockSize, totalNumSamples - chunkStart);
 
@@ -446,7 +447,8 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
                 std::copy_n(micFramePtrs[static_cast<size_t>(ch)], frameSize,
                             dryFrameScratch[static_cast<size_t>(ch)].data());
 
-            kalman.processFrame(micFramePtrs.data(), refFrameBuffer.data(), numMicChannels);
+            kalman.beginFrame(micFramePtrs.data(), refFrameBuffer.data(), numMicChannels);
+            frameCompleted = true;
 
             for (int ch = 0; ch < numMicChannels; ++ch) {
                 micOutFifos[static_cast<size_t>(ch)].write(micFramePtrs[static_cast<size_t>(ch)], frameSize);
@@ -527,6 +529,14 @@ void PAEchoCancellerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         for (int ch = numProcessedOut; ch < mainOut.getNumChannels(); ++ch)
             std::copy_n(mainOut.getReadPointer(0) + chunkStart, numSamples, mainOut.getWritePointer(ch) + chunkStart);
     }
+
+    // The canceller's learning step for its last frame (see beginFrame):
+    // at host buffers shorter than a frame, run it in a callback that
+    // completed no frame, so the two halves of the work land in different
+    // callbacks. Otherwise the next frame runs it first. Output is the same
+    // either way.
+    if (!frameCompleted)
+        kalman.finishFrame();
 
     // Output guard: whatever happens inside, the host never gets a
     // non-finite sample or one above the +60 dBFS input clamp (see

@@ -2565,32 +2565,339 @@ bool testBasicCancellation(int rate, double durationS) {
     }
 }
 
-// --bench-kalman: CPU of the Kalman engine alone, and of its FFT, at 48 kHz.
-static int runKalmanBench() {
-    const int fs = 48000, seconds = 10;
-    KalmanEchoCanceller k;
-    k.prepare(fs, 1, 0.8);
-    const int N = k.getBlockSize();
-    std::mt19937 rng(1);
+// At host buffers shorter than the canceller's frame, the processor runs
+// the filter's learning step in a callback that completes no frame (see
+// KalmanEchoCanceller::beginFrame), so the CPU load is spread instead of
+// landing in every other callback. That must not change a single sample:
+// stereo, PA that stops and starts (with a stop longer than the tail, so
+// the start-up phase pauses), a Tail Length change mid-stream, at buffers
+// of 128, 64, 32, 1 and an irregular pattern, against a 512-sample buffer
+// (where every callback completes frames, so nothing is split).
+bool testSmallBuffersSplitWorkSameOutput(int sampleRate) {
+    printf("\n=== Small host buffers: canceller work split, output bit-identical (%d Hz) ===\n", sampleRate);
+    const int n = sampleRate * 12;
+    std::mt19937 rng(77);
     std::normal_distribution<float> nd(0.0f, 0.1f);
-    std::vector<float> ref(static_cast<size_t>(N)), mic(static_cast<size_t>(N));
-    float* micPtr = mic.data();
-    const int blocks = fs * seconds / N;
-    const auto t0 = juce::Time::getHighResolutionTicks();
-    for (int b = 0; b < blocks; ++b) {
-        for (int i = 0; i < N; ++i) { ref[static_cast<size_t>(i)] = nd(rng); mic[static_cast<size_t>(i)] = 0.3f * ref[static_cast<size_t>(i)] + 0.1f * nd(rng); }
-        k.processFrame(&micPtr, ref.data(), 1);
+    std::vector<float> ref(static_cast<size_t>(n)), micL(static_cast<size_t>(n)), micR(static_cast<size_t>(n));
+    const int d = sampleRate / 200;
+    for (int i = 0; i < n; ++i) {
+        const double t = static_cast<double>(i) / sampleRate;
+        ref[static_cast<size_t>(i)] = (t > 4.0 && t < 6.0) ? 0.0f : 2.0f * nd(rng);
     }
-    const double tk = juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t0);
-    juce::dsp::FFT fft(8);
-    std::vector<float> buf(512, 0.0f);
-    const int nfft = blocks * 43;
-    const auto t1 = juce::Time::getHighResolutionTicks();
-    for (int i = 0; i < nfft; ++i) { buf[0] = static_cast<float>(i); fft.performRealOnlyForwardTransform(buf.data(), true); }
-    const double tf = juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks() - t1);
-    printf("Kalman 800 ms, mono: %.3f s for %d s of audio = %.1f%% of one core\n", tk, seconds, 100.0 * tk / seconds);
-    printf("  of which ~%d FFTs of 256: %.3f s (%.1f%% of one core)\n", nfft, tf, 100.0 * tf / seconds);
+    for (int i = 0; i < n; ++i) {
+        const float echo = i >= d ? ref[static_cast<size_t>(i - d)] : 0.0f;
+        micL[static_cast<size_t>(i)] = 0.5f * echo + nd(rng);
+        micR[static_cast<size_t>(i)] = (i >= 2 * d ? 0.3f * ref[static_cast<size_t>(i - 2 * d)] : 0.0f) + nd(rng);
+    }
+    const int tailChangeAt = sampleRate * 8;
+
+    auto run = [&](int fixedBlock) {
+        PAEchoCancellerAudioProcessor proc;
+        PAEchoCancellerAudioProcessor::BusesLayout layout;
+        layout.inputBuses.add(juce::AudioChannelSet::stereo());
+        layout.inputBuses.add(juce::AudioChannelSet::mono());
+        layout.outputBuses.add(juce::AudioChannelSet::stereo());
+        proc.setBusesLayout(layout);
+        static const int pattern[] = { 64, 1, 33, 200, 7, 128, 500 };
+        const int maxBlock = fixedBlock > 0 ? fixedBlock : 512;
+        proc.prepareToPlay(sampleRate, maxBlock);
+        const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+        juce::AudioBuffer<float> buffer(totalChannels, maxBlock);
+        juce::MidiBuffer midi;
+        std::vector<float> out[2] = { std::vector<float>(static_cast<size_t>(n)), std::vector<float>(static_cast<size_t>(n)) };
+        int pos = 0, idx = 0;
+        bool changed = false;
+        while (pos < n) {
+            int bs = std::min(fixedBlock > 0 ? fixedBlock : pattern[idx++ % 7], n - pos);
+            if (pos < tailChangeAt)
+                bs = std::min(bs, tailChangeAt - pos); // the change lands on the same frame for every buffer size
+            if (!changed && pos >= tailChangeAt) {
+                auto* param = proc.getTailLengthParameter();
+                param->setValueNotifyingHost(param->convertTo0to1(1.0f));
+                changed = true;
+            }
+            buffer.setSize(totalChannels, bs, false, false, true);
+            buffer.clear();
+            auto mainIn = proc.getBusBuffer(buffer, true, 0);
+            auto refIn = proc.getBusBuffer(buffer, true, 1);
+            mainIn.copyFrom(0, 0, micL.data() + pos, bs);
+            mainIn.copyFrom(1, 0, micR.data() + pos, bs);
+            refIn.copyFrom(0, 0, ref.data() + pos, bs);
+            proc.processBlock(buffer, midi);
+            auto mainOut = proc.getBusBuffer(buffer, false, 0);
+            for (int ch = 0; ch < 2; ++ch)
+                std::copy_n(mainOut.getReadPointer(ch), bs, out[ch].data() + pos);
+            pos += bs;
+        }
+        return std::array<std::vector<float>, 2>{ out[0], out[1] };
+    };
+
+    const auto base = run(512);
+    bool pass = true;
+    for (int block : { 128, 64, 32, 1, 0 }) {
+        const auto o = run(block);
+        int64_t firstDiff = -1;
+        for (int ch = 0; ch < 2 && firstDiff < 0; ++ch)
+            for (int i = 0; i < n; ++i)
+                if (std::memcmp(&o[static_cast<size_t>(ch)][static_cast<size_t>(i)], &base[static_cast<size_t>(ch)][static_cast<size_t>(i)], sizeof(float)) != 0) {
+                    firstDiff = i;
+                    break;
+                }
+        if (block > 0)
+            printf("  buffer %4d vs 512: %s\n", block, firstDiff < 0 ? "identical" : "DIFFERS");
+        else
+            printf("  irregular  vs 512: %s\n", firstDiff < 0 ? "identical" : "DIFFERS");
+        if (firstDiff >= 0)
+            printf("    first difference at sample %lld\n", static_cast<long long>(firstDiff));
+        pass = pass && firstDiff < 0;
+    }
+    printf("  %s\n", pass ? "PASS" : "CHECK");
+    return pass;
+}
+
+// --bench-kalman: CPU of the Kalman engine alone (800 ms, mono, 48 kHz),
+// with denormals flushed as in processBlock. Three situations: the first
+// 10 s of PA (the start-up phase), PA after 40 s (steady state), and a mic
+// with no PA at all. Also the split between beginFrame (the output) and
+// finishFrame (the learning step), which at host buffers shorter than a
+// frame run in different callbacks.
+static int runKalmanBench() {
+    juce::ScopedNoDenormals noDenormals;
+    const int fs = 48000;
+    struct Case { const char* name; bool pa; int skipSeconds; };
+    const Case cases[] = { { "start-up, first 10 s of PA", true, 0 },
+                           { "steady state, PA after 40 s", true, 40 },
+                           { "no PA, mic only, after 40 s", false, 40 } };
+    for (const auto& c : cases) {
+        KalmanEchoCanceller k;
+        k.prepare(fs, 1, 0.8);
+        const int N = k.getBlockSize();
+        std::mt19937 rng(1);
+        std::normal_distribution<float> nd(0.0f, 0.1f);
+        std::vector<float> ref(static_cast<size_t>(N)), mic(static_cast<size_t>(N));
+        float* micPtr = mic.data();
+        auto fill = [&] {
+            for (int i = 0; i < N; ++i) {
+                ref[static_cast<size_t>(i)] = c.pa ? nd(rng) : 0.0f;
+                mic[static_cast<size_t>(i)] = 0.3f * ref[static_cast<size_t>(i)] + 0.1f * nd(rng);
+            }
+        };
+        for (int b = 0; b < fs * c.skipSeconds / N; ++b) { fill(); k.processFrame(&micPtr, ref.data(), 1); }
+        const int blocks = fs * 10 / N;
+        double tBegin = 0.0, tFinish = 0.0;
+        for (int b = 0; b < blocks; ++b) {
+            fill();
+            const auto t0 = juce::Time::getHighResolutionTicks();
+            k.beginFrame(&micPtr, ref.data(), 1);
+            const auto t1 = juce::Time::getHighResolutionTicks();
+            k.finishFrame();
+            const auto t2 = juce::Time::getHighResolutionTicks();
+            tBegin += juce::Time::highResolutionTicksToSeconds(t1 - t0);
+            tFinish += juce::Time::highResolutionTicksToSeconds(t2 - t1);
+        }
+        printf("Kalman 800 ms, mono, %s: %.1f%% of one core (output %.1f%%, learning %.1f%%)\n",
+               c.name, 10.0 * (tBegin + tFinish), 10.0 * tBegin, 10.0 * tFinish);
+    }
     return 0;
+}
+
+// --cpu-sweep [--quick]: CPU per host callback in every situation the
+// plugin can be in, to find work that only happens sometimes (like the
+// start-up phase's extra work that never ended without PA, fixed in 1.1.8).
+//
+// Each setup (rate, buffer, channels, Tail Length) is first run in steady
+// state: PA playing, after the start-up phase. Every other situation is
+// compared with that, two ways:
+//
+// - Work, judged: the FFTs the canceller runs (most of its cost) in the
+//   busiest host callback. That is exact and the same on every machine,
+//   so it can fail a test without false alarms. A situation more than
+//   1.25x steady state fails, except the start-up phase (the first 30 s of
+//   PA after a start or a restart), which does extra work on purpose (the
+//   cold-start noise fix) and is shown but not judged.
+// - Time, shown: the audio thread's CPU time per callback as a share of
+//   the buffer's duration, average and busiest 1% (what a DAW meter shows),
+//   for reading off headroom on a given Mac. Not judged: on a shared CI
+//   machine it moves with other jobs.
+#include <ctime>
+namespace cpusweep {
+// This thread's CPU time, so time the OS gives to other processes on a
+// shared machine doesn't count. Wall-clock time where that isn't available.
+inline double threadSeconds() {
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return static_cast<double>(ts.tv_sec) + 1e-9 * static_cast<double>(ts.tv_nsec);
+#else
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+}
+
+struct Config { int rate; int block; bool stereo; int tailIndex; };
+enum class Pa { steady, startup, none, pauses };
+enum class Mic { normal, silent, veryQuiet, copyOfRef };
+enum class Automation { none, tailFlip, hpfSweep, strengthSweep, bypassFlip };
+struct Situation {
+    const char* name; Pa pa; Mic mic; bool bypass; bool suppressorOn; bool hpfOn; Automation automation; bool nanBursts;
+    double warmS = 32.0;    // seconds before measuring; 0 measures the start-up
+    bool judged = true;     // false: extra work here is by design (start-up)
+};
+struct Result { double avgPct = 0, p99Pct = 0, maxPct = 0; uint64_t maxFfts = 0; };
+
+Result run(const Config& c, const Situation& s, double warmS, double measureS) {
+    PAEchoCancellerAudioProcessor proc;
+    PAEchoCancellerAudioProcessor::BusesLayout layout;
+    const auto mainSet = c.stereo ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    layout.inputBuses.add(mainSet);
+    layout.inputBuses.add(juce::AudioChannelSet::mono());
+    layout.outputBuses.add(mainSet);
+    proc.setBusesLayout(layout);
+    auto setParam = [](juce::RangedAudioParameter* p, float plain) { p->setValueNotifyingHost(p->convertTo0to1(plain)); };
+    setParam(proc.getTailLengthParameter(), static_cast<float>(c.tailIndex));
+    proc.getBypassParameter()->setValueNotifyingHost(s.bypass ? 1.0f : 0.0f);
+    setParam(proc.getSuppressorEnabledParameter(), s.suppressorOn ? 1.0f : 0.0f);
+    setParam(proc.getHpfEnabledParameter(), s.hpfOn ? 1.0f : 0.0f);
+    proc.setNonRealtime(false);
+    proc.prepareToPlay(c.rate, c.block);
+
+    const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer(totalChannels, c.block);
+    juce::MidiBuffer midi;
+    std::mt19937 rng(9);
+    std::normal_distribution<float> nd(0.0f, 0.1f);
+    std::vector<float> refHist(static_cast<size_t>(c.rate), 0.0f);
+    size_t w = 0;
+    const size_t d1 = static_cast<size_t>(c.rate / 100), d2 = static_cast<size_t>(c.rate / 70);
+    const int64_t measureFrom = static_cast<int64_t>(warmS * c.rate);
+    const int64_t end = measureFrom + static_cast<int64_t>(measureS * c.rate);
+    const double periodS = static_cast<double>(c.block) / c.rate;
+    std::vector<double> times;
+    uint64_t maxFfts = 0;
+    times.reserve(static_cast<size_t>((end - measureFrom) / c.block + 1));
+    int64_t callback = 0;
+    for (int64_t pos = 0; pos < end; pos += c.block, ++callback) {
+        const double t = static_cast<double>(pos) / c.rate;
+        // Automation, through the public parameter API as a host would.
+        switch (s.automation) {
+            case Automation::tailFlip:
+                if (callback % static_cast<int64_t>(c.rate / c.block) == 0) // once a second
+                    setParam(proc.getTailLengthParameter(), static_cast<float>((callback / (c.rate / c.block)) % 2 == 0 ? c.tailIndex : 0));
+                break;
+            case Automation::hpfSweep:
+                setParam(proc.getHpfFrequencyParameter(), static_cast<float>(165.0 + 135.0 * std::sin(t * 3.0)));
+                break;
+            case Automation::strengthSweep:
+                setParam(proc.getAmountParameter(), static_cast<float>(50.0 + 50.0 * std::sin(t * 3.0)));
+                break;
+            case Automation::bypassFlip:
+                if (callback % static_cast<int64_t>(c.rate / c.block / 2) == 0)
+                    proc.getBypassParameter()->setValueNotifyingHost((callback / (c.rate / c.block / 2)) % 2 == 0 ? 0.0f : 1.0f);
+                break;
+            case Automation::none: break;
+        }
+        bool paOn = true;
+        switch (s.pa) {
+            case Pa::none: paOn = false; break;
+            case Pa::pauses: paOn = std::fmod(t, 9.0) < 6.0; break; // songs with 3 s gaps
+            case Pa::steady: case Pa::startup: break;
+        }
+        buffer.clear();
+        auto mainIn = proc.getBusBuffer(buffer, true, 0);
+        auto refIn = proc.getBusBuffer(buffer, true, 1);
+        const bool nanBlock = s.nanBursts && callback % static_cast<int64_t>(c.rate / c.block) == 7;
+        for (int i = 0; i < c.block; ++i) {
+            const float r = paOn ? 2.0f * nd(rng) : 0.0f;
+            refHist[w % refHist.size()] = r;
+            const float e1 = 0.5f * refHist[(w + refHist.size() - d1) % refHist.size()];
+            const float e2 = 0.3f * refHist[(w + refHist.size() - d2) % refHist.size()];
+            ++w;
+            float l = e1 + nd(rng), rr = e2 + nd(rng);
+            switch (s.mic) {
+                case Mic::silent: l = rr = 0.0f; break;
+                case Mic::veryQuiet: l *= 1e-6f; rr *= 1e-6f; break; // -120 dB: denormal territory
+                case Mic::copyOfRef: l = rr = r; break;              // Logic's "Side Chain: None"
+                case Mic::normal: break;
+            }
+            if (nanBlock && i == 3) l = std::numeric_limits<float>::quiet_NaN();
+            mainIn.setSample(0, i, l);
+            if (c.stereo) mainIn.setSample(1, i, rr);
+            refIn.setSample(0, i, r);
+        }
+        const uint64_t f0 = proc.getCancellerFftCount();
+        const double t0 = threadSeconds();
+        proc.processBlock(buffer, midi);
+        const double t1 = threadSeconds();
+        if (pos >= measureFrom) {
+            times.push_back(t1 - t0);
+            maxFfts = std::max(maxFfts, proc.getCancellerFftCount() - f0);
+        }
+    }
+    Result res;
+    res.maxFfts = maxFfts;
+    double sum = 0.0;
+    for (double x : times) sum += x;
+    std::sort(times.begin(), times.end());
+    res.avgPct = 100.0 * sum / (static_cast<double>(times.size()) * periodS);
+    res.p99Pct = 100.0 * times[static_cast<size_t>(0.99 * static_cast<double>(times.size() - 1))] / periodS;
+    res.maxPct = 100.0 * times.back() / periodS;
+    return res;
+}
+} // namespace cpusweep
+
+static int runCpuSweep(bool quick) {
+    using namespace cpusweep;
+    juce::ScopedNoDenormals noDenormals; // hosts usually set this too; processBlock sets it regardless
+    static const char* tailNames[] = { "50 ms", "200 ms", "400 ms", "800 ms" };
+    std::vector<Config> configs = { { 48000, 64, false, 3 } };
+    if (!quick) {
+        configs.push_back({ 48000, 64, true, 3 });
+        configs.push_back({ 96000, 64, false, 3 });
+        configs.push_back({ 44100, 32, false, 3 });
+        configs.push_back({ 48000, 256, false, 3 });
+        configs.push_back({ 48000, 64, false, 0 });
+    }
+    const Situation steady = { "PA playing (steady)", Pa::steady, Mic::normal, false, true, true, Automation::none, false };
+    const Situation situations[] = {
+        { "first 30 s of PA (start-up)",    Pa::startup, Mic::normal,    false, true,  true,  Automation::none, false, 0.0, false },
+        { "no PA, mic only",                Pa::none,    Mic::normal,    false, true,  true,  Automation::none, false },
+        { "PA with 3 s pauses",             Pa::pauses,  Mic::normal,    false, true,  true,  Automation::none, false, 50.0 }, // start-up done (30 s of PA)
+        { "mic silent (muted input)",       Pa::steady,  Mic::silent,    false, true,  true,  Automation::none, false },
+        { "mic at -120 dB",                 Pa::steady,  Mic::veryQuiet, false, true,  true,  Automation::none, false },
+        { "sidechain is a copy of the mic", Pa::steady,  Mic::copyOfRef, false, true,  true,  Automation::none, false },
+        { "bypassed",                       Pa::steady,  Mic::normal,    true,  true,  true,  Automation::none, false },
+        { "bypass toggled twice a second",  Pa::steady,  Mic::normal,    false, true,  true,  Automation::bypassFlip, false },
+        { "Bleed Suppressor off",           Pa::steady,  Mic::normal,    false, false, true,  Automation::none, false },
+        { "HPF off",                        Pa::steady,  Mic::normal,    false, true,  false, Automation::none, false },
+        { "Tail Length changed every 1 s",  Pa::steady,  Mic::normal,    false, true,  true,  Automation::tailFlip, false },
+        { "HPF frequency automated",        Pa::steady,  Mic::normal,    false, true,  true,  Automation::hpfSweep, false },
+        { "Strength automated",             Pa::steady,  Mic::normal,    false, true,  true,  Automation::strengthSweep, false },
+        { "NaN in the mic once a second",   Pa::steady,  Mic::normal,    false, true,  true,  Automation::none, true, 32.0, false }, // each restart re-enters start-up
+    };
+    const double warmS = 32.0, measureS = quick ? 5.0 : 8.0;
+    const double startupS = 30.0;
+    const double workLimit = 1.25;
+    int flagged = 0;
+    for (const auto& c : configs) {
+        printf("\n=== CPU per callback: %.1f kHz, %d-sample buffer, %s, Tail %s ===\n",
+               c.rate / 1000.0, c.block, c.stereo ? "stereo" : "mono", tailNames[c.tailIndex]);
+        printf("  %-32s %8s %8s %8s %10s\n", "situation", "average", "busiest", "max", "work");
+        const Result ref = run(c, steady, warmS, measureS);
+        printf("  %-32s %7.1f%% %7.1f%% %7.1f%% %9.2fx\n", steady.name, ref.avgPct, ref.p99Pct, ref.maxPct, 1.0);
+        for (const auto& s : situations) {
+            const bool startup = s.warmS <= 0.0;
+            const Result r = run(c, s, s.warmS, startup ? startupS : measureS);
+            const double work = static_cast<double>(r.maxFfts) / static_cast<double>(std::max<uint64_t>(ref.maxFfts, 1));
+            const bool flag = s.judged && work > workLimit;
+            flagged += flag ? 1 : 0;
+            printf("  %-32s %7.1f%% %7.1f%% %7.1f%% %9.2fx%s\n", s.name, r.avgPct, r.p99Pct, r.maxPct, work,
+                   flag ? "  <-- CHECK" : (s.judged ? "" : "  (by design)"));
+        }
+    }
+    printf("\naverage, busiest (the busiest 1%% of callbacks, what a DAW meter shows) and max: CPU time per callback\n"
+           "as a share of the buffer's duration. work: the canceller's FFTs in the busiest callback vs steady state.\n");
+    printf("%s\n", flagged == 0 ? "NO HIDDEN EXTRA WORK: every situation within 1.25x of steady state"
+                                 : "HIDDEN EXTRA WORK: some situations do more than 1.25x steady state -- see CHECK above");
+    return flagged == 0 ? 0 : 1;
 }
 
 // End-to-end latency check, for phase-aligned mixing of ambience mics: the
@@ -3619,6 +3926,17 @@ int main(int argc, char* argv[]) {
         return ok ? 0 : 1;
     }
 
+    if (argc >= 2 && std::string(argv[1]) == "--cpu-sweep")
+        return runCpuSweep(argc >= 3 && std::string(argv[2]) == "--quick");
+
+    // --small-buffers: just the split-work bit-identity test.
+    if (argc >= 2 && std::string(argv[1]) == "--small-buffers") {
+        bool ok = true;
+        for (int rate : { 48000, 96000 }) ok = testSmallBuffersSplitWorkSameOutput(rate) && ok;
+        printf("\n%s\n", ok ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
+        return ok ? 0 : 1;
+    }
+
     printDefaultBusLayout();
 
     const int rates[] = { 44100, 48000, 96000 };
@@ -3666,6 +3984,8 @@ int main(int argc, char* argv[]) {
         for (float gain : { 0.3f, 1.0f }) allPass = testMicGapKeepsFilter(rate, gain) && allPass;
     allPass = testMicGapThroughPlugin(48000) && allPass;
     allPass = testExtraOutputChannels(48000) && allPass;
+    for (int rate : { 48000, 96000 }) allPass = testSmallBuffersSplitWorkSameOutput(rate) && allPass;
+    allPass = (runCpuSweep(/*quick*/ true) == 0) && allPass; // no situation does hidden extra work
 
     printf("\n%s\n", allPass ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
 

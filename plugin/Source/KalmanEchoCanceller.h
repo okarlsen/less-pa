@@ -79,17 +79,18 @@ public:
             c.pout.assign(static_cast<size_t>(K), 1e-12f); c.gain.assign(static_cast<size_t>(K), 1.0f);
             c.h.assign(static_cast<size_t>(firLength), 0.0f); c.hPrev.assign(static_cast<size_t>(firLength), 0.0f);
             c.hist.assign(static_cast<size_t>(firLength - 1 + N), 0.0f);
+            c.er.assign(static_cast<size_t>(K), 0.0f); c.ei.assign(static_cast<size_t>(K), 0.0f);
+            c.d.assign(static_cast<size_t>(K), 0.0f); c.dFull.assign(static_cast<size_t>(K), 0.0f);
             c.hasPrev = false;
+            c.updatePending = false;
+            c.constraintNext = std::numeric_limits<int>::max();
         }
         unc.assign(static_cast<size_t>(K), 0.0f);
-        er.assign(static_cast<size_t>(K), 0.0f); ei.assign(static_cast<size_t>(K), 0.0f);
         yr.assign(static_cast<size_t>(K), 0.0f); yi.assign(static_cast<size_t>(K), 0.0f);
         ypr.assign(static_cast<size_t>(K), 0.0f); ypi.assign(static_cast<size_t>(K), 0.0f);
         gl.assign(static_cast<size_t>(firLength / 2 + 1), 1.0f);
         timeScratch.assign(static_cast<size_t>(M), 0.0f);
         timeScratch2.assign(static_cast<size_t>(M), 0.0f);
-        dScratch.assign(static_cast<size_t>(K), 0.0f);
-        dFullScratch.assign(static_cast<size_t>(K), 0.0f);
         mScratch.assign(static_cast<size_t>(K), 0.0f);
         egScratchR.assign(static_cast<size_t>(K), 0.0f);
         egScratchI.assign(static_cast<size_t>(K), 0.0f);
@@ -130,6 +131,8 @@ public:
             std::fill(c.pout.begin(), c.pout.end(), 1e-12f); std::fill(c.gain.begin(), c.gain.end(), 1.0f);
             std::fill(c.hist.begin(), c.hist.end(), 0.0f);
             c.hasPrev = false;
+            c.updatePending = false;
+            c.constraintNext = std::numeric_limits<int>::max();
             c.accMic = 0.0;
             c.psiStart = psi0;
             c.startupBlocks = 0;
@@ -145,6 +148,9 @@ public:
         startDone = false;
         head = 0;
         blockCount = 0;
+        blocksSinceRef = std::numeric_limits<int>::max() / 2;
+        framePending = false;
+        completePending = false;
         delayEstimateMs.store(-1, std::memory_order_relaxed);
     }
 
@@ -154,6 +160,8 @@ public:
     void setTailSeconds(double seconds)
     {
         const int p = std::clamp(partitionsFor(seconds), 1, maxPartitions);
+        if (p != activePartitions)
+            completeFrame(); // the pending update belongs to the old length
         if (p > activePartitions) {
             for (auto& c : channels)
                 for (int q = activePartitions; q < p; ++q) {
@@ -183,6 +191,11 @@ public:
     // (see processChannel). Audio thread only; for tests.
     uint64_t getRestartCount() const noexcept { return restartCount; }
 
+    // FFTs run so far, the bulk of the canceller's work: a machine-independent
+    // measure of how much work a frame or a host callback did. Audio thread
+    // only; for tests.
+    uint64_t getFftCount() const noexcept { return fftCount; }
+
     // Tests and the --long run: total filter energy sum |W|^2 and the mean
     // uncertainty of channel 0. Not real-time safe to call concurrently.
     void getFilterStats(double& energy, double& meanUncertainty) const
@@ -210,6 +223,27 @@ public:
     // (delayed by suppressorDelaySamples). ref: N samples.
     void processFrame(float* const* mic, const float* ref, int numChannels)
     {
+        beginFrame(mic, ref, numChannels);
+        finishFrame();
+        completeFrame();
+    }
+
+    // processFrame() split up, for small host buffers. beginFrame()
+    // produces the frame's output; the filter's learning step for it (the
+    // Kalman update and gradient constraint, most of the cost) is left
+    // pending. finishFrame() does the update and the first half of the
+    // constraint; the rest, and the delay readout, run at the start of the
+    // next beginFrame() (completeFrame()). The processor calls finishFrame()
+    // in a host callback that completes no frame of its own -- at a
+    // 64-sample buffer, every other one -- so the work is spread evenly over
+    // two callbacks instead of landing in one. Each step runs exactly once,
+    // in the same order relative to everything that reads its result, so
+    // the output is bit-identical to processFrame() however the host splits
+    // its blocks.
+    void beginFrame(float* const* mic, const float* ref, int numChannels)
+    {
+        finishFrame();
+        completeFrame();
         const int P = activePartitions;
 
         // Reference: newest 2N-sample window -> spectrum into the ring slot
@@ -228,6 +262,7 @@ public:
         for (int n = 0; n < N; ++n)
             refPower += static_cast<double>(ref[n]) * ref[n];
         refActive = refPower > startRefPower * N;
+        blocksSinceRef = refActive ? 0 : std::min(blocksSinceRef + 1, std::numeric_limits<int>::max() / 2);
 
         const int numCh = std::min(numChannels, static_cast<int>(channels.size()));
         if (!startDone)
@@ -235,6 +270,36 @@ public:
 
         for (int ch = 0; ch < numCh; ++ch)
             processChannel(channels[static_cast<size_t>(ch)], mic[ch], P);
+
+        pendingPartitions = P;
+        framePending = true;
+    }
+
+    // The update and first half of the constraint for the last beginFrame();
+    // does nothing if it has run.
+    void finishFrame()
+    {
+        if (!framePending)
+            return;
+        framePending = false;
+        completePending = true;
+        const int P = pendingPartitions;
+        for (auto& c : channels)
+            if (c.updatePending)
+                updateChannel(c, P, P / 2);
+    }
+
+    // The rest of the learning step; runs finishFrame() first if needed.
+    void completeFrame()
+    {
+        finishFrame();
+        if (!completePending)
+            return;
+        completePending = false;
+        const int P = pendingPartitions;
+        for (auto& c : channels)
+            if (c.constraintNext < P)
+                constrainPartitions(c, P);
 
         probeImpulseResponse(P);
 
@@ -246,7 +311,11 @@ public:
 private:
     struct Channel {
         std::vector<float> wr, wi, psi, psiS, py, pe, pout, gain, h, hPrev, hist;
+        std::vector<float> er, ei, d, dFull; // this frame's error spectrum and step sizes, for updateChannel
         bool hasPrev = false;
+        bool updatePending = false; // beginFrame left a learning step for finishFrame
+        int pendingStride = constraintStride;
+        int constraintNext = 0; // next partition the pending gradient constraint covers
         double accMic = 0.0;   // mic power summed over the PA-active start blocks
         double startBlockPower = 0.0; // this block's mic power, while the start is being measured
         float psiStart = psi0; // the uncertainty newly started partitions get
@@ -310,6 +379,8 @@ private:
         std::fill(c.h.begin(), c.h.end(), 0.0f); std::fill(c.hPrev.begin(), c.hPrev.end(), 0.0f);
         std::fill(c.hist.begin(), c.hist.end(), 0.0f);
         c.hasPrev = false;
+        c.updatePending = false;
+        c.constraintNext = std::numeric_limits<int>::max();
         c.startupBlocks = 0;
         ++restartCount;
         if (&c == &channels.front()) { // the delay readout reads channel 0's filter
@@ -526,6 +597,7 @@ private:
         std::copy_n(in, M, fftScratch.begin());
         std::fill(fftScratch.begin() + M, fftScratch.end(), 0.0f);
         fft->performRealOnlyForwardTransform(fftScratch.data(), true);
+        ++fftCount;
         for (int k = 0; k < K; ++k) {
             re[k] = fftScratch[static_cast<size_t>(2 * k)];
             im[k] = fftScratch[static_cast<size_t>(2 * k + 1)];
@@ -541,6 +613,7 @@ private:
             fftScratch2[static_cast<size_t>(2 * k + 1)] = im[k];
         }
         fft->performRealOnlyInverseTransform(fftScratch2.data());
+        ++fftCount;
         std::copy_n(fftScratch2.begin(), M, out);
     }
 
@@ -550,10 +623,57 @@ private:
         std::fill(fftScratch.begin(), fftScratch.end(), 0.0f);
         std::copy_n(block, N, fftScratch.begin() + N);
         fft->performRealOnlyForwardTransform(fftScratch.data(), true);
+        ++fftCount;
         for (int k = 0; k < K; ++k) {
             re[k] = fftScratch[static_cast<size_t>(2 * k)];
             im[k] = fftScratch[static_cast<size_t>(2 * k + 1)];
         }
+    }
+
+    // The Kalman update of all P partitions, then the gradient constraint
+    // on those of its partitions below constraintSplit.
+    void updateChannel(Channel& ch, int P, int constraintSplit)
+    {
+        ch.updatePending = false;
+        const float* __restrict Er = ch.er.data();
+        const float* __restrict Ei = ch.ei.data();
+        const float* __restrict D = ch.d.data();
+        const float* __restrict Dfull = ch.dFull.data();
+        // --- Kalman update, one pass: W += Kg E with Kg = Psi conj(X) / D
+        // (step-capped), then Psi <- A^2 (1 - c Re(Kg X)) Psi + (1 - A^2) |W|^2
+        // (with the uncapped Kg) ---
+        for (int p = 0; p < P; ++p) {
+            const int x = lagIndex(p) * K;
+            const float* __restrict Xr = xr.data() + x;
+            const float* __restrict Xi = xi.data() + x;
+            const float* __restrict X2 = x2.data() + x;
+            float* __restrict Wr = ch.wr.data() + p * K;
+            float* __restrict Wi = ch.wi.data() + p * K;
+            float* __restrict Ps = ch.psi.data() + p * K;
+            updatePartition(Wr, Wi, Ps, Xr, Xi, X2, Er, Ei, D, Dfull, K, procNoiseCapMul * ch.psiStart);
+        }
+        // Gradient constraint (keep each partition causal and N long), on one
+        // partition in constraintStride per block in turn: 2 FFTs per
+        // partition is most of the cost. The stability terms above keep the
+        // unconstrained half from drifting at this rate (see the constants).
+        ch.constraintNext = static_cast<int>(blockCount % static_cast<uint64_t>(ch.pendingStride));
+        constrainPartitions(ch, constraintSplit);
+    }
+
+    // The pending gradient constraint, from constraintNext up to (not
+    // including) partition end.
+    void constrainPartitions(Channel& ch, int end)
+    {
+        for (; ch.constraintNext < end; ch.constraintNext += ch.pendingStride) {
+            float* Wr = ch.wr.data() + ch.constraintNext * K;
+            float* Wi = ch.wi.data() + ch.constraintNext * K;
+            auto& w = timeScratch2;
+            inverse(Wr, Wi, w.data());
+            std::fill(w.begin() + N, w.end(), 0.0f);
+            forward(w.data(), Wr, Wi);
+        }
+        if (ch.constraintNext >= pendingPartitions)
+            ch.constraintNext = std::numeric_limits<int>::max(); // done for this frame
     }
 
     void processChannel(Channel& ch, float* y, int P)
@@ -627,10 +747,10 @@ private:
         // Spectra of the zero-padded mic, echo estimate and error blocks
         forwardPadded(y, yr.data(), yi.data());
         forwardPadded(yhat, ypr.data(), ypi.data());
-        float* __restrict Er = er.data();
-        float* __restrict Ei = ei.data();
-        float* __restrict D = dScratch.data();
-        float* __restrict Dfull = dFullScratch.data();
+        float* __restrict Er = ch.er.data();
+        float* __restrict Ei = ch.ei.data();
+        float* __restrict D = ch.d.data();
+        float* __restrict Dfull = ch.dFull.data();
         // Regularisation and excitation freeze (see the constants): bins whose
         // uncertainty power or reference power is far below the band mean
         // must not take steps of |E|/|X|.
@@ -652,37 +772,18 @@ private:
             D[k] = std::min(Dfull[k], stepCap / (U[k] + 1e-30f)); // the step cap, see the constants
         }
 
-        // --- Kalman update, one pass: W += Kg E with Kg = Psi conj(X) / D
-        // (step-capped), then Psi <- A^2 (1 - c Re(Kg X)) Psi + (1 - A^2) |W|^2
-        // (with the uncapped Kg) ---
-        // (none of it while the mic is silent, see above)
-        for (int p = 0; !micSilent && p < P; ++p) {
-            const int x = lagIndex(p) * K;
-            const float* __restrict Xr = xr.data() + x;
-            const float* __restrict Xi = xi.data() + x;
-            const float* __restrict X2 = x2.data() + x;
-            float* __restrict Wr = ch.wr.data() + p * K;
-            float* __restrict Wi = ch.wi.data() + p * K;
-            float* __restrict Ps = ch.psi.data() + p * K;
-            updatePartition(Wr, Wi, Ps, Xr, Xi, X2, Er, Ei, D, Dfull, K, procNoiseCapMul * ch.psiStart);
-        }
-        // Gradient constraint (keep each partition causal and N long), on one
-        // partition in constraintStride per block in turn: 2 FFTs per
-        // partition is most of the cost. The stability terms above keep the
-        // unconstrained half from drifting at this rate (see the constants).
-        // More often while the filter starts up (see the constants).
+        // The Kalman update and gradient constraint run in updateChannel
+        // (from finishFrame), none of it while the mic is silent (see above).
+        // While the filter starts up the constraint runs more often (see the
+        // constants), but only while there is PA in the filter's reach: with
+        // no PA in the last Tail Length the update moves nothing, and the
+        // start-up phase itself only counts PA blocks, so without this a
+        // mic with no PA would keep the extra cost forever.
         const bool startingUp = ch.startupBlocks * N < static_cast<int>(startupSeconds * fs);
         if (startingUp && refActive && !micSilent)
             ++ch.startupBlocks;
-        const int stride = startingUp ? startupConstraintStride : constraintStride;
-        for (int p = static_cast<int>(blockCount % static_cast<uint64_t>(stride)); !micSilent && p < P; p += stride) {
-            float* Wr = ch.wr.data() + p * K;
-            float* Wi = ch.wi.data() + p * K;
-            auto& w = timeScratch2;
-            inverse(Wr, Wi, w.data());
-            std::fill(w.begin() + N, w.end(), 0.0f);
-            forward(w.data(), Wr, Wi);
-        }
+        ch.pendingStride = startingUp && blocksSinceRef < P ? startupConstraintStride : constraintStride;
+        ch.updatePending = !micSilent;
 
         // --- divergence guard: never let the subtraction make a bin louder ---
         auto& m = mScratch;
@@ -690,7 +791,7 @@ private:
         for (int k = 0; k < K; ++k) {
             const size_t kk = static_cast<size_t>(k);
             const float y2 = yr[kk] * yr[kk] + yi[kk] * yi[kk];
-            const float e2 = er[kk] * er[kk] + ei[kk] * ei[kk];
+            const float e2 = ch.er[kk] * ch.er[kk] + ch.ei[kk] * ch.ei[kk];
             // While the mic is silent the averages hold (so the guard is right
             // as soon as it is back) and nothing is subtracted: the output
             // stays as silent as the input.
@@ -766,10 +867,15 @@ private:
     int head = 0;
     uint64_t blockCount = 0;
     uint64_t restartCount = 0;
+    uint64_t fftCount = 0;
     double accRef = 0.0;
     int accBlocks = 0;
     bool startDone = false;
     bool refActive = false; // this block's reference is above startRefPower
+    int blocksSinceRef = 0; // blocks since the last one with refActive
+    bool framePending = false; // beginFrame ran, finishFrame not yet
+    bool completePending = false; // finishFrame ran, completeFrame not yet
+    int pendingPartitions = 1;
     uint64_t probeIndex = 0;
     int probeLoBin = 1, probeHiBin = 1;
     std::vector<float> irPeak, probeR, probeI;
@@ -785,6 +891,6 @@ private:
 
     std::vector<float> xr, xi, x2, xbuf, xbar; // xbar: K floats, ~5 s average of the reference |X_k|^2
     std::vector<Channel> channels;
-    std::vector<float> fftScratch, fftScratch2, yhr, yhi, unc, er, ei, yr, yi, ypr, ypi, gl, cosTable;
-    std::vector<float> timeScratch, timeScratch2, dScratch, dFullScratch, mScratch, egScratchR, egScratchI;
+    std::vector<float> fftScratch, fftScratch2, yhr, yhi, unc, yr, yi, ypr, ypi, gl, cosTable;
+    std::vector<float> timeScratch, timeScratch2, mScratch, egScratchR, egScratchI;
 };
