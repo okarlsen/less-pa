@@ -2702,32 +2702,47 @@ static int runKalmanBench() {
 }
 
 // --cpu-sweep [--quick]: CPU per host callback in every situation the
-// plugin can be in, to find work that only happens sometimes. A DAW meter
-// shows the busiest callbacks, so the figure that matters is the busiest
-// 1% of callbacks (p99) as a share of the buffer's duration, not the
-// average.
+// plugin can be in, to find work that only happens sometimes (like the
+// start-up phase's extra work that never ended without PA, fixed in 1.1.8).
 //
-// Each configuration (rate, buffer, channels, Tail Length) is first run
-// in steady state (PA playing, after the start-up phase). Every other
-// situation is then compared with that same configuration's steady p99:
-// a situation whose busiest callbacks cost more than 2x steady state is
-// flagged. The start-up phase (the first 30 s of PA after a start or a
-// restart) does extra work on purpose (the cold-start noise fix) and is
-// allowed 3x. Ratios rather than absolute figures, so the result does not
-// depend on the machine. Absolute numbers are printed for reading off
-// headroom on a given Mac; "max" is printed but not judged, since one
-// callback can be stretched by the OS scheduler on a shared machine.
+// Each setup (rate, buffer, channels, Tail Length) is first run in steady
+// state: PA playing, after the start-up phase. Every other situation is
+// compared with that, two ways:
+//
+// - Work, judged: the FFTs the canceller runs (most of its cost) in the
+//   busiest host callback. That is exact and the same on every machine,
+//   so it can fail a test without false alarms. A situation more than
+//   1.25x steady state fails, except the start-up phase (the first 30 s of
+//   PA after a start or a restart), which does extra work on purpose (the
+//   cold-start noise fix) and is shown but not judged.
+// - Time, shown: the audio thread's CPU time per callback as a share of
+//   the buffer's duration, average and busiest 1% (what a DAW meter shows),
+//   for reading off headroom on a given Mac. Not judged: on a shared CI
+//   machine it moves with other jobs.
+#include <ctime>
 namespace cpusweep {
+// This thread's CPU time, so time the OS gives to other processes on a
+// shared machine doesn't count. Wall-clock time where that isn't available.
+inline double threadSeconds() {
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return static_cast<double>(ts.tv_sec) + 1e-9 * static_cast<double>(ts.tv_nsec);
+#else
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+}
+
 struct Config { int rate; int block; bool stereo; int tailIndex; };
 enum class Pa { steady, startup, none, pauses };
 enum class Mic { normal, silent, veryQuiet, copyOfRef };
 enum class Automation { none, tailFlip, hpfSweep, strengthSweep, bypassFlip };
 struct Situation {
     const char* name; Pa pa; Mic mic; bool bypass; bool suppressorOn; bool hpfOn; Automation automation; bool nanBursts;
-    double warmS = 32.0; // seconds before measuring; 0 measures the start-up
-    double limit = 2.0;  // allowed busiest-callback ratio to steady state
+    double warmS = 32.0;    // seconds before measuring; 0 measures the start-up
+    bool judged = true;     // false: extra work here is by design (start-up)
 };
-struct Result { double avgPct = 0, p99Pct = 0, maxPct = 0; };
+struct Result { double avgPct = 0, p99Pct = 0, maxPct = 0; uint64_t maxFfts = 0; };
 
 Result run(const Config& c, const Situation& s, double warmS, double measureS) {
     PAEchoCancellerAudioProcessor proc;
@@ -2757,6 +2772,7 @@ Result run(const Config& c, const Situation& s, double warmS, double measureS) {
     const int64_t end = measureFrom + static_cast<int64_t>(measureS * c.rate);
     const double periodS = static_cast<double>(c.block) / c.rate;
     std::vector<double> times;
+    uint64_t maxFfts = 0;
     times.reserve(static_cast<size_t>((end - measureFrom) / c.block + 1));
     int64_t callback = 0;
     for (int64_t pos = 0; pos < end; pos += c.block, ++callback) {
@@ -2807,12 +2823,17 @@ Result run(const Config& c, const Situation& s, double warmS, double measureS) {
             if (c.stereo) mainIn.setSample(1, i, rr);
             refIn.setSample(0, i, r);
         }
-        const auto t0 = std::chrono::steady_clock::now();
+        const uint64_t f0 = proc.getCancellerFftCount();
+        const double t0 = threadSeconds();
         proc.processBlock(buffer, midi);
-        const auto t1 = std::chrono::steady_clock::now();
-        if (pos >= measureFrom) times.push_back(std::chrono::duration<double>(t1 - t0).count());
+        const double t1 = threadSeconds();
+        if (pos >= measureFrom) {
+            times.push_back(t1 - t0);
+            maxFfts = std::max(maxFfts, proc.getCancellerFftCount() - f0);
+        }
     }
     Result res;
+    res.maxFfts = maxFfts;
     double sum = 0.0;
     for (double x : times) sum += x;
     std::sort(times.begin(), times.end());
@@ -2837,7 +2858,7 @@ static int runCpuSweep(bool quick) {
     }
     const Situation steady = { "PA playing (steady)", Pa::steady, Mic::normal, false, true, true, Automation::none, false };
     const Situation situations[] = {
-        { "first 30 s of PA (start-up)",    Pa::startup, Mic::normal,    false, true,  true,  Automation::none, false, 0.0, 3.0 },
+        { "first 30 s of PA (start-up)",    Pa::startup, Mic::normal,    false, true,  true,  Automation::none, false, 0.0, false },
         { "no PA, mic only",                Pa::none,    Mic::normal,    false, true,  true,  Automation::none, false },
         { "PA with 3 s pauses",             Pa::pauses,  Mic::normal,    false, true,  true,  Automation::none, false, 50.0 }, // start-up done (30 s of PA)
         { "mic silent (muted input)",       Pa::steady,  Mic::silent,    false, true,  true,  Automation::none, false },
@@ -2850,29 +2871,32 @@ static int runCpuSweep(bool quick) {
         { "Tail Length changed every 1 s",  Pa::steady,  Mic::normal,    false, true,  true,  Automation::tailFlip, false },
         { "HPF frequency automated",        Pa::steady,  Mic::normal,    false, true,  true,  Automation::hpfSweep, false },
         { "Strength automated",             Pa::steady,  Mic::normal,    false, true,  true,  Automation::strengthSweep, false },
-        { "NaN in the mic once a second",   Pa::steady,  Mic::normal,    false, true,  true,  Automation::none, true, 32.0, 3.0 }, // each restart re-enters start-up
+        { "NaN in the mic once a second",   Pa::steady,  Mic::normal,    false, true,  true,  Automation::none, true, 32.0, false }, // each restart re-enters start-up
     };
     const double warmS = 32.0, measureS = quick ? 5.0 : 8.0;
     const double startupS = 30.0;
+    const double workLimit = 1.25;
     int flagged = 0;
     for (const auto& c : configs) {
         printf("\n=== CPU per callback: %.1f kHz, %d-sample buffer, %s, Tail %s ===\n",
                c.rate / 1000.0, c.block, c.stereo ? "stereo" : "mono", tailNames[c.tailIndex]);
-        printf("  %-32s %8s %8s %8s %8s\n", "situation", "average", "busiest", "max", "vs steady");
+        printf("  %-32s %8s %8s %8s %10s\n", "situation", "average", "busiest", "max", "work");
         const Result ref = run(c, steady, warmS, measureS);
-        printf("  %-32s %7.1f%% %7.1f%% %7.1f%% %8s\n", steady.name, ref.avgPct, ref.p99Pct, ref.maxPct, "1.00x");
+        printf("  %-32s %7.1f%% %7.1f%% %7.1f%% %9.2fx\n", steady.name, ref.avgPct, ref.p99Pct, ref.maxPct, 1.0);
         for (const auto& s : situations) {
             const bool startup = s.warmS <= 0.0;
             const Result r = run(c, s, s.warmS, startup ? startupS : measureS);
-            const double ratio = r.p99Pct / std::max(ref.p99Pct, 1e-9);
-            const bool flag = ratio > s.limit;
+            const double work = static_cast<double>(r.maxFfts) / static_cast<double>(std::max<uint64_t>(ref.maxFfts, 1));
+            const bool flag = s.judged && work > workLimit;
             flagged += flag ? 1 : 0;
-            printf("  %-32s %7.1f%% %7.1f%% %7.1f%% %7.2fx%s\n", s.name, r.avgPct, r.p99Pct, r.maxPct, ratio, flag ? "  <-- CHECK" : "");
+            printf("  %-32s %7.1f%% %7.1f%% %7.1f%% %9.2fx%s\n", s.name, r.avgPct, r.p99Pct, r.maxPct, work,
+                   flag ? "  <-- CHECK" : (s.judged ? "" : "  (by design)"));
         }
     }
-    printf("\n'busiest' = the busiest 1%% of callbacks, as a share of the buffer's duration (what a DAW meter shows).\n");
-    printf("%s\n", flagged == 0 ? "NO CPU SPIKES: every situation within its limit of steady state"
-                                 : "CPU SPIKES: some situations cost more than their limit -- see CHECK above");
+    printf("\naverage, busiest (the busiest 1%% of callbacks, what a DAW meter shows) and max: CPU time per callback\n"
+           "as a share of the buffer's duration. work: the canceller's FFTs in the busiest callback vs steady state.\n");
+    printf("%s\n", flagged == 0 ? "NO HIDDEN EXTRA WORK: every situation within 1.25x of steady state"
+                                 : "HIDDEN EXTRA WORK: some situations do more than 1.25x steady state -- see CHECK above");
     return flagged == 0 ? 0 : 1;
 }
 
@@ -3961,6 +3985,7 @@ int main(int argc, char* argv[]) {
     allPass = testMicGapThroughPlugin(48000) && allPass;
     allPass = testExtraOutputChannels(48000) && allPass;
     for (int rate : { 48000, 96000 }) allPass = testSmallBuffersSplitWorkSameOutput(rate) && allPass;
+    allPass = (runCpuSweep(/*quick*/ true) == 0) && allPass; // no situation does hidden extra work
 
     printf("\n%s\n", allPass ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
 

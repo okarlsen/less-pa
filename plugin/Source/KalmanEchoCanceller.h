@@ -191,6 +191,11 @@ public:
     // (see processChannel). Audio thread only; for tests.
     uint64_t getRestartCount() const noexcept { return restartCount; }
 
+    // FFTs run so far, the bulk of the canceller's work: a machine-independent
+    // measure of how much work a frame or a host callback did. Audio thread
+    // only; for tests.
+    uint64_t getFftCount() const noexcept { return fftCount; }
+
     // Tests and the --long run: total filter energy sum |W|^2 and the mean
     // uncertainty of channel 0. Not real-time safe to call concurrently.
     void getFilterStats(double& energy, double& meanUncertainty) const
@@ -592,6 +597,7 @@ private:
         std::copy_n(in, M, fftScratch.begin());
         std::fill(fftScratch.begin() + M, fftScratch.end(), 0.0f);
         fft->performRealOnlyForwardTransform(fftScratch.data(), true);
+        ++fftCount;
         for (int k = 0; k < K; ++k) {
             re[k] = fftScratch[static_cast<size_t>(2 * k)];
             im[k] = fftScratch[static_cast<size_t>(2 * k + 1)];
@@ -607,6 +613,7 @@ private:
             fftScratch2[static_cast<size_t>(2 * k + 1)] = im[k];
         }
         fft->performRealOnlyInverseTransform(fftScratch2.data());
+        ++fftCount;
         std::copy_n(fftScratch2.begin(), M, out);
     }
 
@@ -616,6 +623,7 @@ private:
         std::fill(fftScratch.begin(), fftScratch.end(), 0.0f);
         std::copy_n(block, N, fftScratch.begin() + N);
         fft->performRealOnlyForwardTransform(fftScratch.data(), true);
+        ++fftCount;
         for (int k = 0; k < K; ++k) {
             re[k] = fftScratch[static_cast<size_t>(2 * k)];
             im[k] = fftScratch[static_cast<size_t>(2 * k + 1)];
@@ -859,6 +867,7 @@ private:
     int head = 0;
     uint64_t blockCount = 0;
     uint64_t restartCount = 0;
+    uint64_t fftCount = 0;
     double accRef = 0.0;
     int accBlocks = 0;
     bool startDone = false;

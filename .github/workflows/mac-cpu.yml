@@ -1,11 +1,11 @@
-# CPU spikes on real Macs: Intel and Apple Silicon.
+# CPU on real Macs: Intel and Apple Silicon.
 #
 # Runs the test harness's --cpu-sweep on GitHub's Intel Mac and Apple
-# Silicon Mac: CPU per host callback in every situation the plugin can be
-# in (start-up, no PA, PA pauses, silent mic, bypass, automation, ...),
-# each compared with steady state. A situation that costs much more than
-# steady state fails the job. The tables are on the run's summary page,
-# with absolute figures for headroom on each kind of Mac.
+# Silicon Mac, six setups (rates, buffers, stereo, Tail Length) by 15
+# situations (start-up, no PA, PA pauses, silent mic, bypass, automation,
+# ...). It fails if any situation does more work than steady state (counted
+# exactly, the same on every machine). The tables, with CPU time per
+# callback for headroom on each kind of Mac, are on the run's summary page.
 #
 # On pull requests that touch the plugin source, and by hand.
 
