@@ -2701,6 +2701,181 @@ static int runKalmanBench() {
     return 0;
 }
 
+// --cpu-sweep [--quick]: CPU per host callback in every situation the
+// plugin can be in, to find work that only happens sometimes. A DAW meter
+// shows the busiest callbacks, so the figure that matters is the busiest
+// 1% of callbacks (p99) as a share of the buffer's duration, not the
+// average.
+//
+// Each configuration (rate, buffer, channels, Tail Length) is first run
+// in steady state (PA playing, after the start-up phase). Every other
+// situation is then compared with that same configuration's steady p99:
+// a situation whose busiest callbacks cost more than 2x steady state is
+// flagged. The start-up phase (the first 30 s of PA after a start or a
+// restart) does extra work on purpose (the cold-start noise fix) and is
+// allowed 3x. Ratios rather than absolute figures, so the result does not
+// depend on the machine. Absolute numbers are printed for reading off
+// headroom on a given Mac; "max" is printed but not judged, since one
+// callback can be stretched by the OS scheduler on a shared machine.
+namespace cpusweep {
+struct Config { int rate; int block; bool stereo; int tailIndex; };
+enum class Pa { steady, startup, none, pauses };
+enum class Mic { normal, silent, veryQuiet, copyOfRef };
+enum class Automation { none, tailFlip, hpfSweep, strengthSweep, bypassFlip };
+struct Situation {
+    const char* name; Pa pa; Mic mic; bool bypass; bool suppressorOn; bool hpfOn; Automation automation; bool nanBursts;
+    double warmS = 32.0; // seconds before measuring; 0 measures the start-up
+    double limit = 2.0;  // allowed busiest-callback ratio to steady state
+};
+struct Result { double avgPct = 0, p99Pct = 0, maxPct = 0; };
+
+Result run(const Config& c, const Situation& s, double warmS, double measureS) {
+    PAEchoCancellerAudioProcessor proc;
+    PAEchoCancellerAudioProcessor::BusesLayout layout;
+    const auto mainSet = c.stereo ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::mono();
+    layout.inputBuses.add(mainSet);
+    layout.inputBuses.add(juce::AudioChannelSet::mono());
+    layout.outputBuses.add(mainSet);
+    proc.setBusesLayout(layout);
+    auto setParam = [](juce::RangedAudioParameter* p, float plain) { p->setValueNotifyingHost(p->convertTo0to1(plain)); };
+    setParam(proc.getTailLengthParameter(), static_cast<float>(c.tailIndex));
+    proc.getBypassParameter()->setValueNotifyingHost(s.bypass ? 1.0f : 0.0f);
+    setParam(proc.getSuppressorEnabledParameter(), s.suppressorOn ? 1.0f : 0.0f);
+    setParam(proc.getHpfEnabledParameter(), s.hpfOn ? 1.0f : 0.0f);
+    proc.setNonRealtime(false);
+    proc.prepareToPlay(c.rate, c.block);
+
+    const int totalChannels = std::max(proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer(totalChannels, c.block);
+    juce::MidiBuffer midi;
+    std::mt19937 rng(9);
+    std::normal_distribution<float> nd(0.0f, 0.1f);
+    std::vector<float> refHist(static_cast<size_t>(c.rate), 0.0f);
+    size_t w = 0;
+    const size_t d1 = static_cast<size_t>(c.rate / 100), d2 = static_cast<size_t>(c.rate / 70);
+    const int64_t measureFrom = static_cast<int64_t>(warmS * c.rate);
+    const int64_t end = measureFrom + static_cast<int64_t>(measureS * c.rate);
+    const double periodS = static_cast<double>(c.block) / c.rate;
+    std::vector<double> times;
+    times.reserve(static_cast<size_t>((end - measureFrom) / c.block + 1));
+    int64_t callback = 0;
+    for (int64_t pos = 0; pos < end; pos += c.block, ++callback) {
+        const double t = static_cast<double>(pos) / c.rate;
+        // Automation, through the public parameter API as a host would.
+        switch (s.automation) {
+            case Automation::tailFlip:
+                if (callback % static_cast<int64_t>(c.rate / c.block) == 0) // once a second
+                    setParam(proc.getTailLengthParameter(), static_cast<float>((callback / (c.rate / c.block)) % 2 == 0 ? c.tailIndex : 0));
+                break;
+            case Automation::hpfSweep:
+                setParam(proc.getHpfFrequencyParameter(), static_cast<float>(165.0 + 135.0 * std::sin(t * 3.0)));
+                break;
+            case Automation::strengthSweep:
+                setParam(proc.getAmountParameter(), static_cast<float>(50.0 + 50.0 * std::sin(t * 3.0)));
+                break;
+            case Automation::bypassFlip:
+                if (callback % static_cast<int64_t>(c.rate / c.block / 2) == 0)
+                    proc.getBypassParameter()->setValueNotifyingHost((callback / (c.rate / c.block / 2)) % 2 == 0 ? 0.0f : 1.0f);
+                break;
+            case Automation::none: break;
+        }
+        bool paOn = true;
+        switch (s.pa) {
+            case Pa::none: paOn = false; break;
+            case Pa::pauses: paOn = std::fmod(t, 9.0) < 6.0; break; // songs with 3 s gaps
+            case Pa::steady: case Pa::startup: break;
+        }
+        buffer.clear();
+        auto mainIn = proc.getBusBuffer(buffer, true, 0);
+        auto refIn = proc.getBusBuffer(buffer, true, 1);
+        const bool nanBlock = s.nanBursts && callback % static_cast<int64_t>(c.rate / c.block) == 7;
+        for (int i = 0; i < c.block; ++i) {
+            const float r = paOn ? 2.0f * nd(rng) : 0.0f;
+            refHist[w % refHist.size()] = r;
+            const float e1 = 0.5f * refHist[(w + refHist.size() - d1) % refHist.size()];
+            const float e2 = 0.3f * refHist[(w + refHist.size() - d2) % refHist.size()];
+            ++w;
+            float l = e1 + nd(rng), rr = e2 + nd(rng);
+            switch (s.mic) {
+                case Mic::silent: l = rr = 0.0f; break;
+                case Mic::veryQuiet: l *= 1e-6f; rr *= 1e-6f; break; // -120 dB: denormal territory
+                case Mic::copyOfRef: l = rr = r; break;              // Logic's "Side Chain: None"
+                case Mic::normal: break;
+            }
+            if (nanBlock && i == 3) l = std::numeric_limits<float>::quiet_NaN();
+            mainIn.setSample(0, i, l);
+            if (c.stereo) mainIn.setSample(1, i, rr);
+            refIn.setSample(0, i, r);
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        proc.processBlock(buffer, midi);
+        const auto t1 = std::chrono::steady_clock::now();
+        if (pos >= measureFrom) times.push_back(std::chrono::duration<double>(t1 - t0).count());
+    }
+    Result res;
+    double sum = 0.0;
+    for (double x : times) sum += x;
+    std::sort(times.begin(), times.end());
+    res.avgPct = 100.0 * sum / (static_cast<double>(times.size()) * periodS);
+    res.p99Pct = 100.0 * times[static_cast<size_t>(0.99 * static_cast<double>(times.size() - 1))] / periodS;
+    res.maxPct = 100.0 * times.back() / periodS;
+    return res;
+}
+} // namespace cpusweep
+
+static int runCpuSweep(bool quick) {
+    using namespace cpusweep;
+    juce::ScopedNoDenormals noDenormals; // hosts usually set this too; processBlock sets it regardless
+    static const char* tailNames[] = { "50 ms", "200 ms", "400 ms", "800 ms" };
+    std::vector<Config> configs = { { 48000, 64, false, 3 } };
+    if (!quick) {
+        configs.push_back({ 48000, 64, true, 3 });
+        configs.push_back({ 96000, 64, false, 3 });
+        configs.push_back({ 44100, 32, false, 3 });
+        configs.push_back({ 48000, 256, false, 3 });
+        configs.push_back({ 48000, 64, false, 0 });
+    }
+    const Situation steady = { "PA playing (steady)", Pa::steady, Mic::normal, false, true, true, Automation::none, false };
+    const Situation situations[] = {
+        { "first 30 s of PA (start-up)",    Pa::startup, Mic::normal,    false, true,  true,  Automation::none, false, 0.0, 3.0 },
+        { "no PA, mic only",                Pa::none,    Mic::normal,    false, true,  true,  Automation::none, false },
+        { "PA with 3 s pauses",             Pa::pauses,  Mic::normal,    false, true,  true,  Automation::none, false, 50.0 }, // start-up done (30 s of PA)
+        { "mic silent (muted input)",       Pa::steady,  Mic::silent,    false, true,  true,  Automation::none, false },
+        { "mic at -120 dB",                 Pa::steady,  Mic::veryQuiet, false, true,  true,  Automation::none, false },
+        { "sidechain is a copy of the mic", Pa::steady,  Mic::copyOfRef, false, true,  true,  Automation::none, false },
+        { "bypassed",                       Pa::steady,  Mic::normal,    true,  true,  true,  Automation::none, false },
+        { "bypass toggled twice a second",  Pa::steady,  Mic::normal,    false, true,  true,  Automation::bypassFlip, false },
+        { "Bleed Suppressor off",           Pa::steady,  Mic::normal,    false, false, true,  Automation::none, false },
+        { "HPF off",                        Pa::steady,  Mic::normal,    false, true,  false, Automation::none, false },
+        { "Tail Length changed every 1 s",  Pa::steady,  Mic::normal,    false, true,  true,  Automation::tailFlip, false },
+        { "HPF frequency automated",        Pa::steady,  Mic::normal,    false, true,  true,  Automation::hpfSweep, false },
+        { "Strength automated",             Pa::steady,  Mic::normal,    false, true,  true,  Automation::strengthSweep, false },
+        { "NaN in the mic once a second",   Pa::steady,  Mic::normal,    false, true,  true,  Automation::none, true, 32.0, 3.0 }, // each restart re-enters start-up
+    };
+    const double warmS = 32.0, measureS = quick ? 5.0 : 8.0;
+    const double startupS = 30.0;
+    int flagged = 0;
+    for (const auto& c : configs) {
+        printf("\n=== CPU per callback: %.1f kHz, %d-sample buffer, %s, Tail %s ===\n",
+               c.rate / 1000.0, c.block, c.stereo ? "stereo" : "mono", tailNames[c.tailIndex]);
+        printf("  %-32s %8s %8s %8s %8s\n", "situation", "average", "busiest", "max", "vs steady");
+        const Result ref = run(c, steady, warmS, measureS);
+        printf("  %-32s %7.1f%% %7.1f%% %7.1f%% %8s\n", steady.name, ref.avgPct, ref.p99Pct, ref.maxPct, "1.00x");
+        for (const auto& s : situations) {
+            const bool startup = s.warmS <= 0.0;
+            const Result r = run(c, s, s.warmS, startup ? startupS : measureS);
+            const double ratio = r.p99Pct / std::max(ref.p99Pct, 1e-9);
+            const bool flag = ratio > s.limit;
+            flagged += flag ? 1 : 0;
+            printf("  %-32s %7.1f%% %7.1f%% %7.1f%% %7.2fx%s\n", s.name, r.avgPct, r.p99Pct, r.maxPct, ratio, flag ? "  <-- CHECK" : "");
+        }
+    }
+    printf("\n'busiest' = the busiest 1%% of callbacks, as a share of the buffer's duration (what a DAW meter shows).\n");
+    printf("%s\n", flagged == 0 ? "NO CPU SPIKES: every situation within its limit of steady state"
+                                 : "CPU SPIKES: some situations cost more than their limit -- see CHECK above");
+    return flagged == 0 ? 0 : 1;
+}
+
 // End-to-end latency check, for phase-aligned mixing of ambience mics: the
 // delay the plugin actually adds must equal what it reports to the host,
 // in every situation a host can put it in -- every sample rate, any block
@@ -3726,6 +3901,9 @@ int main(int argc, char* argv[]) {
         printf("\n%s\n", ok ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
         return ok ? 0 : 1;
     }
+
+    if (argc >= 2 && std::string(argv[1]) == "--cpu-sweep")
+        return runCpuSweep(argc >= 3 && std::string(argv[2]) == "--quick");
 
     // --small-buffers: just the split-work bit-identity test.
     if (argc >= 2 && std::string(argv[1]) == "--small-buffers") {

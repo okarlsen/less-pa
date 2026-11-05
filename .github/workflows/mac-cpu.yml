@@ -1,0 +1,61 @@
+# CPU spikes on real Macs: Intel and Apple Silicon.
+#
+# Runs the test harness's --cpu-sweep on GitHub's Intel Mac and Apple
+# Silicon Mac: CPU per host callback in every situation the plugin can be
+# in (start-up, no PA, PA pauses, silent mic, bypass, automation, ...),
+# each compared with steady state. A situation that costs much more than
+# steady state fails the job. The tables are on the run's summary page,
+# with absolute figures for headroom on each kind of Mac.
+#
+# On pull requests that touch the plugin source, and by hand.
+
+name: Mac CPU
+
+on:
+  pull_request:
+    paths: ['plugin/Source/**', 'plugin/CMakeLists.txt', '.github/workflows/mac-cpu.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-cpu-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-sweep:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x86_64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # One architecture per runner, built as released (Release, LTO).
+      - name: Build test harness
+        run: |
+          cmake -S plugin -B plugin/build -DLESSPA_INSTALL_AFTER_BUILD=OFF -DLESSPA_BUILD_LABEL= -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          cmake --build plugin/build --target PAEchoCancellerVerify --parallel
+
+      - name: CPU sweep
+        run: |
+          exe="$(find plugin/build/PAEchoCancellerVerify_artefacts/Release -type f -perm -u+x | head -n 1)"
+          {
+            echo "### $(sysctl -n machdep.cpu.brand_string), ${{ matrix.arch }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          "$exe" --cpu-sweep | tee sweep.log
+          status=${PIPESTATUS[0]}
+          set -e
+          { cat sweep.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
