@@ -2967,6 +2967,41 @@ bool testMicGapThroughPlugin(int sampleRate) {
     return pass;
 }
 
+// Pro Tools: the Reference bus must not be disableable under AAX, or JUCE's
+// AAX wrapper toggles it (muting output and re-preparing) whenever a process
+// call comes without a key input buffer -- which AudioSuite Preview does.
+// Other formats keep allowing a disabled Reference bus (Logic, hosts with
+// no sidechain).
+bool testAaxReferenceBusAlwaysOn() {
+    printf("\n=== AAX: Reference (key input) bus always on ===\n");
+    auto layoutWith = [](juce::AudioChannelSet main, juce::AudioChannelSet ref) {
+        PAEchoCancellerAudioProcessor::BusesLayout l;
+        l.inputBuses.add(main);
+        l.inputBuses.add(ref);
+        l.outputBuses.add(main);
+        return l;
+    };
+    bool pass = true;
+    for (auto type : { juce::AudioProcessor::wrapperType_AAX, juce::AudioProcessor::wrapperType_AudioUnit,
+                       juce::AudioProcessor::wrapperType_VST3, juce::AudioProcessor::wrapperType_Undefined }) {
+        juce::AudioProcessor::setTypeOfNextNewPlugin(type);
+        PAEchoCancellerAudioProcessor proc;
+        juce::AudioProcessor::setTypeOfNextNewPlugin(juce::AudioProcessor::wrapperType_Undefined);
+        const bool aax = type == juce::AudioProcessor::wrapperType_AAX;
+        for (auto main : { juce::AudioChannelSet::mono(), juce::AudioChannelSet::stereo() }) {
+            const bool withRef = proc.checkBusesLayoutSupported(layoutWith(main, juce::AudioChannelSet::mono()));
+            const bool noRef = proc.checkBusesLayoutSupported(layoutWith(main, juce::AudioChannelSet::disabled()));
+            const bool ok = withRef && noRef == !aax;
+            printf("  %-12s %-6s: Reference on %s, off %s%s\n", proc.getWrapperTypeDescription(type),
+                   main == juce::AudioChannelSet::mono() ? "mono" : "stereo",
+                   withRef ? "allowed" : "REFUSED", noRef ? "allowed" : "refused", ok ? "" : "  <-- CHECK");
+            pass = pass && ok;
+        }
+    }
+    printf("  %s\n", pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 // isBusesLayoutSupported keeps the output as wide as the input, but a host
 // can still hand a wider buffer to a processor prepared narrower (a layout
 // change without prepareToPlay). The FIFO reads are destructive, so each
@@ -3543,6 +3578,9 @@ int main(int argc, char* argv[]) {
     }
     // --latency-matrix: the full latency sweep (all rates and block sizes),
     // one line per case.
+    if (argc >= 2 && std::string(argv[1]) == "--aax-bus")
+        return testAaxReferenceBusAlwaysOn() ? 0 : 1;
+
     if (argc >= 2 && std::string(argv[1]) == "--latency-matrix")
         return latencymatrix::runMatrix(true, true) ? 0 : 1;
     if (argc >= 2 && std::string(argv[1]) == "--bench-kalman")
@@ -3666,6 +3704,7 @@ int main(int argc, char* argv[]) {
         for (float gain : { 0.3f, 1.0f }) allPass = testMicGapKeepsFilter(rate, gain) && allPass;
     allPass = testMicGapThroughPlugin(48000) && allPass;
     allPass = testExtraOutputChannels(48000) && allPass;
+    allPass = testAaxReferenceBusAlwaysOn() && allPass;
 
     printf("\n%s\n", allPass ? "ALL TESTS PASS" : "SOME TESTS FAILED -- see CHECK above");
 

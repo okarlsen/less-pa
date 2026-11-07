@@ -254,6 +254,17 @@ bool PAEchoCancellerAudioProcessor::isBusesLayoutSupported(const BusesLayout& la
         const auto reference = layouts.inputBuses[1];
         if (!reference.isDisabled() && reference != juce::AudioChannelSet::mono())
             return false;
+        // Pro Tools: the Reference (key input) bus is always on. If it may
+        // be disabled, JUCE's AAX wrapper switches it on and off to follow
+        // whether each process call carries a key input, and every switch
+        // mutes the output until the message thread re-prepares the plugin
+        // (which also resets the canceller). In AudioSuite Preview, Pro Tools
+        // can start without the key buffer, so the first preview played the
+        // mic with no PA reference. With the bus always on, JUCE feeds
+        // silence when no key input is selected, which the plugin already
+        // treats as "no PA" (mic passed through). No latency change.
+        if (wrapperType == wrapperType_AAX && reference.isDisabled())
+            return false;
     }
 
     return true;
