@@ -143,6 +143,7 @@ public:
         probeIndex = 0;
         recentDelays.fill(-1);
         recentCount = 0;
+        heldDelaySamples = -1;
         accRef = 0.0;
         accBlocks = 0;
         startDone = false;
@@ -387,6 +388,7 @@ private:
             std::fill(irPeak.begin(), irPeak.end(), 0.0f);
             std::fill(irPeakIdx.begin(), irPeakIdx.end(), 0);
             recentDelays.fill(-1);
+            heldDelaySamples = -1;
         }
     }
 
@@ -494,7 +496,9 @@ private:
     // direct sound rather than low-frequency room build-up, and its peak is
     // kept. The readout is the overall peak's lag, at sample resolution,
     // shown only when it clearly stands out, and as the median of the last
-    // few estimates so a single odd one never reaches the display.
+    // few estimates so a single odd one never reaches the display. The shown
+    // value is then held until the median moves by more than 1 ms, so a path
+    // that sits between two whole ms (e.g. 3.8 ms) reads steadily.
     void probeImpulseResponse(int P)
     {
         const int q = static_cast<int>(probeIndex++ % static_cast<uint64_t>(P));
@@ -539,9 +543,9 @@ private:
                 best = q;
                 break;
             }
-        const int estimate = found ? static_cast<int>(std::lround(
-                                         1000.0 * (best * N + irPeakIdx[static_cast<size_t>(best)]) / fs))
-                                   : -1;
+        // In samples: rounding to whole ms here would turn a path at 3.8 ms
+        // into 3 or 5 ms readings as the peak moves by a sample or two.
+        const int estimate = found ? best * N + irPeakIdx[static_cast<size_t>(best)] : -1;
         recentDelays[static_cast<size_t>(recentCount++ % recentLen)] = estimate;
 
         std::array<int, recentLen> sorted{};
@@ -549,13 +553,29 @@ private:
         for (int d : recentDelays)
             if (d >= 0)
                 sorted[static_cast<size_t>(n++)] = d;
-        int shown = -1;
+        int median = -1;
         if (n > recentLen / 2) { // a majority of recent estimates found one
             std::sort(sorted.begin(), sorted.begin() + n);
-            shown = sorted[static_cast<size_t>(n / 2)];
+            median = sorted[static_cast<size_t>(n / 2)];
         }
-        delayEstimateMs.store(shown, std::memory_order_relaxed);
+        heldDelaySamples = holdDelay(heldDelaySamples, median, fs * holdHysteresisMs / 1000.0);
+        delayEstimateMs.store(heldDelaySamples < 0 ? -1 : static_cast<int>(std::lround(1000.0 * heldDelaySamples / fs)),
+                              std::memory_order_relaxed);
     }
+
+public:
+    // The readout's hold: keep showing the held delay until the new
+    // (median) estimate differs from it by more than `hysteresis` samples.
+    // Losing the PA ("--") and finding it again always go through at once.
+    static int holdDelay(int held, int estimate, double hysteresis) noexcept
+    {
+        if (held < 0 || estimate < 0)
+            return estimate;
+        return std::abs(estimate - held) > hysteresis ? estimate : held;
+    }
+    static constexpr double holdHysteresisMs = 1.0;
+
+private:
 
     // The two per-partition inner loops, as free-standing kernels so the
     // compiler can vectorise them (inline in the nest it gives up on the
@@ -881,8 +901,9 @@ private:
     std::vector<float> irPeak, probeR, probeI;
     std::vector<int> irPeakIdx;
     static constexpr int recentLen = 9; // ~2.25 s of readouts
-    std::array<int, recentLen> recentDelays{};
+    std::array<int, recentLen> recentDelays{}; // in samples, -1 = none found
     uint32_t recentCount = 0;
+    int heldDelaySamples = -1; // what the readout shows, in samples
     std::unique_ptr<juce::dsp::FFT> fft;
     SuppressorSettings supp;
     float suppSmooth = 0.875f; // exp(-N / (responseMs * fs)), set by setSuppressor

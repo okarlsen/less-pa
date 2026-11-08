@@ -1609,6 +1609,39 @@ bool testDelayStatsExposed(int sampleRate) {
     return pass;
 }
 
+// The PA delay readout's hold: estimates wobbling within 1 ms of the shown
+// value (a 3.8 ms path read as 3.7-4.6 ms) keep the display still, a real
+// move of more than 1 ms (a far speaker taking over at 13 ms) goes through
+// at once, and losing or finding the PA ("--") is never held back.
+bool testDelayReadoutHold() {
+    printf("\n=== PA delay readout hold test ===\n");
+    const double fs = 48000.0;
+    const double hyst = fs * KalmanEchoCanceller::holdHysteresisMs / 1000.0; // 48 samples
+    auto ms = [fs](int samples) { return samples < 0 ? -1 : static_cast<int>(std::lround(1000.0 * samples / fs)); };
+    bool pass = true;
+    int held = -1;
+    // 3.8 ms = 182 samples, then wobble between 3.5 and 4.6 ms
+    const int wobble[] = { 182, 168, 221, 175, 200, 190, 170, 215 };
+    held = KalmanEchoCanceller::holdDelay(held, wobble[0], hyst);
+    for (int e : wobble) {
+        held = KalmanEchoCanceller::holdDelay(held, e, hyst);
+        pass = pass && ms(held) == 4;
+    }
+    printf("  3.5-4.6 ms wobble around 3.8 ms shows: %d ms\n", ms(held));
+    held = KalmanEchoCanceller::holdDelay(held, 624, hyst); // 13 ms
+    printf("  move to 13 ms shows: %d ms\n", ms(held));
+    pass = pass && ms(held) == 13;
+    held = KalmanEchoCanceller::holdDelay(held, -1, hyst);
+    pass = pass && held == -1;
+    held = KalmanEchoCanceller::holdDelay(held, 182, hyst);
+    pass = pass && ms(held) == 4;
+    held = KalmanEchoCanceller::holdDelay(held, 182 + 49, hyst); // just over 1 ms
+    pass = pass && held == 182 + 49;
+    printf("  %s\n", pass ? "PASS -- readout holds within 1 ms and follows real moves"
+                          : "FAIL -- readout hold wrong");
+    return pass;
+}
+
 // Confirms getStateInformation/setStateInformation round-trip every
 // parameter, so a session reload restores what the user dialed in.
 bool testStateSaveRestore() {
@@ -3976,6 +4009,7 @@ int main(int argc, char* argv[]) {
     for (int rate : rates) allPass = testLiveTailLengthChangeNonBlocking(rate) && allPass;
     allPass = testFastBounceTailLengthAppliedPromptly(48000) && allPass;
     allPass = testDelayStatsExposed(48000) && allPass;
+    allPass = testDelayReadoutHold() && allPass;
     for (int rate : rates) allPass = testProcessBlockNeverAllocates(rate) && allPass;
     allPass = testCorruptStateRestore() && allPass;
     for (int rate : rates) allPass = testCancellerRestartsAfterBlowUp(rate) && allPass;
