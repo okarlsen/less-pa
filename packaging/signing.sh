@@ -19,6 +19,12 @@
 #         --apple-id <apple-id> --team-id <team-id> --password <app-specific-password>
 #
 # See the "Code signing" section of BUILDING.md.
+#
+# PACE (AAX) signing: PACE's tools and documentation are confidential under
+# the PACE license agreement, and this repo is public. Never commit wraptool,
+# PACE docs, or iLok/account identifiers here -- keep them in packaging/pace/
+# (gitignored) or outside the repo, and read credentials from the environment
+# or keychain, as for notarization above.
 
 # Overridable so a fork can sign with its own identities without editing
 # the scripts. Defaults are SGTM's (Team ID ZVP9U3LWAJ).
@@ -126,6 +132,49 @@ lesspa_sign_bundles() {
         codesign --verify --deep --strict --verbose=2 "$bundle"
         echo "  signed: $(basename "$bundle")"
     done
+}
+
+# PACE-sign an AAX bundle in place with wraptool, so Pro Tools will load it.
+#
+# wraptool applies the Developer ID signature itself (hardened, via
+# --dsigharden) together with PACE's own, so the AAX must NOT go through
+# lesspa_sign_bundles afterwards: a second `codesign --force` would strip
+# the PACE signature. Notarize and staple it with
+# lesspa_notarize_and_staple_bundles instead.
+#
+# The iLok account ID and wrap config GUID come from the environment, or
+# from the gitignored packaging/pace/pace.env. The iLok password is never
+# passed here: wraptool keeps its own copy in the keychain after the first
+# run that supplies one (see `wraptool --help`).
+: "${LESSPA_WRAPTOOL:=/Applications/PACEAntiPiracy/Eden/Fusion/Current/bin/wraptool}"
+
+lesspa_pace_sign_aax() {
+    local bundle="$1"
+    local pace_env
+    pace_env="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pace/pace.env"
+    # shellcheck source=/dev/null
+    [[ -f "$pace_env" ]] && source "$pace_env"
+
+    if [[ ! -x "$LESSPA_WRAPTOOL" ]]; then
+        echo "error: wraptool not found at $LESSPA_WRAPTOOL" >&2
+        echo "       Install PACE's AAX code signing tools, or set LESSPA_WRAPTOOL." >&2
+        return 1
+    fi
+    if [[ -z "${LESSPA_PACE_ACCOUNT:-}" || -z "${LESSPA_PACE_WCGUID:-}" ]]; then
+        echo "error: LESSPA_PACE_ACCOUNT and LESSPA_PACE_WCGUID must be set," >&2
+        echo "       in the environment or in packaging/pace/pace.env." >&2
+        return 1
+    fi
+
+    "$LESSPA_WRAPTOOL" sign --verbose \
+        --account "$LESSPA_PACE_ACCOUNT" \
+        --wcguid "$LESSPA_PACE_WCGUID" \
+        --signid "$LESSPA_SIGN_IDENTITY" \
+        --dsigharden --allowsigningservice \
+        --in "$bundle" --out "$bundle"
+    "$LESSPA_WRAPTOOL" verify --verbose --in "$bundle"
+    codesign --verify --deep --strict --verbose=2 "$bundle"
+    echo "  PACE signed: $(basename "$bundle")"
 }
 
 # The one entry point the packaging scripts should call: leaves both bundles

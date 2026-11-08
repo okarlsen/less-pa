@@ -14,3 +14,8 @@ temp/
 *.csv
 
 .DS_Store
+
+# PACE AAX signing tools and documentation are confidential under the PACE
+# license agreement and this repo is public. Keep them out of git.
+packaging/pace/
+wraptool*
