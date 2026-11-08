@@ -3,7 +3,7 @@
 # Builds the Less PA macOS installer package: signed with a Developer ID,
 # notarized by Apple, and stapled.
 #
-# Produces packaging/build/Less-PA-<version>.pkg from an existing Release
+# Produces packaging/build/Less-PA-<version>-macOS.pkg from an existing Release
 # build in plugin/build (see BUILDING.md). One pkgbuild component per format
 # -- the AU, the VST3 and, when a signed one is present, the AAX -- is
 # combined with productbuild into a single installer.
@@ -241,7 +241,7 @@ cat > "$BUILD_DIR/distribution.xml" <<XML
 </installer-gui-script>
 XML
 
-FINAL_PKG="$BUILD_DIR/Less-PA-$VERSION.pkg"
+FINAL_PKG="$BUILD_DIR/Less-PA-$VERSION-macOS.pkg"
 
 # Only the final combined product is signed; the component packages above
 # are intermediates that get embedded into it, so signing them buys nothing.
