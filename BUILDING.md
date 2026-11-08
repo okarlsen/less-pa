@@ -243,7 +243,7 @@ With a completed Release build in place:
 ./packaging/build_installer.sh
 ```
 
-This writes `packaging/build/Less-PA-<version>.pkg`, containing the AU, the
+This writes `packaging/build/Less-PA-<version>-macOS.pkg`, containing the AU, the
 VST3 and (when a PACE-signed one is present) the AAX as separate components
 the user can tick or untick. They install system-wide, into
 `/Library/Audio/Plug-Ins` and `/Library/Application Support/Avid/Audio/Plug-Ins`,
@@ -257,7 +257,7 @@ with no Gatekeeper detour.
 ./packaging/build_zip.sh
 ```
 
-writes `packaging/build/Less-PA-<version>.zip` — the same two bundles for
+writes `packaging/build/Less-PA-<version>-macOS.zip` — the same two bundles for
 people who would rather copy them into place by hand. Because the bundles are
 stapled individually, they load with no quarantine-clearing step either.
 

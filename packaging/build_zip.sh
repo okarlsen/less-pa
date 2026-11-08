@@ -10,7 +10,7 @@
 # inside the .pkg are, so they load with no quarantine-clearing step and no
 # Gatekeeper prompt.
 #
-# Produces packaging/build/Less-PA-<version>.zip from an existing Release
+# Produces packaging/build/Less-PA-<version>-macOS.zip from an existing Release
 # build in plugin/build (see BUILDING.md).
 #
 # Requires the Developer ID Application certificate and a notarytool keychain
@@ -128,7 +128,7 @@ prompt, even offline.
 Questions or issues: https://github.com/okarlsen/less-pa
 TXT
 
-FINAL_ZIP="$BUILD_DIR/$FOLDER_NAME.zip"
+FINAL_ZIP="$BUILD_DIR/$FOLDER_NAME-macOS.zip"
 
 rm -f "$FINAL_ZIP"
 
