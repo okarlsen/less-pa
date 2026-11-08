@@ -84,7 +84,7 @@ jobs:
 
       - name: Keep test logs
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: windows-test-logs
           path: |
@@ -93,7 +93,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Keep zip
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: Less-PA-Windows-VST3
           path: packaging/build/Less-PA-*-Windows-VST3.zip
