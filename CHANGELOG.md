@@ -3,6 +3,29 @@
 All notable changes to Less PA are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.8]
+
+### Changed
+
+- Lower CPU peaks at small buffers. At a 64-sample buffer the PA
+  Canceller's learning step used to run in every other callback, so DAW
+  meters showed twice the average load. It is now spread evenly over the
+  callbacks. The output is bit-identical at any buffer size.
+- No start-up CPU cost while there is no PA: with the sidechain set to
+  None, copying the mic, or silent, the extra start-up work no longer
+  runs forever.
+- The PA delay readout is steadier. It holds the shown value until the
+  estimate moves by more than 1 ms, so a path between two whole ms (e.g.
+  3.8 ms) no longer flickers between 3 and 5 ms. Real moves, such as a
+  farther speaker taking over, still show. Display only.
+- JUCE 9.0.0 -> 9.0.5: hardening against damaged or crafted session data
+  (String and ValueTree), and Windows fixes for mouse input with mixed
+  display scaling and dragging between monitors.
+
+### Unchanged
+
+- Latency: 192 samples at 44.1/48 kHz, 320 at 88.2 kHz and above.
+
 ## [1.1.7]
 
 ### Added
